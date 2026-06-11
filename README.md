@@ -47,8 +47,7 @@ loop without breaking things.
   planner uses beam search with a hot path implemented in **native C++** behind a
   ctypes wrapper. See [Optimization engine](#optimization-engine).
 
-This is a personal agent I actually use to run the game as a production task — not a
-Hello World. It started as a CLI optimizer and grew a GUI and then an MCP server as
+This is a personal agent I actually use to run the game as a production task. It started as a CLI optimizer and grew a GUI and then an MCP server as
 the workflow got more autonomous (see `CHANGELOG.md` / git history).
 
 ---
