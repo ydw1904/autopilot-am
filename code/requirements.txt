@@ -1,0 +1,24 @@
+# Airlines Manager — Python dependencies
+#
+# Install into the project venv:
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r code/requirements.txt
+#
+# These cover both the MCP server (mcp_server.py) and every CLI script it
+# shells out to (circuit_planner, aircraft_buyer, circuit_scheduler, etc.).
+
+# MCP server framework + transport
+mcp>=1.27.2
+
+# Chrome DevTools Protocol transport (used by every CDP script)
+httpx>=0.28.1
+websocket-client>=1.9.0
+
+# Planner / pricing math
+numpy>=2.4.0
+
+# Terminal colors (circuit_scheduler and friends)
+colorama>=0.4.6
+
+# GUI only (gui_app.py); the MCP server and CLI scripts do not need it
+nicegui>=2.0
