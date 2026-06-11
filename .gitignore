@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Native build artifacts (rebuild with code/native/build.sh)
+*.dylib
+*.so
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# SQLite databases (local data)
+db/*.db
+**/*.db
+
+# Scraped / generated data
+data/
+
+# Log files
+*.log
+
+# Debug / one-off scripts at repo root
+debug_*.py
+reconfig_*.html
+
+# Chrome user profile
+.am-chrome/
+
+# IDE / local agent state
+.vscode/
+.idea/
+.claude/
+*.swp
+
+# Internal-only docs (kept local, not published)
+CHANGELOG.md
+
+# macOS / sync conflict clutter
+.sync-conflict-*
+
+# Session logs
+*.txt
+!code/requirements.txt
