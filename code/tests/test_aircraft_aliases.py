@@ -120,6 +120,20 @@ class AircraftAliasesTest(unittest.TestCase):
         self.assertIsNone(aa.canonical("747", db_path=self.db_path))  # ambiguous -> None
         self.assertIsNone(aa.canonical("ZZZ999", db_path=self.db_path))
 
+    def test_catalog(self):
+        cat = aa.catalog(db_path=self.db_path)
+        self.assertEqual(len(cat), len(FIXTURE_ROWS))
+        by_model = {c["model"]: c for c in cat}
+        # ICAO appears as an alias when it differs from the model.
+        self.assertIn("A388", by_model["A380-800"]["aliases"])
+        # A320-200's ICAO is "A320" -> distinct from model, so listed.
+        self.assertIn("A320", by_model["A320-200"]["aliases"])
+        # Every entry carries model + icao keys.
+        for c in cat:
+            self.assertIn("model", c)
+            self.assertIn("icao", c)
+            self.assertIn("aliases", c)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,7 +43,10 @@ from cdp import CDP, get_am_tab, BASE_URL  # noqa: E402
 from db import DB as DB_PATH, get_player_hub_id, mark_route_owned  # noqa: E402
 from circuit_scheduler import get_lines_at_hub  # noqa: E402
 from aircraft_buyer import get_balance as read_balance  # noqa: E402
-from aircraft_aliases import resolve as resolve_aircraft_name  # noqa: E402
+from aircraft_aliases import (  # noqa: E402
+    resolve as resolve_aircraft_name,
+    catalog as aircraft_catalog_data,
+)
 from circuit_route_buyer import (  # noqa: E402
     wait_for_listing, find_country_card, finalize_purchase,
 )
@@ -502,6 +505,17 @@ def resolve_aircraft(query: str) -> dict:
     return asdict(resolve_aircraft_name(query))
 
 
+@mcp.resource("aircraft://catalog")
+def aircraft_catalog() -> str:
+    """Full catalog of aircraft: canonical model, ICAO code, and known aliases.
+
+    Read this once to self-serve aircraft names instead of guessing or scanning the
+    DB. JSON list of {model, icao, aliases}. Bare family names ('747', 'A380') are
+    handled by the resolve_aircraft tool, not listed here.
+    """
+    return json.dumps(aircraft_catalog_data(), indent=2)
+
+
 @mcp.tool()
 def list_aircraft_for_sale(haul: str = "long") -> dict:
     """List aircraft available for purchase.
@@ -815,8 +829,9 @@ def buy_aircraft(
 
     Safety default: dry_run=True because this spends in-game money.
     Use either circuit mode or standalone model+hub mode. The 'model' arg accepts
-    any spelling (alias/ICAO/colloquial, e.g. 'A380'); call resolve_aircraft first if
-    a name might be ambiguous.
+    any spelling (alias/ICAO/colloquial, e.g. 'A380') and is normalized before
+    buying; an ambiguous name returns 'candidates' and an unknown one returns
+    'suggestions' immediately, without spending money.
     """
     if list_only:
         return _run_python_script("aircraft_buyer.py", ["--list"], timeout=180)
@@ -825,6 +840,18 @@ def buy_aircraft(
         return {"error": "Provide either circuit='HKG-C001' or model='B742'."}
     if model and not circuit and not hub:
         return {"error": "Standalone aircraft purchase requires hub='HKG'-style input."}
+
+    # Pre-flight: normalize the model so 'A380' just works, and fail fast — before the
+    # ~900s purchase run — on an ambiguous or unknown name instead of deep in the script.
+    if model:
+        res = resolve_aircraft_name(model)
+        if res.status == "ambiguous":
+            return {"error": f"Aircraft '{model}' is ambiguous; pick one model and retry.",
+                    "candidates": res.candidates}
+        if res.status == "not_found":
+            return {"error": f"Unknown aircraft '{model}'.",
+                    "suggestions": res.suggestions}
+        model = res.model
 
     args = []
     if circuit:

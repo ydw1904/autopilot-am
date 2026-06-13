@@ -134,3 +134,26 @@ def canonical(query: str, db_path: str | None = None) -> str | None:
     """Convenience: canonical model string on a unique hit, else None."""
     r = resolve(query, db_path)
     return r.model if r.status == "ok" else None
+
+
+def catalog(db_path: str | None = None) -> list[dict]:
+    """Every aircraft as {model, icao, aliases} — for the MCP catalog resource.
+
+    'aliases' lists the extra spellings that map to the model (its ICAO code and any
+    curated overlay names). Bare family prefixes ('747', 'A380') are not enumerated
+    here since they're handled generically by resolve().
+    """
+    idx = _index(db_path)
+    overlay_rev: dict[str, list[str]] = {}
+    for alias, target in _OVERLAY.items():
+        overlay_rev.setdefault(target, []).append(alias.upper())
+
+    out = []
+    for model in sorted(idx.model_to_icao):
+        icao = idx.model_to_icao[model]
+        aliases = []
+        if icao and _norm(icao) != _norm(model):
+            aliases.append(icao)
+        aliases.extend(overlay_rev.get(model, []))
+        out.append({"model": model, "icao": icao, "aliases": aliases})
+    return out
