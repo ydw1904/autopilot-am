@@ -34,13 +34,7 @@ except ImportError:
     _HAS_NATIVE = False
 
 from db import DB
-
-ALIASES = {
-    "B722": "727-200",
-    "B741": "747-100B", "B742": "747-200B", "B743": "747-300",
-    "B744": "747-400", "B748": "747-8I", "B74S": "747-SP",
-    "A388": "A380-800", "IL96": "Il-96-300",
-}
+from aircraft_aliases import resolve as resolve_aircraft
 
 
 def flight_time_rt(distance_km, speed_kmh):
@@ -48,7 +42,8 @@ def flight_time_rt(distance_km, speed_kmh):
 
 
 def load_aircraft(db, name):
-    resolved = ALIASES.get(name.upper(), name)
+    r = resolve_aircraft(name)
+    resolved = r.model if r.status == "ok" else name  # keep LIKE fallback for partials
     row = db.execute(
         "SELECT model, category, speed_kmh, range_km, max_pax, max_tonnage, gross_price "
         "FROM aircraft WHERE model=? OR model LIKE ?",

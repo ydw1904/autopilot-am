@@ -33,6 +33,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import asdict
 from typing import List, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
@@ -42,6 +43,7 @@ from cdp import CDP, get_am_tab, BASE_URL  # noqa: E402
 from db import DB as DB_PATH, get_player_hub_id, mark_route_owned  # noqa: E402
 from circuit_scheduler import get_lines_at_hub  # noqa: E402
 from aircraft_buyer import get_balance as read_balance  # noqa: E402
+from aircraft_aliases import resolve as resolve_aircraft_name  # noqa: E402
 from circuit_route_buyer import (  # noqa: E402
     wait_for_listing, find_country_card, finalize_purchase,
 )
@@ -57,7 +59,10 @@ mcp = FastMCP(
     instructions=(
         "Tools for controlling Airlines Manager (airlines-manager.com) via Chrome CDP. "
         "Chrome must be running with --remote-debugging-port=9222 and an AM tab must be open. "
-        "All operations use the game's session cookies from the active Chrome tab."
+        "All operations use the game's session cookies from the active Chrome tab. "
+        "Tools that take an aircraft 'model' accept any spelling (e.g. 'A380', 'A388', "
+        "'A380-800'); use resolve_aircraft to normalize a name or disambiguate when "
+        "several models match."
     ),
 )
 
@@ -479,6 +484,25 @@ def buy_route(
 
 
 @mcp.tool()
+def resolve_aircraft(query: str) -> dict:
+    """Resolve an aircraft name/alias/ICAO/colloquial spelling to its canonical model.
+
+    Lets you turn any spelling the user types ('A380', 'A388', 'A380-800', 'a380 800')
+    into the exact model string the other tools expect, without scanning the database.
+
+    Args:
+        query: Any aircraft name, ICAO code, or partial/family name.
+
+    Returns:
+        dict with 'status' ('ok' | 'ambiguous' | 'not_found') and:
+          - ok: 'model' (canonical) and 'icao'.
+          - ambiguous: 'candidates' (list of {model, icao}); pass one 'model' back.
+          - not_found: 'suggestions' (nearest {model, icao} matches).
+    """
+    return asdict(resolve_aircraft_name(query))
+
+
+@mcp.tool()
 def list_aircraft_for_sale(haul: str = "long") -> dict:
     """List aircraft available for purchase.
 
@@ -790,7 +814,9 @@ def buy_aircraft(
     """Run the aircraft buyer script.
 
     Safety default: dry_run=True because this spends in-game money.
-    Use either circuit mode or standalone model+hub mode.
+    Use either circuit mode or standalone model+hub mode. The 'model' arg accepts
+    any spelling (alias/ICAO/colloquial, e.g. 'A380'); call resolve_aircraft first if
+    a name might be ambiguous.
     """
     if list_only:
         return _run_python_script("aircraft_buyer.py", ["--list"], timeout=180)

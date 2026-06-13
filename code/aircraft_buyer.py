@@ -41,13 +41,7 @@ import argparse, json, math, re, sqlite3, sys, time
 
 from cdp import CDP, get_am_tab, connect_cdp, BASE_URL  # noqa: F401
 from db import DB
-
-ALIASES = {
-    "B722": "727-200",
-    "B741": "747-100B", "B742": "747-200B", "B743": "747-300",
-    "B744": "747-400", "B748": "747-8I", "B74S": "747-SP",
-    "A388": "A380-800", "IL96": "Il-96-300",
-}
+from aircraft_aliases import resolve as resolve_aircraft
 
 AIRCRAFT_GAME_IDS = {
     "747-200B": 114, "777-200": 148, "777-300": 149, "747-400": 153,
@@ -67,10 +61,13 @@ PER_PURCHASE_LIMIT = 99
 
 
 def resolve_model(name):
-    """Resolve alias or model name to full model name."""
-    if name in ALIASES:
-        return ALIASES[name]
-    return name
+    """Resolve an alias/ICAO/colloquial name to the full model name.
+
+    Returns the canonical model on a unique hit; otherwise returns the raw
+    input unchanged so the existing "not found in aircraft table" path fires.
+    """
+    r = resolve_aircraft(name)
+    return r.model if r.status == "ok" else name
 
 
 def get_balance(cdp):
