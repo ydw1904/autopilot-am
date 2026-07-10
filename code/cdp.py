@@ -120,6 +120,27 @@ class CDP:
     def wait(self, seconds):
         time.sleep(seconds)
 
+    def navigate_and_wait(self, url, ready_expr, timeout=15.0, interval=0.3):
+        """Navigate, then poll ready_expr (JS) until truthy. Returns the
+        expression's final value (truthy) or None on timeout."""
+        self.navigate(url)
+        val = wait_for_js(self, ready_expr, timeout=timeout, interval=interval)
+        if val and not isinstance(val, dict):
+            return val
+        return None
+
+
+def wait_for_js(cdp, expression, timeout=15.0, interval=0.5):
+    """Poll a JS expression until it returns a truthy non-error value."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = cdp.eval(expression)
+        if last and not isinstance(last, dict):
+            return last
+        time.sleep(interval)
+    return last
+
 
 def get_am_tab():
     """Find an existing Airlines Manager tab via the CDP HTTP endpoint."""

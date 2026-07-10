@@ -22,7 +22,7 @@ Requirements: Chrome with --remote-debugging-port=9222 and a logged-in AM tab.
 import argparse, json, os, re, sys, time
 from urllib.parse import quote
 
-from cdp import CDP, get_am_tab  # noqa: E402
+from cdp import CDP, get_am_tab, wait_for_js  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import get_db  # noqa: E402
@@ -222,10 +222,7 @@ def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
 
     Returns (status_code, message)."""
     target_url = f"https://www.airlines-manager.com/aircraft/show/{aircraft_id}/reconfigure"
-    cdp.navigate(target_url)
-    time.sleep(4)
-
-    if not cdp.eval("!!document.getElementById('sliderEco')"):
+    if not cdp.navigate_and_wait(target_url, "!!document.getElementById('sliderEco')"):
         return 500, "page_did_not_load"
 
     state = cdp.eval(
@@ -268,9 +265,15 @@ def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
     cdp.eval("window.onbeforeunload = null; $(window).off('beforeunload');")
     cdp.eval("document.getElementById('showEquipment').submit()")
 
-    time.sleep(4)
-    cdp.navigate(target_url)
-    time.sleep(3)
+    # Wait for the submit navigation to land (result page has no form) before
+    # re-navigating, so the reconfigure POST isn't cancelled mid-flight.
+    wait_for_js(
+        cdp,
+        "document.readyState === 'complete' && !document.getElementById('showEquipment')",
+        timeout=15.0,
+    )
+    if not cdp.navigate_and_wait(target_url, "!!document.getElementById('sliderEco')"):
+        return 500, "page_did_not_load_after_submit"
     vals_raw = cdp.eval(
         "JSON.stringify({"
         " eco: $(document.getElementById('sliderEco')).slider('value'),"

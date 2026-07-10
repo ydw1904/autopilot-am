@@ -5,21 +5,9 @@ server, the CLI scripts, and the GUI. Imports only from cdp.py and does not
 print — callers report progress/errors from the returned values.
 """
 
-import time
-
-from cdp import BASE_URL
-
-
-def wait_for_js(cdp, expression, timeout=15.0, interval=0.5):
-    """Poll a JS expression until it returns a truthy non-error value."""
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        last = cdp.eval(expression)
-        if last and not isinstance(last, dict):
-            return last
-        time.sleep(interval)
-    return last
+# wait_for_js is re-exported here — it predates cdp.wait_for_js and callers
+# import it from this module.
+from cdp import BASE_URL, wait_for_js  # noqa: F401
 
 
 def navigate_to_planning(cdp):
@@ -62,9 +50,16 @@ def select_hub(cdp, hub_iata):
     if not result or not result.get("found"):
         return False
 
+    # The click handler shows a .loadingWheel synchronously and hides it only
+    # after the AJAX swaps in the new hub's lists — waiting on list contents
+    # alone returns early on the previous hub's still-visible items.
     loaded = wait_for_js(
         cdp,
         """((() => {
+            const wheels = document.querySelectorAll('#aircraftList .loadingWheel, #lineList .loadingWheel');
+            for (const w of wheels) {
+                if (!w.classList.contains('hidden')) return false;
+            }
             const hasAircraft = document.querySelectorAll('#aircraftList .aircraftListMiniBox').length;
             const hasLines = document.querySelectorAll('#lineList .lineList').length;
             return hasAircraft || hasLines || false;

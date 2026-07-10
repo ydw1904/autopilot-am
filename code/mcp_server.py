@@ -273,8 +273,12 @@ def list_hubs() -> dict:
     if not cdp:
         return {"error": "No Airlines Manager tab found."}
 
-    cdp.navigate(f"{BASE_URL}/network/newline")
-    time.sleep(4)
+    loaded = cdp.navigate_and_wait(
+        f"{BASE_URL}/network/newline",
+        "document.querySelectorAll('.hubListBox[data-hubid]').length",
+    )
+    if not loaded:
+        return {"error": "Could not read hubs. Are you on the network page?", "hubs": []}
 
     hubs = cdp.eval_json("""((() => {
         const boxes = document.querySelectorAll('.hubListBox[data-hubid]');
@@ -371,8 +375,10 @@ def buy_route(
     if not hub_id:
         hub_id = _lookup_player_hub_id(hub_iata)
     if not hub_id:
-        cdp.navigate(f"{BASE_URL}/network/newline")
-        time.sleep(4)
+        cdp.navigate_and_wait(
+            f"{BASE_URL}/network/newline",
+            "document.querySelectorAll('.hubListBox[data-hubid]').length",
+        )
         hub_id = cdp.eval(f"""((() => {{
             const boxes = document.querySelectorAll('.hubListBox[data-hubid]');
             for (const b of boxes) {{
@@ -417,9 +423,7 @@ def buy_route(
     else:
         target = f"{BASE_URL}/network/newlinefinalize/{hub_id}/{dest_iata.lower()}"
         if dry_run:
-            cdp.navigate(target)
-            time.sleep(3)
-            if not cdp.eval('!!document.getElementById("linePurchaseForm")'):
+            if not cdp.navigate_and_wait(target, "!!document.getElementById('linePurchaseForm')"):
                 return {"error": f"Route {hub_iata}->{dest_iata} is not available for purchase.",
                         "hub_iata": hub_iata, "dest_iata": dest_iata, "hub_id": hub_id}
             return {"success": False, "dry_run": True, "flow": "direct",
@@ -650,8 +654,7 @@ def navigate_to(path: str) -> dict:
         path = "/" + path
 
     url = f"{BASE_URL}{path}"
-    cdp.navigate(url)
-    time.sleep(3)
+    cdp.navigate_and_wait(url, "document.readyState === 'complete'")
 
     actual_url = cdp.eval("window.location.href")
     return {"navigated_to": actual_url, "requested": url}

@@ -30,7 +30,7 @@ Requirements: Chrome with --remote-debugging-port=9222 --remote-allow-origins=*
 import argparse, json, os, re, sqlite3, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdp import CDP, get_am_tab, connect_cdp, BASE_URL
+from cdp import CDP, get_am_tab, connect_cdp, wait_for_js, BASE_URL
 from db import DB
 from aircraft_buyer import get_balance  # noqa: E402
 from db import mark_route_owned  # noqa: E402
@@ -205,16 +205,20 @@ def finalize_purchase(cdp, url):
     Uses form.submit() instead of fetch() — the game server silently
     rejects fetch()-based POSTs (returns 200 but doesn't apply the purchase).
     """
-    cdp.navigate(url)
-    time.sleep(3)
-    form_exists = cdp.eval('!!document.getElementById("linePurchaseForm")')
+    form_exists = cdp.navigate_and_wait(url, '!!document.getElementById("linePurchaseForm")')
     if not form_exists:
         return False, "no_form"
     page_text = (cdp.eval('document.body.innerText') or '').lower()
     if 'successfully added' in page_text:
         return True, "already_purchased"
     cdp.eval('window.onbeforeunload = null; $(window).off("beforeunload"); document.getElementById("linePurchaseForm").submit()')
-    time.sleep(4)
+    # Wait for the submit navigation to land: the result page has no purchase
+    # form. A rejected purchase redisplays the form, so time that out.
+    wait_for_js(
+        cdp,
+        'document.readyState === "complete" && !document.getElementById("linePurchaseForm")',
+        timeout=15.0,
+    )
     final_url = (cdp.eval('window.location.href') or '').lower()
     final_text = (cdp.eval('document.body.innerText') or '').lower()
     if 'successfully added' in final_text:
