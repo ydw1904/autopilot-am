@@ -19,9 +19,9 @@ from colorama import init, Fore, Style
 init(autoreset=True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdp import CDP, get_am_tab, BASE_URL
+from cdp import CDP, get_am_tab
 from db import DB, upsert_fleet
-from circuit_scheduler import select_hub, get_aircraft_at_hub
+from planning_page import navigate_to_planning, select_hub, get_aircraft_at_hub
 
 
 
@@ -75,17 +75,8 @@ def main():
     cdp.connect()
     try:
         print(f"{Fore.CYAN}Navigating to planning page...")
-        cdp.navigate(f"{BASE_URL}/network/planning")
-        cdp.wait(4)
-
-        for attempt in range(15):
-            count = cdp.eval(
-                "document.querySelectorAll('#aircraftList .aircraftListMiniBox').length || 0"
-            )
-            if count and count > 0:
-                print(f"  Page loaded ({count} aircraft visible)")
-                break
-            cdp.wait(1)
+        if not navigate_to_planning(cdp):
+            print(f"  {Fore.YELLOW}Page loaded but no aircraft list found")
 
         if args.hub:
             hubs = [args.hub.upper()]

@@ -41,7 +41,13 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL  # noqa: E402
 from db import DB as DB_PATH, get_player_hub_id, mark_route_owned  # noqa: E402
-from circuit_scheduler import get_lines_at_hub  # noqa: E402
+from planning_page import (  # noqa: E402
+    wait_for_js as _wait_for_js,
+    wait_for_hub_buttons as _wait_for_hub_buttons,
+    select_hub as _select_planning_hub,
+    get_aircraft_at_hub as _get_planning_aircraft,
+    get_lines_at_hub,
+)
 from aircraft_buyer import get_balance as read_balance  # noqa: E402
 from aircraft_aliases import (  # noqa: E402
     resolve as resolve_aircraft_name,
@@ -187,48 +193,6 @@ def _get_cdp():
     return _cdp
 
 
-def _wait_for_js(cdp, expression: str, timeout: float = 15.0, interval: float = 0.5):
-    """Poll a JS expression until it returns a truthy non-error value."""
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        last = cdp.eval(expression)
-        if last and not isinstance(last, dict):
-            return last
-        time.sleep(interval)
-    return last
-
-
-def _select_planning_hub(cdp, hub_iata: str) -> bool:
-    """Select a hub on /network/planning by its IATA code."""
-    hub_iata = hub_iata.upper().strip()
-    result = cdp.eval_json(f"""((() => {{
-        const btns = document.querySelectorAll('.planninghubBtn');
-        for (const btn of btns) {{
-            const txt = (btn.textContent || '').trim();
-            if (txt.startsWith('{hub_iata} /') || txt.startsWith('{hub_iata}/')) {{
-                btn.click();
-                return {{found: true, id: btn.id, text: txt}};
-            }}
-        }}
-        return {{found: false, count: btns.length}};
-    }})())""")
-    if not result or not result.get("found"):
-        return False
-
-    loaded = _wait_for_js(
-        cdp,
-        """((() => {
-            const hasAircraft = document.querySelectorAll('#aircraftList .aircraftListMiniBox').length;
-            const hasLines = document.querySelectorAll('#lineList .lineList').length;
-            return hasAircraft || hasLines || false;
-        })())""",
-        timeout=15.0,
-        interval=0.5,
-    )
-    return bool(loaded)
-
-
 def _get_lines_at_selected_hub(cdp):
     """Owned lines at the selected planning hub, remapped to MCP output keys."""
     return [
@@ -239,20 +203,12 @@ def _get_lines_at_selected_hub(cdp):
 
 
 def _get_aircraft_at_selected_hub(cdp):
-    """Return aircraft at the currently selected planning hub."""
-    aircraft = cdp.eval_json("""((() => {
-        return Array.from(document.querySelectorAll('#aircraftList .aircraftListMiniBox')).map(el => {
-            const utilEl = el.querySelector('.content .listBox1 > b');
-            const utilStr = utilEl ? utilEl.textContent.trim().replace('%', '') : '0';
-            return {
-                aircraft_id: el.id.replace('aircraftId_', ''),
-                model: el.querySelector('.title img')?.src?.split('/').pop()?.replace('.png', '') || '?',
-                name: el.querySelector('.title .bold')?.textContent?.trim() || '',
-                utilization_pct: parseFloat(utilStr) || 0
-            };
-        });
-    })())""")
-    return aircraft or []
+    """Aircraft at the selected planning hub, remapped to MCP output keys."""
+    return [
+        {"aircraft_id": str(a["id"]), "model": a.get("model") or "?",
+         "name": a.get("name") or "", "utilization_pct": a.get("util", 0)}
+        for a in _get_planning_aircraft(cdp)
+    ]
 
 
 # ── Route purchase helpers (ported from circuit_route_buyer.py) ─────────────
@@ -354,7 +310,7 @@ def list_routes(hub_iata: str) -> dict:
 
     hub_iata = hub_iata.upper().strip()
     cdp.navigate(f"{BASE_URL}/network/planning")
-    if not _wait_for_js(cdp, "document.querySelectorAll('.planninghubBtn').length", timeout=15.0):
+    if not _wait_for_hub_buttons(cdp, timeout=15.0):
         return {"error": "Planning page did not load hub selector.", "hub_iata": hub_iata, "routes": []}
     if not _select_planning_hub(cdp, hub_iata):
         return {"error": f"Could not select hub {hub_iata} on the planning page.", "hub_iata": hub_iata, "routes": []}
@@ -575,7 +531,7 @@ def get_aircraft_at_hub(hub_iata: str) -> dict:
 
     hub_iata = hub_iata.upper().strip()
     cdp.navigate(f"{BASE_URL}/network/planning")
-    if not _wait_for_js(cdp, "document.querySelectorAll('.planninghubBtn').length", timeout=15.0):
+    if not _wait_for_hub_buttons(cdp, timeout=15.0):
         return {"error": "Planning page did not load hub selector.", "hub_iata": hub_iata, "aircraft": []}
     if not _select_planning_hub(cdp, hub_iata):
         return {"error": f"Could not select hub {hub_iata} on the planning page.", "hub_iata": hub_iata, "aircraft": []}

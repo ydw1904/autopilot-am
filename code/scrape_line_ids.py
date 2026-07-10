@@ -18,7 +18,7 @@ import argparse, os, sqlite3, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL
 from db import DB, load_player_hubs
-from circuit_scheduler import navigate_to_planning, select_hub, get_lines_at_hub
+from planning_page import navigate_to_planning, select_hub, get_lines_at_hub
 
 
 

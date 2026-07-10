@@ -29,6 +29,11 @@ from colorama import init, Fore, Style
 
 from cdp import CDP, get_am_tab, connect_cdp, BASE_URL  # noqa: F401
 from db import DB
+# Re-exported for callers that import these through circuit_scheduler
+# (gui/warehouse.py etc.).
+from planning_page import (  # noqa: F401
+    navigate_to_planning, select_hub, get_aircraft_at_hub, get_lines_at_hub,
+)
 
 init(autoreset=True)
 
@@ -63,107 +68,6 @@ def _write_line_ids_to_db(hub_iata, hub_lines, db):
                 (lid, hub_iata.upper(), dest)
             )
     db.commit()
-
-
-# ── Planning page helpers ─────────────────────────────────────────────────
-
-def navigate_to_planning(cdp):
-    """Navigate to /network/planning and wait for the page to fully load."""
-    print(f"{Fore.CYAN}Navigating to planning page...")
-    cdp.navigate(f"{BASE_URL}/network/planning")
-    cdp.wait(4)
-
-    # Wait for the aircraft list to populate
-    for attempt in range(15):
-        count = cdp.eval(
-            "document.querySelectorAll('#aircraftList .aircraftListMiniBox').length || 0"
-        )
-        if count and count > 0:
-            print(f"  Planning page loaded ({count} aircraft visible)")
-            return True
-        print(f"  Waiting for page load... ({attempt + 1}/15)")
-        cdp.wait(1)
-
-    print(f"  {Fore.YELLOW}Page loaded but no aircraft list found")
-    return False
-
-
-def select_hub(cdp, hub_iata):
-    """Click the .planninghubBtn whose text starts with '<IATA> /'."""
-    print(f"{Fore.CYAN}Selecting hub {hub_iata}...")
-    result = cdp.eval_json(f"""(() => {{
-        const btns = document.querySelectorAll('.planninghubBtn');
-        for (const btn of btns) {{
-            const txt = btn.textContent.trim();
-            if (txt.startsWith('{hub_iata} /') || txt.startsWith('{hub_iata}/')) {{
-                btn.click();
-                return {{found: true, id: btn.id, text: txt.replace(/\\s+/g, ' ').slice(0, 60)}};
-            }}
-        }}
-        return {{found: false, count: btns.length}};
-    }})()""")
-    if result and result.get("found"):
-        print(f"  Hub selected: {result.get('text')} ({result.get('id')})")
-        cdp.wait(3)  # AJAX reloads aircraft + lines
-        return True
-    print(f"  {Fore.RED}Could not find hub {hub_iata} (saw {result.get('count', 0)} hub buttons)")
-    return False
-
-
-def get_aircraft_at_hub(cdp):
-    """
-    Extract all aircraft at the currently selected hub from the planning page.
-
-    Returns list of dicts: [{id: int, name: str, model: str}, ...]
-    The `id` is the game's aircraftId (from aircraftId_XXXXXXX).
-    """
-    data = cdp.eval_json("""(() => {
-        const result = [];
-        const boxes = document.querySelectorAll('#aircraftList .aircraftListMiniBox');
-        for (const box of boxes) {
-            const idMatch = box.id && box.id.match(/aircraftId_(\\d+)/);
-            if (!idMatch) continue;
-            const id = parseInt(idMatch[1]);
-            const boldEl = box.querySelector('.title .bold');
-            const raw = boldEl ? boldEl.textContent.trim() : '';
-            const model = raw.split('/')[0].trim();
-            // Utilization: "<N>%" in .content .listBox1 > b. 0% = empty schedule.
-            const utilEl = box.querySelector('.content .listBox1 > b');
-            const utilStr = utilEl ? utilEl.textContent.trim().replace('%','') : '0';
-            const util = parseFloat(utilStr) || 0;
-            result.push({id, name: raw, model, util});
-        }
-        return result;
-    })()""")
-    return data or []
-
-
-def get_lines_at_hub(cdp):
-    """
-    Extract all lines (routes) at the currently selected hub.
-
-    Returns list of dicts: [{lineId: int, name: str, dest: str}, ...]
-    """
-    data = cdp.eval_json("""(() => {
-        const result = [];
-        const items = document.querySelectorAll('#lineList .lineList');
-        for (const item of items) {
-            const idEl = item.querySelector('.lineId');
-            if (!idEl) continue;
-            const lineId = parseInt(idEl.textContent.trim());
-            if (!lineId || isNaN(lineId)) continue;
-            // Strip the hidden lineId text from the display name.
-            // Remaining text looks like "HND / KEF - 21h30".
-            const fullText = item.textContent.trim();
-            const display = fullText.replace(idEl.textContent.trim(), '').trim();
-            // Dest IATA = the second 3-letter code (first is hub).
-            const codes = display.match(/[A-Z]{3}/g) || [];
-            const dest = codes.length >= 2 ? codes[1] : (codes[0] || '');
-            result.push({lineId, name: display, dest});
-        }
-        return result;
-    })()""")
-    return data or []
 
 
 # ── Schedule API helpers ──────────────────────────────────────────────────
@@ -547,10 +451,12 @@ def main():
     cdp = connect_cdp()
 
     # Step 1: Navigate to planning page
+    print(f"{Fore.CYAN}Navigating to planning page...")
     if not navigate_to_planning(cdp):
         print(f"{Fore.YELLOW}Planning page may not have loaded fully, continuing...")
 
     # Step 2: Select hub
+    print(f"{Fore.CYAN}Selecting hub {hub_iata}...")
     if not select_hub(cdp, hub_iata):
         print(f"{Fore.RED}ERROR: Cannot select hub {hub_iata}", file=sys.stderr)
         cdp.close()
