@@ -169,30 +169,27 @@ def quick_revenue_estimate(routes_list, ac, comfort, speed, max_waves=20,
             return 0
         if eco * 1.0 + bus * 1.8 + fir * 4.2 > max_pax:
             return 0
-        # Size waves to fill ECONOMY demand only. Eco is the highest-volume
-        # class with best revenue/seat-cost in this game; bus/fir/cargo are
-        # by-products of the same aircraft and their leftover demand is
-        # acceptable. Optimising wave count for all classes pushes wave counts
-        # very high to chase a tiny FIR/BUS demand for marginal gain — bad ROI.
-        wl = []
+        # Waves = bottleneck across every route/class that has seats, so
+        # capacity never exceeds demand (eco strict; bus/fir/cargo may
+        # oversupply by `tol`). Routes whose demand sits above the bottleneck
+        # sell cap < demand at the raised SuperSim price, which recovers only
+        # ⅓ of the shortfall — that lost revenue is the demand-mismatch
+        # penalty this score exists to apply.
         tol = 1.0 + max(0.0, overshoot_pct)
-        if eco > 0:
-            for r in routes_list:
-                d = r["eco_d"]
+        mw_f = float(max_waves)
+        for r in routes_list:
+            for s, dk, strict in [(eco, "eco_d", True), (bus, "bus_d", False),
+                                  (fir, "fir_d", False), (cargo, "cargo_d", False)]:
+                if s <= 0:
+                    continue
+                d = r[dk]
                 if d <= 0:
                     return 0
-                wl.append(d / (2 * eco))
-        else:
-            # No eco seats: fall back to bottleneck across whichever classes exist.
-            for r in routes_list:
-                for s, dk in [(bus, "bus_d"), (fir, "fir_d"), (cargo, "cargo_d")]:
-                    if s <= 0: continue
-                    d = r[dk]
-                    if d <= 0: return 0
-                    wl.append(d * tol / (2 * s))
-        if not wl:
-            return 0
-        mw = min(int(math.ceil(max(wl))), max_waves)
+                allowed = d if strict else d * tol
+                wl = allowed / (2 * s)
+                if wl < mw_f:
+                    mw_f = wl
+        mw = int(math.floor(mw_f))
         if mw < 1:
             return 0
         rev = 0
@@ -224,112 +221,113 @@ def quick_revenue_estimate(routes_list, ac, comfort, speed, max_waves=20,
     return best_rev
 
 
+# Array-based scorer shared by the Python beam search. Plain Python by
+# default; JIT-compiled below when numba is installed (same semantics,
+# and identical to eval_config in native/beam_search.cpp — keep in lockstep).
+def _eval_cfg_nb(eco, bus, fir, cargo, demands, prices,
+                 max_pax, max_ton, max_waves, overshoot_pct):
+    if eco + bus + fir + cargo == 0:
+        return 0.0
+    if eco * 0.1 + bus * 0.125 + fir * 0.15 + cargo * 1.0 > max_ton:
+        return 0.0
+    if eco * 1.0 + bus * 1.8 + fir * 4.2 > max_pax:
+        return 0.0
+    R = demands.shape[0]
+    seats0, seats1, seats2, seats3 = eco, bus, fir, cargo
+    mw_f = float(max_waves)
+    tol = 1.0 + overshoot_pct if overshoot_pct > 0.0 else 1.0
+    for r in range(R):
+        for c in range(4):
+            if c == 0: s = seats0
+            elif c == 1: s = seats1
+            elif c == 2: s = seats2
+            else: s = seats3
+            if s <= 0:
+                continue
+            d = demands[r, c]
+            if d <= 0:
+                return 0.0
+            # Eco (c=0) strict; bus/fir/cargo allow overshoot
+            allowed = d if c == 0 else d * tol
+            wl = allowed / (2.0 * s)
+            if wl < mw_f:
+                mw_f = wl
+    mw = int(math.floor(mw_f))
+    if mw < 1:
+        return 0.0
+    rev = 0.0
+    for r in range(R):
+        for c in range(4):
+            if c == 0: s = seats0
+            elif c == 1: s = seats1
+            elif c == 2: s = seats2
+            else: s = seats3
+            if s <= 0:
+                continue
+            d = demands[r, c]
+            p = prices[r, c]
+            cap = 2.0 * s * mw
+            if p == 0.0 or d == 0.0 or cap <= 0.0:
+                continue
+            if cap < d:
+                ss = math.floor(p * (1.0 - (cap - d) / (3.0 * d)))
+            else:
+                ss = p
+            filled = d if d < cap else cap
+            rev += filled * ss
+    return rev
+
+
+def _quick_revenue_estimate_nb(demands, prices, max_pax, max_ton,
+                               max_waves, overshoot_pct):
+    R = demands.shape[0]
+    if R == 0:
+        return 0.0
+    min_eco = demands[0, 0]
+    min_bus = demands[0, 1]
+    min_fir = demands[0, 2]
+    min_cargo = demands[0, 3]
+    for r in range(1, R):
+        if demands[r, 0] < min_eco: min_eco = demands[r, 0]
+        if demands[r, 1] < min_bus: min_bus = demands[r, 1]
+        if demands[r, 2] < min_fir: min_fir = demands[r, 2]
+        if demands[r, 3] < min_cargo: min_cargo = demands[r, 3]
+
+    best = 0.0
+    tw_arr = (3, 5, 8, 10, 15, 20)
+    for ti in range(6):
+        tw = tw_arr[ti]
+        for fb in range(4):
+            fir_on = (fb >> 1) & 1
+            bus_on = fb & 1
+            fir_seats = int(min_fir / (2 * tw)) if fir_on else 0
+            if fir_seats < 0: fir_seats = 0
+            bus_seats = int(min_bus / (2 * tw)) if bus_on else 0
+            if bus_seats < 0: bus_seats = 0
+            cargo_seats = int(min_cargo / (2 * tw))
+            if cargo_seats < 0: cargo_seats = 0
+
+            eco_dem = int(min_eco / (2 * tw))
+            if eco_dem < 0: eco_dem = 0
+            eco_pay = int((max_ton - bus_seats * 0.125 - fir_seats * 0.15 - cargo_seats * 1.0) / 0.1)
+            if eco_pay < 0: eco_pay = 0
+            eco_seat = int((max_pax - bus_seats * 1.8 - fir_seats * 4.2) / 1.0)
+            if eco_seat < 0: eco_seat = 0
+            eco_seats = eco_dem
+            if eco_pay < eco_seats: eco_seats = eco_pay
+            if eco_seat < eco_seats: eco_seats = eco_seat
+
+            r = _eval_cfg_nb(eco_seats, bus_seats, fir_seats, cargo_seats,
+                             demands, prices, max_pax, max_ton, max_waves,
+                             overshoot_pct)
+            if r > best:
+                best = r
+    return best
+
+
 if njit is not None:
-    @njit(cache=True)
-    def _eval_cfg_nb(eco, bus, fir, cargo, demands, prices,
-                     max_pax, max_ton, max_waves, overshoot_pct):
-        if eco + bus + fir + cargo == 0:
-            return 0.0
-        if eco * 0.1 + bus * 0.125 + fir * 0.15 + cargo * 1.0 > max_ton:
-            return 0.0
-        if eco * 1.0 + bus * 1.8 + fir * 4.2 > max_pax:
-            return 0.0
-        R = demands.shape[0]
-        seats0, seats1, seats2, seats3 = eco, bus, fir, cargo
-        mw_f = float(max_waves)
-        tol = 1.0 + overshoot_pct if overshoot_pct > 0.0 else 1.0
-        for r in range(R):
-            for c in range(4):
-                if c == 0: s = seats0
-                elif c == 1: s = seats1
-                elif c == 2: s = seats2
-                else: s = seats3
-                if s <= 0:
-                    continue
-                d = demands[r, c]
-                if d <= 0:
-                    return 0.0
-                # Eco (c=0) strict; bus/fir/cargo allow overshoot
-                allowed = d if c == 0 else d * tol
-                wl = allowed / (2.0 * s)
-                if wl < mw_f:
-                    mw_f = wl
-        mw = int(math.floor(mw_f))
-        if mw < 1:
-            return 0.0
-        if mw < 1:
-            return 0.0
-        rev = 0.0
-        for r in range(R):
-            for c in range(4):
-                if c == 0: s = seats0
-                elif c == 1: s = seats1
-                elif c == 2: s = seats2
-                else: s = seats3
-                if s <= 0:
-                    continue
-                d = demands[r, c]
-                p = prices[r, c]
-                cap = 2.0 * s * mw
-                if p == 0.0 or d == 0.0 or cap <= 0.0:
-                    continue
-                if cap < d:
-                    ss = math.floor(p * (1.0 - (cap - d) / (3.0 * d)))
-                else:
-                    ss = p
-                filled = d if d < cap else cap
-                rev += filled * ss
-        return rev
-
-
-    @njit(cache=True)
-    def _quick_revenue_estimate_nb(demands, prices, max_pax, max_ton,
-                                   max_waves, overshoot_pct):
-        R = demands.shape[0]
-        if R == 0:
-            return 0.0
-        min_eco = demands[0, 0]
-        min_bus = demands[0, 1]
-        min_fir = demands[0, 2]
-        min_cargo = demands[0, 3]
-        for r in range(1, R):
-            if demands[r, 0] < min_eco: min_eco = demands[r, 0]
-            if demands[r, 1] < min_bus: min_bus = demands[r, 1]
-            if demands[r, 2] < min_fir: min_fir = demands[r, 2]
-            if demands[r, 3] < min_cargo: min_cargo = demands[r, 3]
-
-        best = 0.0
-        tw_arr = (3, 5, 8, 10, 15, 20)
-        for ti in range(6):
-            tw = tw_arr[ti]
-            for fb in range(4):
-                fir_on = (fb >> 1) & 1
-                bus_on = fb & 1
-                fir_seats = int(min_fir / (2 * tw)) if fir_on else 0
-                if fir_seats < 0: fir_seats = 0
-                bus_seats = int(min_bus / (2 * tw)) if bus_on else 0
-                if bus_seats < 0: bus_seats = 0
-                cargo_seats = int(min_cargo / (2 * tw))
-                if cargo_seats < 0: cargo_seats = 0
-
-                eco_dem = int(min_eco / (2 * tw))
-                if eco_dem < 0: eco_dem = 0
-                eco_pay = int((max_ton - bus_seats * 0.125 - fir_seats * 0.15 - cargo_seats * 1.0) / 0.1)
-                if eco_pay < 0: eco_pay = 0
-                eco_seat = int((max_pax - bus_seats * 1.8 - fir_seats * 4.2) / 1.0)
-                if eco_seat < 0: eco_seat = 0
-                eco_seats = eco_dem
-                if eco_pay < eco_seats: eco_seats = eco_pay
-                if eco_seat < eco_seats: eco_seats = eco_seat
-
-                r = _eval_cfg_nb(eco_seats, bus_seats, fir_seats, cargo_seats,
-                                 demands, prices, max_pax, max_ton, max_waves,
-                                 overshoot_pct)
-                if r > best:
-                    best = r
-        return best
-else:
-    _quick_revenue_estimate_nb = None
+    _eval_cfg_nb = njit(cache=True)(_eval_cfg_nb)
+    _quick_revenue_estimate_nb = njit(cache=True)(_quick_revenue_estimate_nb)
 
 
 def time_efficiency(circuit_time):
@@ -343,7 +341,8 @@ def time_efficiency(circuit_time):
 
 
 def _search_circuits_native(routes, ac, comfort, speed, top_n, beam_width,
-                             max_steps, max_routes, max_waves, match):
+                             max_steps, max_routes, max_waves, match,
+                             overshoot_pct=0.0):
     routes_ranked = sorted(enumerate(routes), key=lambda x: -x[1]["eco_d"])
     top = routes_ranked[:max_routes]
     M = len(top)
@@ -372,7 +371,7 @@ def _search_circuits_native(routes, ac, comfort, speed, top_n, beam_width,
     raw = search_circuits_native(
         demands, prices, flight_times, eco_demands_arr, cargo_demands_arr,
         top_idx, float(ac["pax"]), float(ac["tonnage"]),
-        max_waves, top_n, beam_width, max_steps, match,
+        max_waves, top_n, beam_width, max_steps, match, overshoot_pct,
     )
 
     orig_map = [orig_i for orig_i, _ in top]
@@ -503,11 +502,10 @@ def search_circuits(routes, ac, comfort, speed, top_n=3, beam_width=1200,
     score_mode='revenue': maximise daily revenue (default)
     score_mode='roi':     maximise daily_rev / estimated_investment (best payback)
     """
-    # Native C path doesn't know about overshoot — fall back to Python when set.
-    if _HAS_NATIVE and score_mode == 'revenue' and overshoot_pct == 0.0:
+    if _HAS_NATIVE and score_mode == 'revenue':
         return _search_circuits_native(
             routes, ac, comfort, speed, top_n, beam_width,
-            max_steps, max_routes, max_waves, match)
+            max_steps, max_routes, max_waves, match, overshoot_pct)
     return _search_circuits_python(
         routes, ac, comfort, speed, top_n, beam_width,
         max_steps, max_routes, max_waves, match, score_mode, overshoot_pct)
@@ -518,13 +516,18 @@ def search_circuits(routes, ac, comfort, speed, top_n=3, beam_width=1200,
 # ═══════════════════════════════════════════════════════════════════
 
 def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
-                     overshoot_pct=0.0):
+                     overshoot_pct=0.0, wave_slack=0.02):
     """Phase 2 optimizer.
 
     ``overshoot_pct`` controls how much over-supply is permitted on bus/fir/
     cargo when sizing waves. 0.0 (default) is strict — capacity ≤ demand on
     every class. 0.10 lets bus/fir/cargo cap exceed demand by up to 10% so
     that eco (the meta) can run more waves. Eco is always strict.
+
+    ``wave_slack`` trades fleet size for revenue: among configs whose revenue
+    is within this fraction of the best found, the one with the fewest waves
+    wins. 0.02 (default) means a config needing half the aircraft is chosen
+    as long as it earns ≥98% of the maximum. 0 keeps strict revenue ranking.
     """
     max_pax = ac["pax"]
     max_ton = ac["tonnage"]
@@ -535,10 +538,6 @@ def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
         rd["p_fir"] = ideal_fir(rd["dist"], comfort)
         rd["p_cargo"] = ideal_cargo(rd["dist"], speed)
 
-    best_rev = -1
-    best_cfg = None
-    best_waves = 1
-
     max_fir = min(int(max_ton / 0.15), int(max_pax / 4.2))
     max_bus = min(int(max_ton / 0.125), int(max_pax / 1.8))
     max_cargo = int(max_ton)
@@ -548,6 +547,24 @@ def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
     cargo_step = max(1, max_cargo // 12)
 
     tol = 1.0 + max(0.0, overshoot_pct)
+    min_d = {k: min(rd[k] for rd in routes_list)
+             for k in ("eco_d", "bus_d", "fir_d", "cargo_d")}
+    min_eco_d = min_d["eco_d"]
+
+    def eco_seat_options(eco_max):
+        """Eco seat counts to try for one bus/fir/cargo grid point.
+
+        The physical max plus demand-limited counts that land exactly on
+        each wave target — lets the search trade eco seats for an extra
+        wave instead of stranding a fraction of a wave of eco demand.
+        """
+        opts = {eco_max}
+        for w in range(1, max_waves + 1):
+            e = int(min_eco_d / (2 * w))
+            if e < 1:
+                break
+            opts.add(min(e, eco_max))
+        return opts
 
     def eval_config(eco, bus, fir, cargo):
         if eco == 0 and bus == 0 and fir == 0 and cargo == 0:
@@ -581,6 +598,43 @@ def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
             rev += daily_turnover(rd["p_cargo"], 2 * cargo * mw, rd["cargo_d"])
         return rev, mw
 
+    best_by_waves = {}  # waves -> (rev, cfg): best config found per wave count
+
+    def consider(eco, bus, fir, cargo):
+        rev, mw = eval_config(eco, bus, fir, cargo)
+        if mw < 1 or rev <= 0:
+            return
+        cur = best_by_waves.get(mw)
+        if cur is None or rev > cur[0]:
+            best_by_waves[mw] = (rev, {"eco": eco, "bus": bus,
+                                       "fir": fir, "cargo": cargo})
+
+    def pick():
+        """Fewest waves whose revenue is within wave_slack of the best."""
+        if not best_by_waves:
+            return None, 1, -1
+        top = max(r for r, _ in best_by_waves.values())
+        floor_rev = top * (1.0 - max(0.0, wave_slack))
+        w = min(w for w, (r, _) in best_by_waves.items() if r >= floor_rev)
+        rev, cfg = best_by_waves[w]
+        return cfg, w, rev
+
+    def fine_tune(cfg):
+        fc, bc, cc = cfg["fir"], cfg["bus"], cfg["cargo"]
+        for fir in range(max(0, fc - fir_step), min(max_fir, fc + fir_step) + 1):
+            for bus in range(max(0, bc - bus_step), min(max_bus, bc + bus_step) + 1):
+                for cargo in range(max(0, cc - cargo_step), min(max_cargo, cc + cargo_step) + 1):
+                    payload = fir * 0.15 + bus * 0.125 + cargo * 1.0
+                    if payload > max_ton:
+                        break
+                    seat_space = fir * 4.2 + bus * 1.8
+                    if seat_space > max_pax:
+                        break
+                    eco_max = max(0, min(int((max_ton - payload) / 0.1),
+                                         int((max_pax - seat_space) / 1.0)))
+                    for eco in eco_seat_options(eco_max):
+                        consider(eco, bus, fir, cargo)
+
     # Coarse grid
     for fir in range(0, max_fir + 1, fir_step):
         for bus in range(0, max_bus + 1, bus_step):
@@ -591,33 +645,35 @@ def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
                 seat_space = fir * 4.2 + bus * 1.8
                 if seat_space > max_pax:
                     break
-                eco = max(0, min(int((max_ton - payload) / 0.1),
-                                 int((max_pax - seat_space) / 1.0)))
-                rev, waves = eval_config(eco, bus, fir, cargo)
-                if rev > best_rev:
-                    best_rev = rev
-                    best_cfg = {"eco": eco, "bus": bus, "fir": fir, "cargo": cargo}
-                    best_waves = waves
-
-    # Fine-tune
-    if best_cfg:
-        fc, bc, cc = best_cfg["fir"], best_cfg["bus"], best_cfg["cargo"]
-        for fir in range(max(0, fc - fir_step), min(max_fir, fc + fir_step) + 1):
-            for bus in range(max(0, bc - bus_step), min(max_bus, bc + bus_step) + 1):
-                for cargo in range(max(0, cc - cargo_step), min(max_cargo, cc + cargo_step) + 1):
-                    payload = fir * 0.15 + bus * 0.125 + cargo * 1.0
-                    if payload > max_ton:
-                        break
-                    seat_space = fir * 4.2 + bus * 1.8
-                    if seat_space > max_pax:
-                        break
-                    eco = max(0, min(int((max_ton - payload) / 0.1),
+                eco_max = max(0, min(int((max_ton - payload) / 0.1),
                                      int((max_pax - seat_space) / 1.0)))
-                    rev, waves = eval_config(eco, bus, fir, cargo)
-                    if rev > best_rev:
-                        best_rev = rev
-                        best_cfg = {"eco": eco, "bus": bus, "fir": fir, "cargo": cargo}
-                        best_waves = waves
+                for eco in eco_seat_options(eco_max):
+                    consider(eco, bus, fir, cargo)
+
+    # Demand-balanced seeds: size every class to bottleneck exactly at w
+    # waves (each non-eco class optionally off). These are the natural
+    # "capacity ≈ demand everywhere" configs the coarse grid steps over.
+    for w in range(1, max_waves + 1):
+        for mask in range(8):
+            fir = int(min_d["fir_d"] * tol / (2 * w)) if mask & 1 else 0
+            bus = int(min_d["bus_d"] * tol / (2 * w)) if mask & 2 else 0
+            cargo = int(min_d["cargo_d"] * tol / (2 * w)) if mask & 4 else 0
+            payload = fir * 0.15 + bus * 0.125 + cargo * 1.0
+            seat_space = fir * 4.2 + bus * 1.8
+            if payload > max_ton or seat_space > max_pax:
+                continue
+            eco_max = max(0, min(int((max_ton - payload) / 0.1),
+                                 int((max_pax - seat_space) / 1.0)))
+            consider(min(int(min_eco_d / (2 * w)), eco_max), bus, fir, cargo)
+
+    # Fine-tune around the revenue leader, then around the slack pick
+    # (which may sit at a different wave count), then settle.
+    if best_by_waves:
+        fine_tune(max(best_by_waves.values(), key=lambda t: t[0])[1])
+        cfg_pick, _, _ = pick()
+        if cfg_pick:
+            fine_tune(cfg_pick)
+    best_cfg, best_waves, best_rev = pick()
 
     # Build breakdown
     breakdown = []
@@ -758,6 +814,9 @@ def main():
     p.add_argument("--overshoot", type=float, default=0.0,
                    help="Allow bus/fir/cargo capacity to exceed demand by this "
                         "fraction (e.g. 0.10 = 10%%). Eco stays strict.")
+    p.add_argument("--wave-slack", type=float, default=0.02,
+                   help="Pick the fewest-waves config within this fraction of "
+                        "max revenue (default: 0.02 = 2%%; 0 = strict max)")
     p.add_argument("--match", type=float, default=0.9,
                    help="Min eco/cargo demand ratio (min/max) within a circuit (default: 0.9)")
     p.add_argument("--bulk-discount", type=float, default=0.13,
@@ -892,6 +951,7 @@ def main():
             cfg, waves, daily_rev, breakdown = optimize_circuit(
                 route_list, best_ac, comfort=args.comfort, speed=args.speed,
                 max_waves=args.max_waves, overshoot_pct=args.overshoot,
+                wave_slack=args.wave_slack,
             )
             print_circuit(circuit_num, best_ac, route_list, total_time,
                           cfg, waves, daily_rev, breakdown, p1_score,

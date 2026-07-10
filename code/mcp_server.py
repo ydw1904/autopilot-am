@@ -677,6 +677,7 @@ def plan_circuits(
     speed: float = 700.0,
     max_waves: int = 30,
     overshoot: float = 0.0,
+    wave_slack: float = 0.02,
     match: float = 0.9,
 ) -> dict:
     """Run the circuit planner script.
@@ -699,6 +700,7 @@ def plan_circuits(
         "--speed", str(speed),
         "--max-waves", str(max_waves),
         "--overshoot", str(overshoot),
+        "--wave-slack", str(wave_slack),
         "--match", str(match),
     ]
     if owned_hubs:

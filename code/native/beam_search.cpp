@@ -59,7 +59,8 @@ struct RouteSetHash {
 double eval_config(int eco, int bus, int fir, int cargo,
                    const std::vector<size_t>& indices,
                    const double* demands, const double* prices,
-                   double max_pax, double max_ton, size_t max_waves) {
+                   double max_pax, double max_ton, size_t max_waves,
+                   double overshoot_pct) {
     if (eco + bus + fir + cargo == 0) return 0.0;
     double eco_f = eco, bus_f = bus, fir_f = fir, cargo_f = cargo;
 
@@ -68,36 +69,28 @@ double eval_config(int eco, int bus, int fir, int cargo,
 
     int seat_arr[4] = {eco, bus, fir, cargo};
 
-    // Size waves to ECO demand only. Eco is the highest-volume class with the
-    // best revenue/seat-cost ratio in this game. Sizing waves to satisfy all
-    // classes pushes wave counts very high for marginal FIR/BUS gain — bad ROI.
-    // Bus/fir/cargo demand is filled as a by-product of the same aircraft.
-    double mw_f = -1.0;
-    if (eco > 0) {
-        for (size_t idx : indices) {
-            double d = demands[idx * 4];  // c=0 is eco
+    // Waves = bottleneck across every route/class that has seats, so
+    // capacity never exceeds demand (eco strict; bus/fir/cargo may
+    // oversupply by overshoot_pct). Routes whose demand sits above the
+    // bottleneck sell cap < demand at the raised SuperSim price, which
+    // recovers only ⅓ of the shortfall — that lost revenue is the
+    // demand-mismatch penalty this score exists to apply.
+    // Mirrors _eval_cfg_nb in circuit_planner.py; keep them in lockstep.
+    double tol = overshoot_pct > 0.0 ? 1.0 + overshoot_pct : 1.0;
+    double mw_f = static_cast<double>(max_waves);
+    for (size_t idx : indices) {
+        size_t base = idx * 4;
+        for (int c = 0; c < 4; c++) {
+            int s = seat_arr[c];
+            if (s <= 0) continue;
+            double d = demands[base + c];
             if (d <= 0.0) return 0.0;
-            double wl = d / (2.0 * eco_f);
-            if (wl > mw_f) mw_f = wl;
-        }
-    } else {
-        // No eco seats: fall back to whichever non-eco class exists.
-        for (size_t idx : indices) {
-            size_t base = idx * 4;
-            for (int c = 1; c < 4; c++) {
-                int s = seat_arr[c];
-                if (s <= 0) continue;
-                double d = demands[base + c];
-                if (d <= 0.0) return 0.0;
-                double wl = d / (2.0 * s);
-                if (wl > mw_f) mw_f = wl;
-            }
+            double allowed = c == 0 ? d : d * tol;
+            double wl = allowed / (2.0 * s);
+            if (wl < mw_f) mw_f = wl;
         }
     }
-
-    if (mw_f < 0.0) return 0.0;
-    size_t mw = static_cast<size_t>(std::ceil(mw_f));
-    if (mw > max_waves) mw = max_waves;
+    size_t mw = static_cast<size_t>(std::floor(mw_f));
     if (mw < 1) return 0.0;
 
     double rev = 0.0;
@@ -120,7 +113,8 @@ double eval_config(int eco, int bus, int fir, int cargo,
 
 double quick_score(const std::vector<size_t>& indices,
                    const double* demands, const double* prices,
-                   double max_pax, double max_ton, size_t max_waves) {
+                   double max_pax, double max_ton, size_t max_waves,
+                   double overshoot_pct) {
     if (indices.empty()) return 0.0;
 
     double min_d[4] = {HUGE_VAL, HUGE_VAL, HUGE_VAL, HUGE_VAL};
@@ -154,7 +148,8 @@ double quick_score(const std::vector<size_t>& indices,
             int eco_s = std::min({eco_dem, eco_pay, eco_seat});
 
             double r = eval_config(eco_s, bus_s, fir_s, cargo_s, indices,
-                                   demands, prices, max_pax, max_ton, max_waves);
+                                   demands, prices, max_pax, max_ton, max_waves,
+                                   overshoot_pct);
             if (r > best) best = r;
         }
     }
@@ -180,7 +175,8 @@ std::vector<Result> beam_search(
     const double* eco_demands, const double* cargo_demands,
     const int64_t* top_indices, size_t n_top,
     double max_pax, double max_ton, size_t max_waves,
-    size_t top_n, size_t beam_width, size_t max_steps, double match_ratio) {
+    size_t top_n, size_t beam_width, size_t max_steps, double match_ratio,
+    double overshoot_pct) {
 
     std::vector<BeamState> beam = {
         {0.0, {{0, 0, 0}}, HUGE_VAL, 0.0, HUGE_VAL, 0.0}};
@@ -221,7 +217,8 @@ std::vector<Result> beam_search(
                     std::vector<size_t> indices = new_routes.to_indices();
                     if (indices.size() >= 2) {
                         it->second = quick_score(indices, demands, prices,
-                                                 max_pax, max_ton, max_waves);
+                                                 max_pax, max_ton, max_waves,
+                                                 overshoot_pct);
                     } else if (indices.size() == 1) {
                         it->second = eco_demands[indices[0]] * prices[indices[0] * 4];
                     }
@@ -278,6 +275,7 @@ extern "C" int search_circuits_native(
     const int64_t* top_indices, int64_t n_top,
     double max_pax, double max_ton, int64_t max_waves,
     int64_t top_n, int64_t beam_width, int64_t max_steps, double match_ratio,
+    double overshoot_pct,
     double* out_scores, double* out_times, int32_t* out_counts,
     int32_t* out_indices) {
 
@@ -286,7 +284,7 @@ extern "C" int search_circuits_native(
         top_indices, static_cast<size_t>(n_top), max_pax, max_ton,
         static_cast<size_t>(max_waves), static_cast<size_t>(top_n),
         static_cast<size_t>(beam_width), static_cast<size_t>(max_steps),
-        match_ratio);
+        match_ratio, overshoot_pct);
 
     int n = 0;
     for (const Result& r : results) {

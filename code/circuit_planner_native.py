@@ -35,6 +35,7 @@ _lib.search_circuits_native.argtypes = [
     _c_int64_p, ctypes.c_int64,
     ctypes.c_double, ctypes.c_double, ctypes.c_int64,
     ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_double,
+    ctypes.c_double,
     _c_double_p, _c_double_p, _c_int32_p, _c_int32_p,
 ]
 
@@ -48,7 +49,7 @@ def _dptr(arr):
 def search_circuits_native(demands, prices, flight_times, eco_demands,
                            cargo_demands, top_indices, max_pax, max_ton,
                            max_waves, top_n, beam_width, max_steps,
-                           match_ratio):
+                           match_ratio, overshoot_pct=0.0):
     demands = np.ascontiguousarray(demands, dtype=np.float64)
     prices = np.ascontiguousarray(prices, dtype=np.float64)
     flight_times = np.ascontiguousarray(flight_times, dtype=np.float64)
@@ -67,6 +68,7 @@ def search_circuits_native(demands, prices, flight_times, eco_demands,
         top_indices.ctypes.data_as(_c_int64_p), len(top_indices),
         float(max_pax), float(max_ton), int(max_waves),
         int(top_n), int(beam_width), int(max_steps), float(match_ratio),
+        float(overshoot_pct),
         _dptr(out_scores), _dptr(out_times),
         out_counts.ctypes.data_as(_c_int32_p),
         out_indices.ctypes.data_as(_c_int32_p),
