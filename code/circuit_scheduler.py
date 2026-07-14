@@ -464,7 +464,7 @@ def main():
         sys.exit(1)
 
     # Step 3: Read aircraft at this hub
-    hub_aircraft = get_aircraft_at_hub(cdp)
+    hub_aircraft = get_aircraft_at_hub(cdp, hub_iata)
     if not hub_aircraft:
         print(f"{Fore.RED}ERROR: No aircraft found at hub {hub_iata} on planning page",
               file=sys.stderr)
@@ -488,7 +488,7 @@ def main():
         hub_lines = [{"lineId": lid, "dest": dest, "name": ""}
                      for dest, lid in db_line_map.items()]
     else:
-        hub_lines = get_lines_at_hub(cdp)
+        hub_lines = get_lines_at_hub(cdp, hub_iata)
         if not hub_lines:
             print(f"{Fore.RED}ERROR: No lines found at hub {hub_iata} on planning page",
                   file=sys.stderr)

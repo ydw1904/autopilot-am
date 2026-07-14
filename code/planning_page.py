@@ -5,6 +5,9 @@ server, the CLI scripts, and the GUI. Imports only from cdp.py and does not
 print — callers report progress/errors from the returned values.
 """
 
+import json
+import re
+
 # wait_for_js is re-exported here — it predates cdp.wait_for_js and callers
 # import it from this module.
 from cdp import BASE_URL, wait_for_js  # noqa: F401
@@ -70,13 +73,77 @@ def select_hub(cdp, hub_iata):
     return bool(loaded)
 
 
-def get_aircraft_at_hub(cdp):
+def _resolve_hub_id(cdp, hub_iata):
+    """data-hubId of the .planninghubBtn whose text starts with '<IATA> /'."""
+    hub_iata = (hub_iata or "").upper().strip()
+    if not re.fullmatch(r"[A-Z]{3}", hub_iata):
+        return None
+    hub_id = cdp.eval(f"""((() => {{
+        for (const b of document.querySelectorAll('#hubList .planninghubBtn')) {{
+            const t = (b.textContent || '').trim();
+            if (t.startsWith('{hub_iata} /') || t.startsWith('{hub_iata}/'))
+                return b.getAttribute('data-hubId') || '';
+        }}
+        return '';
+    }})())""")
+    return str(hub_id) if hub_id and str(hub_id).isdigit() else None
+
+
+def _load_hub_json(cdp, hub_iata=None):
+    """Fetch a hub's full planning payload as JSON.
+
+    The rendered #aircraftList caps at ~80 mini-boxes on big hubs, and the
+    hub-selector click is coordinate-based (synthetic clicks land on the
+    wrong hub), so DOM scraping is unreliable. The page's own AJAX endpoint
+    /network/planning/load/<hubId> (with the XMLHttpRequest header — without
+    it the server returns the HTML shell) carries the complete
+    aircraftDataArray / lineDataArray for the hub, independent of which hub
+    the UI has selected. Resolve the hubId from ``hub_iata`` when given;
+    otherwise fall back to the UI-selected (hover) button.
     """
-    Extract all aircraft at the currently selected hub from the planning page.
+    if hub_iata:
+        hub_id = _resolve_hub_id(cdp, hub_iata)
+    else:
+        hub_id = cdp.eval(
+            "(document.querySelector('#hubList .planninghubBtnHover') || null)"
+            "?.getAttribute('data-hubId') || ''")
+    if not hub_id or not str(hub_id).isdigit():
+        return None
+    raw = cdp.eval(
+        f"fetch('/network/planning/load/{int(hub_id)}', {{credentials:'include',"
+        f" headers: {{'X-Requested-With': 'XMLHttpRequest'}}}})"
+        f".then(r => r.text())",
+        await_promise=True)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def get_aircraft_at_hub(cdp, hub_iata=None):
+    """
+    Extract all aircraft at a hub from the planning page.
+
+    Pass ``hub_iata`` to read the hub's data directly (reliable); without it
+    the currently UI-selected hub is used, which can be wrong on this page.
 
     Returns list of dicts: [{id: int, name: str, model: str, util: float}, ...]
     The `id` is the game's aircraftId (from aircraftId_XXXXXXX).
     """
+    payload = _load_hub_json(cdp, hub_iata)
+    if payload and isinstance(payload.get("aircraftDataArray"), list):
+        return [
+            {"id": a["id"], "name": a.get("name") or "",
+             "model": a.get("aircraftListName") or "",
+             "util": a.get("utilizationPercentage") or 0}
+            for a in payload["aircraftDataArray"]
+            if isinstance(a, dict) and a.get("id")
+        ]
+
+    # Fallback: scrape the rendered list (incomplete beyond ~80 aircraft).
     data = cdp.eval_json("""(() => {
         const result = [];
         const boxes = document.querySelectorAll('#aircraftList .aircraftListMiniBox');
@@ -98,12 +165,25 @@ def get_aircraft_at_hub(cdp):
     return data or []
 
 
-def get_lines_at_hub(cdp):
+def get_lines_at_hub(cdp, hub_iata=None):
     """
-    Extract all lines (routes) at the currently selected hub.
+    Extract all lines (routes) at a hub (see get_aircraft_at_hub on hub_iata).
 
     Returns list of dicts: [{lineId: int, name: str, dest: str}, ...]
     """
+    payload = _load_hub_json(cdp, hub_iata)
+    if payload and isinstance(payload.get("lineDataArray"), list):
+        lines = []
+        for ln in payload["lineDataArray"]:
+            if not isinstance(ln, dict) or not ln.get("id"):
+                continue
+            name = ln.get("name") or ""
+            codes = re.findall(r"[A-Z]{3}", name)
+            dest = codes[1] if len(codes) >= 2 else (codes[0] if codes else "")
+            lines.append({"lineId": ln["id"], "name": name, "dest": dest})
+        return lines
+
+    # Fallback: scrape the rendered list.
     data = cdp.eval_json("""(() => {
         const result = [];
         const items = document.querySelectorAll('#lineList .lineList');

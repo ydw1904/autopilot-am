@@ -92,7 +92,7 @@ def main():
             if not select_hub(cdp, hub):
                 continue
 
-            ac_list = get_aircraft_at_hub(cdp)
+            ac_list = get_aircraft_at_hub(cdp, hub)
             for ac in ac_list:
                 ac["hub"] = hub
             all_fleet.extend(ac_list)

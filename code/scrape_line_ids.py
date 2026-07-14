@@ -53,7 +53,7 @@ def main():
                 print(f"  SKIP: could not select hub")
                 continue
 
-            lines = get_lines_at_hub(cdp)
+            lines = get_lines_at_hub(cdp, hub_iata)
             print(f"  Found {len(lines)} owned routes")
 
             for line in lines:

@@ -193,21 +193,21 @@ def _get_cdp():
     return _cdp
 
 
-def _get_lines_at_selected_hub(cdp):
-    """Owned lines at the selected planning hub, remapped to MCP output keys."""
+def _get_lines_at_selected_hub(cdp, hub_iata=None):
+    """Owned lines at a planning hub, remapped to MCP output keys."""
     return [
         {"line_id": str(l["lineId"]), "raw": l.get("name") or "",
          "dest_iata": l.get("dest") or "?"}
-        for l in get_lines_at_hub(cdp)
+        for l in get_lines_at_hub(cdp, hub_iata)
     ]
 
 
-def _get_aircraft_at_selected_hub(cdp):
-    """Aircraft at the selected planning hub, remapped to MCP output keys."""
+def _get_aircraft_at_selected_hub(cdp, hub_iata=None):
+    """Aircraft at a planning hub, remapped to MCP output keys."""
     return [
         {"aircraft_id": str(a["id"]), "model": a.get("model") or "?",
          "name": a.get("name") or "", "utilization_pct": a.get("util", 0)}
-        for a in _get_planning_aircraft(cdp)
+        for a in _get_planning_aircraft(cdp, hub_iata)
     ]
 
 
@@ -319,7 +319,7 @@ def list_routes(hub_iata: str) -> dict:
     if not _select_planning_hub(cdp, hub_iata):
         return {"error": f"Could not select hub {hub_iata} on the planning page.", "hub_iata": hub_iata, "routes": []}
 
-    routes = _get_lines_at_selected_hub(cdp)
+    routes = _get_lines_at_selected_hub(cdp, hub_iata)
     if not routes:
         return {"error": f"No routes found from {hub_iata}.", "hub_iata": hub_iata, "routes": []}
 
@@ -540,7 +540,7 @@ def get_aircraft_at_hub(hub_iata: str) -> dict:
     if not _select_planning_hub(cdp, hub_iata):
         return {"error": f"Could not select hub {hub_iata} on the planning page.", "hub_iata": hub_iata, "aircraft": []}
 
-    aircraft = _get_aircraft_at_selected_hub(cdp)
+    aircraft = _get_aircraft_at_selected_hub(cdp, hub_iata)
     return {"hub_iata": hub_iata, "aircraft": aircraft, "count": len(aircraft)}
 
 

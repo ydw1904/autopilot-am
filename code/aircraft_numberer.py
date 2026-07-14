@@ -50,7 +50,7 @@ def _url_qs(name_filter: str | None) -> str:
     if not name_filter:
         return ""
     from urllib.parse import quote
-    return "&name=" + quote(name_filter)
+    return "&search=" + quote(name_filter)
 
 
 def discover_total_pages(cdp, name_filter: str | None = None) -> int:
