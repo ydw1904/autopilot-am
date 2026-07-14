@@ -15,8 +15,17 @@ Flow:
        - parse ideal eco + cargo prices (trusted)
        - parse current prices for all classes
        - derive corrected bus/fir from eco ideal
-       - parse CSRF token
-  3. POST corrected prices back to same URL.
+  3. Submit via a REAL click in the tab (see submit_prices_native): navigate
+     to the pricing page, fill the four line[price*] inputs, and dispatch a
+     CDP mouse click on the "Confirm these prices" submit button.
+
+Why not POST?  fetch()-POSTs are silently rejected by the server (returns
+200/204 but the price never changes), and form.submit() omits the submit
+button's name so the server can't tell "Confirm these prices" from "Perform
+a simulation".  Only a genuine click works (verified live 2026-07-14).
+
+The game enforces a 24h cooldown per line between price changes; pages in
+cooldown render without the form and are reported as skipped, not failed.
 
 Modes:
   --mode ideal           target = corrected ideal price (default)
@@ -40,7 +49,7 @@ Requires Chrome with --remote-debugging-port=9222 and an AM tab open.
 import argparse, json, math, os, re, sqlite3, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdp import CDP, get_am_tab  # noqa: E402
+from cdp import CDP, get_am_tab, BASE_URL, wait_for_js  # noqa: E402
 from db import DB  # noqa: E402
 
 PRICE_RE_IDEAL_ALL = re.compile(
@@ -90,35 +99,129 @@ def correct_ideal_prices(ideal):
     }
 
 
-def fetch_text(cdp, path, retries=3):
-    js = (f"fetch({json.dumps(path)}, {{credentials:'include'}})"
+def fetch_text(cdp, path, retries=4):
+    # Post-change pages often return an empty body to fetch() for a while —
+    # treat empties as transient and retry with backoff.
+    js = (f"fetch({json.dumps(path)}, {{credentials:'include', cache:'no-store'}})"
           f".then(r => r.text())")
     for attempt in range(retries):
         out = cdp.eval(js, await_promise=True)
         if out:
             return out
-        time.sleep(0.3 * (attempt + 1))
+        time.sleep(0.5 * (attempt + 1))
     return None
 
 
-def post_form(cdp, path, fields):
-    body_parts = []
-    for k, v in fields.items():
-        body_parts.append(
-            f"{re.sub(r'([^A-Za-z0-9_.~-])', lambda m: f'%{ord(m.group(1)):02X}', k)}"
-            f"={re.sub(r'([^A-Za-z0-9_.~-])', lambda m: f'%{ord(m.group(1)):02X}', str(v))}"
-        )
-    body = "&".join(body_parts)
-    js = f"""
-        fetch({json.dumps(path)}, {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-            body: {json.dumps(body)},
-            credentials: 'include',
-            redirect: 'follow'
-        }}).then(r => r.status)
+COOLDOWN_TEXT = "24 hours is required between each price change"
+# Raw HTML carries the cooldown expiry as a unix epoch ("Remaining time :
+# 1784141738"); the page's JS renders it into a live countdown.
+TIME_REMAIN_RE = re.compile(r"Remaining time\s*:\s*(?:<[^>]*>|\s)*(\d+)",
+                            re.IGNORECASE)
+
+
+def cooldown_remaining(html):
+    """If the page shows the 24h price-change cooldown, return the remaining
+    time as 'XhYYm' (or 'unknown'); otherwise None."""
+    if not html:
+        return None
+    idx = html.find(COOLDOWN_TEXT)
+    if idx < 0:
+        return None
+    m = TIME_REMAIN_RE.search(html[idx:idx + 1000])
+    if not m:
+        return "unknown"
+    val = int(m.group(1))
+    if val > 1e9:  # epoch expiry timestamp
+        val = max(0, val - int(time.time()))
+    return f"{val // 3600}h{(val % 3600) // 60:02d}m"
+
+
+def read_current_prices_rendered(cdp):
+    """Read 'Current ... price' lines from the rendered page's innerText."""
+    text = cdp.eval("document.body ? document.body.innerText : ''") or ""
+    vals = [int(s.replace(",", "")) for s in PRICE_RE_CURRENT_ALL.findall(text)]
+    if len(vals) < 4:
+        return None
+    return dict(zip(CLASS_ORDER, vals))
+
+
+def submit_prices_native(cdp, line_id, targets):
+    """Set prices on /marketing/pricing/<line_id> via a real in-tab click.
+
+    Navigates the tab to the pricing page, waits for BOTH the URL to settle
+    on this line_id AND the price form to exist (submitting early fires
+    against the still-loaded previous page and stamps prices onto the wrong
+    line), fills the four line[price*] inputs with input+change events, then
+    clicks the "Confirm these prices" submit button with a genuine CDP
+    Input.dispatchMouseEvent pair at its bounding-rect center.
+
+    Returns (status, detail) where status is one of:
+      'ok'       — page verified Current == target on all four classes
+      'clicked'  — click sent but rendered verification unavailable
+      'cooldown' — form absent, 24h cooldown active (detail = remaining)
+      'fail'     — anything else (detail = reason)
     """
-    return cdp.eval(js, await_promise=True)
+    cdp.navigate(f"{BASE_URL}/marketing/pricing/{line_id}")
+    ready = (
+        f"location.href.endsWith('/pricing/{line_id}') && "
+        f"!!document.querySelector('input[name=\"line[priceEco]\"]') ? 'yes' : ''"
+    )
+    if not wait_for_js(cdp, ready, timeout=20):
+        remaining = cooldown_remaining(
+            fetch_text(cdp, f"/marketing/pricing/{line_id}", retries=2))
+        if remaining:
+            return "cooldown", remaining
+        return "fail", "pricing form did not appear"
+
+    fill_js = """((() => {
+        const vals = %s;
+        for (const [name, v] of Object.entries(vals)) {
+            const inp = document.querySelector(`input[name="${name}"]`);
+            if (!inp) return 'missing input ' + name;
+            inp.value = String(v);
+            inp.dispatchEvent(new Event('input',  {bubbles: true}));
+            inp.dispatchEvent(new Event('change', {bubbles: true}));
+        }
+        const btn = [...document.querySelectorAll('input[type=submit]')]
+            .find(b => /confirm/i.test(b.value || ''));
+        if (!btn) return 'missing confirm button';
+        btn.scrollIntoView({block: 'center'});
+        const r = btn.getBoundingClientRect();
+        return JSON.stringify({x: r.left + r.width / 2, y: r.top + r.height / 2});
+    })())""" % json.dumps({
+        "line[priceEco]":   targets["eco"],
+        "line[priceBus]":   targets["bus"],
+        "line[priceFirst]": targets["first"],
+        "line[priceCargo]": targets["cargo"],
+    })
+    out = cdp.eval(fill_js)
+    if not out or not out.startswith("{"):
+        return "fail", out or "fill script returned nothing"
+    pt = json.loads(out)
+
+    for etype in ("mousePressed", "mouseReleased"):
+        mid = cdp._send("Input.dispatchMouseEvent", {
+            "type": etype, "x": pt["x"], "y": pt["y"],
+            "button": "left", "clickCount": 1,
+        })
+        cdp._recv(mid)
+
+    # The click submits the form and reloads the page; verify from the
+    # rendered result (fetch often sees empty bodies right after a change).
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        cur = read_current_prices_rendered(cdp)
+        if cur:
+            if all(cur[k] == targets[k] for k in CLASS_ORDER):
+                return "ok", ""
+            continue  # may still be the pre-submit render
+    cur = read_current_prices_rendered(cdp)
+    if cur and all(cur[k] == targets[k] for k in CLASS_ORDER):
+        return "ok", ""
+    if cur:
+        return "fail", f"rendered prices {cur} != targets"
+    return "clicked", "could not verify from rendered page"
 
 
 def collect_line_ids(cdp, airport_id, max_n=None):
@@ -345,11 +448,23 @@ def main():
                 print("Nothing to do.")
                 return
 
-        ok = fail = skipped = not_matched = 0
+        ok = fail = skipped = cooldown = not_matched = 0
         for i, lid in enumerate(ids, 1):
             html = fetch_text(cdp, f"/marketing/pricing/{lid}")
             data = parse_price_page(html)
             if not data:
+                remaining = cooldown_remaining(html)
+                if remaining:
+                    label = lid
+                    if db_line_ids:
+                        for d, d_lid in db_line_ids.items():
+                            if str(d_lid) == str(lid):
+                                label = d
+                                break
+                    print(f"  [{i:4d}/{len(ids)}] {label}: "
+                          f"skipped (cooldown, {remaining})")
+                    cooldown += 1
+                    continue
                 hl = len(html) if html else 0
                 print(f"  [{i:4d}/{len(ids)}] {lid}: PARSE FAIL (html len={hl})")
                 fail += 1
@@ -406,22 +521,22 @@ def main():
                 print(f"  [{i:4d}/{len(ids)}] {label:>4s}  {tag}{corrections}")
                 continue
 
-            status = post_form(cdp, f"/marketing/pricing/{lid}", {
-                "line[priceEco]":   tgt["eco"],
-                "line[priceBus]":   tgt["bus"],
-                "line[priceFirst]": tgt["first"],
-                "line[priceCargo]": tgt["cargo"],
-                "line[_token]":     data["token"],
-            })
-            if status in (200, 204, 302):
+            status, detail = submit_prices_native(cdp, lid, tgt)
+            if status == "ok":
                 ok += 1
                 print(f"  [{i:4d}/{len(ids)}] {label:>4s}  {tag}{corrections}")
+            elif status == "clicked":
+                ok += 1
+                print(f"  [{i:4d}/{len(ids)}] {label:>4s}  {tag}{corrections} "
+                      f"(unverified: {detail})")
+            elif status == "cooldown":
+                cooldown += 1
+                print(f"  [{i:4d}/{len(ids)}] {label}: skipped (cooldown, {detail})")
             else:
                 fail += 1
-                print(f"  [{i:4d}/{len(ids)}] {label}: HTTP {status}")
-            time.sleep(0.15)
+                print(f"  [{i:4d}/{len(ids)}] {label}: FAIL ({detail})")
 
-        print(f"\nDone. ok={ok} fail={fail} skipped={skipped} "
+        print(f"\nDone. ok={ok} fail={fail} skipped={skipped} cooldown={cooldown} "
               f"not_in_filter={not_matched}")
         sys.exit(0 if fail == 0 else 2)
     finally:
