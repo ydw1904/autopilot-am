@@ -58,15 +58,13 @@ def _get_line_ids_from_db(hub_iata, dest_iatas, db):
 
 def _write_line_ids_to_db(hub_iata, hub_lines, db):
     """Write scraped line_ids back to DB."""
-    for line in hub_lines:
-        dest = (line.get("dest") or "").upper()
-        lid = line.get("lineId")
-        if dest and lid:
-            db.execute(
-                "UPDATE routes SET line_id = ?, is_owned = 1 "
-                "WHERE hub_iata = ? AND dest_iata = ?",
-                (lid, hub_iata.upper(), dest)
-            )
+    db.executemany(
+        "UPDATE routes SET line_id = ?, is_owned = 1 "
+        "WHERE hub_iata = ? AND dest_iata = ?",
+        [(line["lineId"], hub_iata.upper(), (line.get("dest") or "").upper())
+         for line in hub_lines
+         if (line.get("dest") or "").upper() and line.get("lineId")],
+    )
     db.commit()
 
 

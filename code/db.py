@@ -353,21 +353,23 @@ def save_circuit_full(circuit: dict, custom_name: str | None = None) -> str:
     )
 
     db.execute("DELETE FROM circuit_routes WHERE circuit_name = ?", (name,))
-    for order, r in enumerate(sorted(routes, key=lambda x: -x["dist"]), 1):
-        db.execute(
-            """
-            INSERT INTO circuit_routes (
-                circuit_name, dest_iata, dest_name, distance_km,
-                eco_demand, bus_demand, fir_demand, cargo_demand,
-                flight_time_rt, route_order
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+    db.executemany(
+        """
+        INSERT INTO circuit_routes (
+            circuit_name, dest_iata, dest_name, distance_km,
+            eco_demand, bus_demand, fir_demand, cargo_demand,
+            flight_time_rt, route_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
             (
                 name, r["iata"], r.get("name", ""), r["dist"],
                 r["eco_d"], r["bus_d"], r["fir_d"], r["cargo_d"],
                 r["ft"], order,
-            ),
-        )
+            )
+            for order, r in enumerate(sorted(routes, key=lambda x: -x["dist"]), 1)
+        ],
+    )
 
     db.commit()
     return name
@@ -533,16 +535,16 @@ def upsert_fleet(aircraft_list: list[dict]):
     [{id, name, model, util, hub}, ...]
     """
     db = get_db()
-    for ac in aircraft_list:
-        db.execute(
-            "INSERT INTO fleet (aircraft_id, name, model, utilization, hub_iata, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(aircraft_id) DO UPDATE SET "
-            "name=excluded.name, model=excluded.model, "
-            "utilization=excluded.utilization, hub_iata=excluded.hub_iata, "
-            "updated_at=CURRENT_TIMESTAMP",
-            (ac["id"], ac["name"], ac["model"], ac["util"], ac["hub"]),
-        )
+    db.executemany(
+        "INSERT INTO fleet (aircraft_id, name, model, utilization, hub_iata, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(aircraft_id) DO UPDATE SET "
+        "name=excluded.name, model=excluded.model, "
+        "utilization=excluded.utilization, hub_iata=excluded.hub_iata, "
+        "updated_at=CURRENT_TIMESTAMP",
+        [(ac["id"], ac["name"], ac["model"], ac["util"], ac["hub"])
+         for ac in aircraft_list],
+    )
     db.commit()
 
 
