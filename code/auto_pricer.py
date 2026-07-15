@@ -208,9 +208,18 @@ def submit_prices_native(cdp, line_id, targets):
 
     # The click submits the form and reloads the page; verify from the
     # rendered result (fetch often sees empty bodies right after a change).
+    # The 24h cooldown can also reject the POST while the form still renders
+    # (e.g. freshly bought lines — creation sets the initial price and starts
+    # the timer); the only signal is an inline error message.
+    cooldown_msg_js = (
+        "/wait before proceeding with a new modification/i"
+        ".test(document.body.innerText) ? 'yes' : ''"
+    )
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         time.sleep(1.0)
+        if cdp.eval(cooldown_msg_js):
+            return "cooldown", "rejected: price changed within the last 24h"
         cur = read_current_prices_rendered(cdp)
         if cur:
             if all(cur[k] == targets[k] for k in CLASS_ORDER):
