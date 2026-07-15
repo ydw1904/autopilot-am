@@ -196,6 +196,13 @@ def _get_cdp():
     return _cdp
 
 
+def _cdp_error_suffix(cdp):
+    """' (cdp timeout: ...)' / ' (cdp js: ...)' if the last eval failed, else ''."""
+    if cdp.last_error:
+        return f" (cdp {cdp.last_error['kind']}: {cdp.last_error['detail']})"
+    return ""
+
+
 def _get_lines_at_selected_hub(cdp, hub_iata=None):
     """Owned lines at a planning hub, remapped to MCP output keys."""
     return [
@@ -530,9 +537,11 @@ def get_aircraft_at_hub(hub_iata: str) -> dict:
     hub_iata = hub_iata.upper().strip()
     cdp.navigate(f"{BASE_URL}/network/planning")
     if not _wait_for_hub_buttons(cdp, timeout=15.0):
-        return {"error": "Planning page did not load hub selector.", "hub_iata": hub_iata, "aircraft": []}
+        return {"error": "Planning page did not load hub selector." + _cdp_error_suffix(cdp),
+                "hub_iata": hub_iata, "aircraft": []}
     if not _select_planning_hub(cdp, hub_iata):
-        return {"error": f"Could not select hub {hub_iata} on the planning page.", "hub_iata": hub_iata, "aircraft": []}
+        return {"error": f"Could not select hub {hub_iata} on the planning page." + _cdp_error_suffix(cdp),
+                "hub_iata": hub_iata, "aircraft": []}
 
     aircraft = _get_aircraft_at_selected_hub(cdp, hub_iata)
     return {"hub_iata": hub_iata, "aircraft": aircraft, "count": len(aircraft)}

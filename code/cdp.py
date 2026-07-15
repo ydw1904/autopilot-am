@@ -39,6 +39,9 @@ class CDP:
         self.timeout = timeout
         self.ws = None
         self._msg_id = 0
+        # Why the last eval() returned None, when it failed:
+        # None | {"kind": "timeout"|"js", "detail": str}
+        self.last_error = None
 
     def connect(self):
         self.ws = websocket.create_connection(
@@ -66,14 +69,18 @@ class CDP:
                 return None
             if resp.get("id") == target_id:
                 return resp
-            self._msg_id = max(self._msg_id, resp.get("id", 0))
 
     def eval(self, expression, await_promise=False):
         """Run JavaScript in the page and return the result value.
 
         await_promise=True is required for fetch() calls — without it you get
         the unresolved Promise object instead of the data.
+
+        Returns None on WebSocket timeout, on a JS exception, or when the
+        expression evaluates to null/undefined; self.last_error tells the
+        three apart (set on failure, cleared on every call).
         """
+        self.last_error = None
         mid = self._send("Runtime.evaluate", {
             "expression": expression,
             "returnByValue": True,
@@ -81,13 +88,25 @@ class CDP:
         })
         resp = self._recv(mid)
         if not resp:
+            self.last_error = {"kind": "timeout",
+                               "detail": f"no response in {self.timeout}s"}
             return None
         exc = resp.get("result", {}).get("exceptionDetails")
         if exc:
             desc = exc.get("exception", {}).get("description", "unknown")
+            self.last_error = {"kind": "js", "detail": desc}
             print(f"  JS error: {desc[:200]}", file=sys.stderr)
             return None
         return resp.get("result", {}).get("result", {}).get("value")
+
+    def eval_or_raise(self, expression, await_promise=False):
+        """eval(), but raise RuntimeError instead of returning None when the
+        None came from a timeout or JS error (a legitimate null passes)."""
+        val = self.eval(expression, await_promise)
+        if val is None and self.last_error:
+            raise RuntimeError(f"CDP eval failed ({self.last_error['kind']}): "
+                               f"{self.last_error['detail']}")
+        return val
 
     def eval_json(self, expression, await_promise=False):
         """Like eval() but auto-parses JSON strings into dicts/lists."""
