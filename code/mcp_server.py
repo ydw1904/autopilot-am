@@ -145,11 +145,15 @@ def _run_python_script(
         "stderr_truncated": stderr_truncated,
     }
 
-    if parse_json and proc.returncode == 0:
+    # Not gated on returncode: the wrapped scripts exit non-zero on partial
+    # success (e.g. 2 = some batches failed) but still emit their document, and
+    # that document is exactly what explains the failure.
+    if parse_json and (proc.stdout or "").strip():
         try:
-            result["data"] = json.loads(proc.stdout or "{}")
+            result["data"] = json.loads(proc.stdout)
         except json.JSONDecodeError:
-            result["json_parse_error"] = "stdout was not valid JSON"
+            if proc.returncode == 0:
+                result["json_parse_error"] = "stdout was not valid JSON"
 
     return result
 
@@ -701,8 +705,10 @@ def plan_circuits(
         args.append("--phase1-only")
     if save:
         args.append("--save")
+    args.append("--json")
 
-    result = _run_python_script("circuit_planner.py", args, timeout=600)
+    result = _run_python_script("circuit_planner.py", args, timeout=600,
+                                parse_json=True)
     result.update({
         "hub": hub.upper().strip(),
         "aircraft": aircraft,
@@ -783,7 +789,8 @@ def buy_aircraft(
     'suggestions' immediately, without spending money.
     """
     if list_only:
-        return _run_python_script("aircraft_buyer.py", ["--list"], timeout=180)
+        return _run_python_script("aircraft_buyer.py", ["--list", "--json"],
+                                  timeout=180, parse_json=True)
 
     if not circuit and not model:
         return {"error": "Provide either circuit='HKG-C001' or model='B742'."}
@@ -826,7 +833,9 @@ def buy_aircraft(
     if dry_run:
         args.append("--dry-run")
 
-    result = _run_python_script("aircraft_buyer.py", args, timeout=900)
+    args.append("--json")
+    result = _run_python_script("aircraft_buyer.py", args, timeout=900,
+                                parse_json=True)
     result.update({
         "circuit": circuit,
         "model": model,
@@ -849,7 +858,8 @@ def schedule_circuits(
     Safety default: dry_run=True because live scheduling mutates the game.
     """
     if list_only:
-        return _run_python_script("circuit_scheduler.py", ["--list"], timeout=180)
+        return _run_python_script("circuit_scheduler.py", ["--list", "--json"],
+                                  timeout=180, parse_json=True)
 
     if not hub:
         return {"error": "hub='HKG'-style input is required unless list_only=True."}
@@ -862,7 +872,9 @@ def schedule_circuits(
     if only_new:
         args.append("--only-new")
 
-    result = _run_python_script("circuit_scheduler.py", args, timeout=900)
+    args.append("--json")
+    result = _run_python_script("circuit_scheduler.py", args, timeout=900,
+                                parse_json=True)
     result.update({
         "hub": hub.upper().strip(),
         "circuit": circuit,
@@ -907,7 +919,9 @@ def auto_price_routes(
     if dry_run:
         args.append("--dry-run")
 
-    result = _run_python_script("auto_pricer.py", args, timeout=900)
+    args.append("--json")
+    result = _run_python_script("auto_pricer.py", args, timeout=900,
+                                parse_json=True)
     result.update({
         "mode": mode,
         "pct": pct,

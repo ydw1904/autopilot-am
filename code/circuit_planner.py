@@ -18,7 +18,7 @@ Usage:
     python3 circuit_planner.py --hub HKG --aircraft B742 B743 --circuits 5 --owned-hubs FRA CGK PEK JNB
 """
 
-import math, argparse, heapq, time as _time, os
+import math, argparse, contextlib, heapq, json, sys, time as _time, os
 import numpy as np
 
 try:
@@ -833,8 +833,29 @@ def main():
     p.add_argument("--phase1-only", action="store_true")
     p.add_argument("--save", action="store_true",
                    help="Persist resulting circuits to DB via save_circuit_full")
+    p.add_argument("--json", action="store_true",
+                   help="Print one JSON document to stdout instead of the "
+                        "human report (which moves to stderr)")
     args = p.parse_args()
 
+    if not args.json:
+        _plan(args)
+        return
+
+    # stdout must carry exactly one JSON document, so the report _plan prints
+    # goes to stderr.
+    with contextlib.redirect_stdout(sys.stderr):
+        doc = _plan(args)
+    json.dump(doc, sys.stdout, indent=2)
+    print()
+
+
+def _plan(args):
+    """Run the planner, printing the human-readable report to stdout.
+
+    Always builds and returns the structured result document; main() discards
+    it unless --json was given.
+    """
     db = get_db()
 
     # Load aircraft
@@ -848,7 +869,7 @@ def main():
 
     if not aircraft_list:
         print("No valid aircraft specified")
-        return
+        return {"hub": args.hub.upper(), "elapsed_s": 0.0, "circuits": []}
 
     # Build exclusion set
     exclude_base = set(x.upper() for x in (args.exclude or []))
@@ -977,6 +998,7 @@ def main():
     total_investment = 0
     total_planes = 0
     ac_usage = {}
+    results = []
 
     if not args.phase1_only:
         print(f"  {'#':>2}  {'AC':<4}  {'Time':>7}  {'Rt':>2}  {'Waves':>5}  {'Planes':>6}  "
@@ -993,6 +1015,27 @@ def main():
         total_routes_used += len(route_list)
         ac_usage[ac["alias"]] = ac_usage.get(ac["alias"], 0) + 1
 
+        res = {
+            "num": num,
+            "aircraft": ac["alias"],
+            "model": ac["model"],
+            "total_hours": round(total_time, 2),
+            "p1_score": round(p1_score, 2),
+            "routes": [
+                {"iata": r["iata"], "name": r["name"], "dist": r["dist"],
+                 "ft": round(r["ft"], 2), "eco_d": r["eco_d"], "bus_d": r["bus_d"],
+                 "fir_d": r["fir_d"], "cargo_d": r["cargo_d"], "price": r["price"]}
+                for r in sorted(route_list, key=lambda r: -r["dist"])
+            ],
+            "cfg": dict(cfg) if cfg else None,
+            "waves": waves,
+            "daily_rev": None, "weekly_rev": None,
+            "investment": None, "route_investment": None,
+            "payback_days": None, "roi_pct_year": None,
+            "saved_as": None,
+        }
+        results.append(res)
+
         if cfg and not args.phase1_only:
             weekly = daily_rev * 7
             planes = waves * 7
@@ -1006,6 +1049,14 @@ def main():
             payback_days = total_inv / daily_rev if daily_rev > 0 else 0
             roi = daily_rev * 365 / total_inv * 100 if total_inv > 0 else 0
             total_investment += total_inv
+            res.update({
+                "daily_rev": round(daily_rev, 2),
+                "weekly_rev": round(weekly, 2),
+                "investment": round(total_inv, 2),
+                "route_investment": round(route_cost, 2),
+                "payback_days": round(payback_days, 2),
+                "roi_pct_year": round(roi, 2),
+            })
             cfg_str = f"e{cfg['eco']} b{cfg['bus']} f{cfg['fir']} c{cfg['cargo']}"
             print(f"  #{num:>2}  {ac['alias']:<4}  {total_time:>6.2f}h  {len(route_list):>2}r  "
                   f"{waves:>5}w  {planes:>5}ac  {cfg_str:<22}  ${weekly:>13,.0f}  "
@@ -1037,7 +1088,7 @@ def main():
     if args.save and not args.phase1_only:
         from db import save_circuit_full
         saved = []
-        for entry in all_circuits:
+        for entry, res in zip(all_circuits, results):
             _num, ac, route_list, total_time = entry[0], entry[1], entry[2], entry[3]
             cfg, waves, daily_rev = entry[5], entry[6], entry[7]
             if not cfg or not waves:
@@ -1047,10 +1098,16 @@ def main():
                 "total_time": total_time, "cfg": cfg, "waves": waves,
                 "daily_rev": daily_rev, "weekly_rev": daily_rev * 7,
             }
-            saved.append(save_circuit_full(cdict))
+            res["saved_as"] = save_circuit_full(cdict)
+            saved.append(res["saved_as"])
         print(f"  Saved circuits to DB: {len(saved)} ({', '.join(saved)})")
 
     close_db()
+    return {
+        "hub": args.hub.upper(),
+        "elapsed_s": round(elapsed, 2),
+        "circuits": results,
+    }
 
 
 if __name__ == "__main__":

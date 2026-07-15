@@ -22,7 +22,7 @@ Requirements: Chrome running with --remote-debugging-port=9222 --remote-allow-or
               httpx, websocket-client, colorama pip packages
 """
 
-import argparse, json, math, re, sys, time
+import argparse, contextlib, json, math, re, sys, time
 from urllib.parse import quote
 
 from colorama import init, Fore, Style
@@ -356,8 +356,37 @@ def main():
     p.add_argument("--only-new", action="store_true",
                    help="Skip aircraft that already have flights scheduled "
                         "(preserves in-progress weeks).")
+    p.add_argument("--json", action="store_true",
+                   help="Print one JSON document to stdout instead of the "
+                        "human report (which moves to stderr)")
     args = p.parse_args()
 
+    if not args.json:
+        _schedule(args, p)
+        return
+
+    # stdout must carry exactly one JSON document, so the report _schedule
+    # prints goes to stderr. The fatal paths sys.exit() after printing to
+    # stderr; still emit a document so the caller gets structured output.
+    code = 0
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            doc = _schedule(args, p)
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else 1
+            doc = {"hub": (args.hub or "").upper(), "circuits": [], "fatal": True}
+    json.dump(doc, sys.stdout, indent=2)
+    print()
+    if code:
+        sys.exit(code)
+
+
+def _schedule(args, p):
+    """Run the scheduler, printing the human-readable report to stdout.
+
+    Always builds and returns the structured result document; main() discards
+    it unless --json was given.
+    """
     db = get_db()
 
     # ── --list mode ─────────────────────────────────────────────────────
@@ -368,7 +397,7 @@ def main():
         ).fetchall()
         if not rows:
             print("No circuits found in database.")
-            return
+            return {"mode": "list", "circuits": []}
 
         # Group by hub
         by_hub = {}
@@ -385,7 +414,11 @@ def main():
                 marker = f"{Fore.GREEN}{status}{Style.RESET_ALL}" if status == "bought" else status
                 print(f"  {c['name']:<14} {c['aircraft_model']:<14} {c['total_hours']:>6.1f} "
                       f"{c['waves'] or '-':>5} {marker}")
-        return
+        return {"mode": "list", "circuits": [
+            {"circuit": r["name"], "hub": r["hub_iata"], "model": r["aircraft_model"],
+             "total_hours": r["total_hours"], "waves": r["waves"], "status": r["status"]}
+            for r in rows
+        ]}
 
     if not args.hub:
         p.error("--hub is required (or use --list)")
@@ -443,7 +476,15 @@ def main():
             print()
         print(f"{Fore.YELLOW}DRY RUN - no changes made to the game.\n")
         close_db()
-        return
+        return {
+            "hub": hub_iata,
+            "dry_run": True,
+            "circuits": [
+                {"circuit": c["name"], "scheduled": [], "skipped": [], "errors": [],
+                 "planned": [f"{c['name']}-{i + 1:03d}" for i in range(c["waves"] * 7)]}
+                for c in circuits
+            ],
+        }
 
     # ── Live scheduling ─────────────────────────────────────────────────
     print(f"{Fore.CYAN}Connecting to Chrome...")
@@ -528,12 +569,15 @@ def main():
     success_count = 0
     error_count = 0
     skipped_count = 0
+    results = []
 
     from db import update_circuit_progress
 
     for circuit in circuits:
         cname = circuit["name"]
         matched = matched_per_circuit.get(cname, [])
+        res = {"circuit": cname, "scheduled": [], "skipped": [], "errors": []}
+        results.append(res)
 
         print(f"{Fore.GREEN}{'─' * 58}")
         print(f"  Circuit: {cname}  ({circuit['model']})")
@@ -542,6 +586,7 @@ def main():
         if not matched:
             print(f"  {Fore.RED}No matching aircraft — skipping")
             error_count += 1
+            res["errors"].append("No matching aircraft")
             continue
 
         routes_with_ids = []
@@ -554,6 +599,7 @@ def main():
         if missing:
             print(f"  {Fore.YELLOW}WARNING: {len(missing)} routes missing lineId: "
                   f"{', '.join(missing)}")
+            res["errors"].append(f"missing lineId: {', '.join(missing)}")
 
         preserved = 0   # aircraft we left alone because they were already flying
         successes = 0   # aircraft we successfully scheduled this run
@@ -569,12 +615,14 @@ def main():
             if args.only_new and already_flying:
                 print(f"    {Fore.CYAN}--only-new: skipping (already scheduled)")
                 preserved += 1
+                res["skipped"].append(label)
                 continue
 
             flights = build_flight_schedule(routes_with_ids, mmm - 1)
             if not flights:
                 print(f"    {Fore.YELLOW}No flights generated — skipping")
                 skipped_count += 1
+                res["skipped"].append(label)
                 continue
 
             print(f"    Schedule ({len(flights)} flights):")
@@ -593,10 +641,12 @@ def main():
                 print(f"    {Fore.GREEN}SUCCESS")
                 successes += 1
                 success_count += 1
+                res["scheduled"].append(label)
             else:
                 msg = result.get("message", str(result)) if result else "No response"
                 print(f"    {Fore.RED}FAILED: {msg}")
                 error_count += 1
+                res["errors"].append(f"{label}: {msg}")
             cdp.wait(0.5)
 
         # Update DB progress: total scheduled = preserved + new successes
@@ -605,6 +655,7 @@ def main():
         update_circuit_progress(cname, waves_scheduled=waves_scheduled)
         print(f"\n  {Fore.CYAN}{cname}: scheduled_total={scheduled_total} "
               f"→ waves_scheduled={waves_scheduled}")
+        res["waves_scheduled"] = waves_scheduled
 
     # ── Final summary ───────────────────────────────────────────────────
     print(f"\n{'=' * 62}")
@@ -616,6 +667,7 @@ def main():
 
     cdp.close()
     close_db()
+    return {"hub": hub_iata, "dry_run": False, "circuits": results}
 
 
 if __name__ == "__main__":

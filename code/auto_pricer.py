@@ -46,7 +46,7 @@ All HTTP goes via fetch() inside the open AM tab so cookies/session are preserve
 Requires Chrome with --remote-debugging-port=9222 and an AM tab open.
 """
 
-import argparse, json, math, os, re, sys, time
+import argparse, contextlib, json, math, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL, wait_for_js  # noqa: E402
@@ -382,8 +382,36 @@ def main():
     p.add_argument("--skip-unchanged", action="store_true",
                    help="Skip POST when current already equals target")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--json", action="store_true",
+                   help="Print one JSON document to stdout instead of the "
+                        "human report (which moves to stderr)")
     args = p.parse_args()
 
+    if not args.json:
+        _price(args, {"routes": [], "totals": {}})
+        return
+
+    # stdout must carry exactly one JSON document, so the report _price prints
+    # goes to stderr. _price fills `doc` in place and exits from inside its
+    # try/finally, so emit whatever it filled either way.
+    doc = {"routes": [], "totals": {}}
+    code = 0
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            _price(args, doc)
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else 1
+    json.dump(doc, sys.stdout, indent=2)
+    print()
+    sys.exit(code)
+
+
+def _price(args, doc):
+    """Run the pricer, printing the human-readable report to stdout.
+
+    Fills `doc` (the --json result document) in place as it goes, so callers
+    still get structured output when this exits early.
+    """
     target_iatas = None
     hub_iata = None
 
@@ -391,6 +419,7 @@ def main():
         hub_iata, circuit_iatas = load_circuit_dest_iatas(args.circuit)
         if circuit_iatas is None:
             print(f"ERROR: circuit '{args.circuit}' not found in DB.", file=sys.stderr)
+            doc["error"] = f"circuit '{args.circuit}' not found"
             sys.exit(1)
         target_iatas = circuit_iatas
         print(f"Circuit {args.circuit}: hub={hub_iata}, {len(target_iatas)} routes: "
@@ -451,10 +480,16 @@ def main():
                     print(f"  [{i:4d}/{len(ids)}] {label}: "
                           f"skipped (cooldown, {remaining})")
                     cooldown += 1
+                    doc["routes"].append({"route": label, "old": None, "new": None,
+                                          "changed": None, "status": "cooldown",
+                                          "detail": remaining})
                     continue
                 hl = len(html) if html else 0
                 print(f"  [{i:4d}/{len(ids)}] {lid}: PARSE FAIL (html len={hl})")
                 fail += 1
+                doc["routes"].append({"route": str(lid), "old": None, "new": None,
+                                      "changed": None, "status": "fail",
+                                      "detail": f"parse fail (html len={hl})"})
                 continue
 
             dest = data.get("dest_iata")
@@ -500,15 +535,24 @@ def main():
 
             if args.skip_unchanged and not changed:
                 skipped += 1
+                doc["routes"].append({"route": label, "old": dict(cur), "new": dict(tgt),
+                                      "changed": False, "status": "skipped"})
                 if i % 25 == 0:
                     print(f"  [{i:4d}/{len(ids)}] {label}: unchanged (skip)")
                 continue
 
             if args.dry_run:
                 print(f"  [{i:4d}/{len(ids)}] {label:>4s}  {tag}{corrections}")
+                doc["routes"].append({"route": label, "old": dict(cur), "new": dict(tgt),
+                                      "changed": changed, "status": "dry_run"})
                 continue
 
             status, detail = submit_prices_native(cdp, lid, tgt)
+            entry = {"route": label, "old": dict(cur), "new": dict(tgt),
+                     "changed": changed, "status": status}
+            if detail:
+                entry["detail"] = detail
+            doc["routes"].append(entry)
             if status == "ok":
                 ok += 1
                 print(f"  [{i:4d}/{len(ids)}] {label:>4s}  {tag}{corrections}")
@@ -525,6 +569,8 @@ def main():
 
         print(f"\nDone. ok={ok} fail={fail} skipped={skipped} cooldown={cooldown} "
               f"not_in_filter={not_matched}")
+        doc["totals"] = {"ok": ok, "fail": fail, "skipped": skipped,
+                         "cooldown": cooldown, "not_in_filter": not_matched}
         sys.exit(0 if fail == 0 else 2)
     finally:
         cdp.close()

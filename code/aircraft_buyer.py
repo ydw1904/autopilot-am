@@ -37,7 +37,7 @@ Requirements:
   - httpx and websocket-client pip packages
 """
 
-import argparse, json, math, re, sys, time
+import argparse, contextlib, json, math, re, sys, time
 
 from cdp import CDP, get_am_tab, connect_cdp, BASE_URL  # noqa: F401
 from db import get_db, close_db
@@ -607,8 +607,36 @@ List:
     p.add_argument("--name", default=None, help="Aircraft name prefix")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--list", action="store_true")
+    p.add_argument("--json", action="store_true",
+                   help="Print one JSON document to stdout instead of the "
+                        "human report (which moves to stderr)")
     args = p.parse_args()
 
+    if not args.json:
+        _buy(args, {"errors": []})
+        return
+
+    # stdout must carry exactly one JSON document, so the report _buy prints
+    # goes to stderr. _buy fills `doc` in place and exits from deep inside on
+    # both success and failure, so emit whatever it filled in either way.
+    doc = {"purchased": 0, "model": None, "total_cost": None, "errors": []}
+    code = 0
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            _buy(args, doc)
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else 1
+    json.dump(doc, sys.stdout, indent=2)
+    print()
+    sys.exit(code)
+
+
+def _buy(args, doc):
+    """Run the buyer, printing the human-readable report to stdout.
+
+    Fills `doc` (the --json result document) in place as it goes, so callers
+    still get structured output when this exits early.
+    """
     db = get_db()
 
     if args.list:
@@ -619,6 +647,7 @@ List:
         ).fetchall()
         if not circuits:
             print("No circuits found.")
+            doc["circuits"] = []
             return
         print(f"{'Circuit':<12} {'Hub':<6} {'Aircraft':<8} {'Waves':<7} "
               f"{'Eco':<5} {'Bus':<4} {'Fir':<4} {'Crg':<4} {'Hours':<7} {'Status'}")
@@ -632,6 +661,13 @@ List:
             print(f"{c['name']:<12} {c['hub_iata']:<6} {c['aircraft_model']:<8} "
                   f"{w:<7} {e:<5} {b:<4} {f:<4} {cg:<4} "
                   f"{c['total_hours']:<7.1f} {c['status']}")
+        doc["circuits"] = [
+            {"circuit": c["name"], "hub": c["hub_iata"], "model": c["aircraft_model"],
+             "waves": c["waves"], "total_hours": c["total_hours"], "status": c["status"],
+             "cfg": {"eco": c["eco_seats"], "bus": c["bus_seats"],
+                     "fir": c["fir_seats"], "cargo": c["cargo_seats"]}}
+            for c in circuits
+        ]
         return
 
     # Determine mode: circuit vs standalone
@@ -640,6 +676,7 @@ List:
         circuit = load_circuit(db, args.circuit)
         if not circuit:
             print(f"ERROR: Circuit '{args.circuit}' not found.", file=sys.stderr)
+            doc["errors"].append(f"Circuit '{args.circuit}' not found")
             sys.exit(1)
 
         model_alias = circuit["model"]
@@ -777,9 +814,11 @@ List:
         game_id = scrape_game_id(cdp, model_name)
         if not game_id:
             print(f"ERROR: Could not find {model_name} on any haul page.", file=sys.stderr)
+            doc["errors"].append(f"Could not find {model_name} on any haul page")
             cdp.close()
             sys.exit(1)
 
+    doc["model"] = model_name
     bought_total = 0
     remaining = requested
     batch_idx = 0
@@ -795,6 +834,7 @@ List:
         count = navigate_to_list(cdp, haul)
         if not count:
             print("ERROR: Aircraft list didn't load — aborting", file=sys.stderr)
+            doc["errors"].append("Aircraft list didn't load")
             break
 
         # Find aircraft box
@@ -805,12 +845,14 @@ List:
             found_haul, box_index = search_all_haul_pages(cdp, model_name, game_id)
             if box_index < 0:
                 print(f"ERROR: {model_name} not found on any haul page — aborting", file=sys.stderr)
+                doc["errors"].append(f"{model_name} not found on any haul page")
                 break
             haul = found_haul
 
         # Trigger configure step
         if not trigger_configure(cdp, box_index):
             print("ERROR: Configure form did not load — aborting", file=sys.stderr)
+            doc["errors"].append("Configure form did not load")
             break
 
         # Configure and purchase (dry_run captures payload without submitting)
@@ -829,6 +871,7 @@ List:
 
         if not success and success is not None:
             print("  Stopping after failed batch.")
+            doc["errors"].append(f"batch {batch_idx} failed: {message}")
             break
 
         if success:
@@ -851,6 +894,8 @@ List:
             time.sleep(2)
 
     if args.dry_run:
+        doc["dry_run"] = True
+        doc["purchased"] = bought_total
         cdp.close()
         close_db()
         sys.exit(0)
@@ -859,7 +904,10 @@ List:
     if balance_before and balance_after:
         spent = balance_before - balance_after
         print(f"\nBalance: ${balance_before:,.0f} -> ${balance_after:,.0f} (spent: ${spent:,.0f})")
+        doc["total_cost"] = spent
     print(f"\nBought {bought_total}/{requested} aircraft.")
+    doc["purchased"] = bought_total
+    doc["requested"] = requested
     cdp.close()
     close_db()
     sys.exit(0 if bought_total == requested else 2)

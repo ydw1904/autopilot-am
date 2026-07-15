@@ -38,7 +38,11 @@ The three surfaces on top:
    plane. Live-state tools call CDP directly; heavier ops shell out to the CLI scripts.
    **Mutating tools default to `dry_run=True`.**
 2. **CLI scripts** (`code/*.py`) — each game operation is a standalone `argparse`
-   script, runnable and testable without an agent.
+   script, runnable and testable without an agent. The heavy ones the MCP server
+   wraps (`circuit_planner`, `circuit_scheduler`, `aircraft_buyer`, `auto_pricer`,
+   `masstool`) take `--json`: stdout carries exactly one JSON document and the
+   human report moves to stderr, so the server parses a result instead of
+   scraping ASCII tables. Without the flag the human report is unchanged.
 3. **GUI** (`code/gui_app.py` + `code/gui/`) — a NiceGUI desktop control panel over the
    same CLI/core code.
 
