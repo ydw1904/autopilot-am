@@ -31,7 +31,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from dataclasses import asdict
 from typing import List, Optional, Tuple
 
@@ -55,6 +54,7 @@ from aircraft_aliases import (  # noqa: E402
 from circuit_route_buyer import (  # noqa: E402
     wait_for_listing, find_country_card, finalize_purchase,
 )
+from circuit_scheduler import clear_schedule, submit_flights  # noqa: E402
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -565,38 +565,12 @@ def schedule_flight(
     aircraft_id = str(aircraft_id)
 
     if clear_first:
-        cdp.eval_json(
-            "(((URL, AC_ID) => {"
-            "  return fetch(URL + '/network/planning/0/ajax', {"
-            "    method: 'POST',"
-            "    headers: {"
-            "      'Content-Type': 'application/x-www-form-urlencoded',"
-            "      'X-Requested-With': 'XMLHttpRequest'"
-            "    },"
-            "    body: 'planningData=' + encodeURIComponent(JSON.stringify({aircraftId: AC_ID})),"
-            "    credentials: 'include'"
-            "  }).then(r => r.json());"
-            f"}})({js_args(BASE_URL, aircraft_id)}))", await_promise=True)
-        time.sleep(1)
+        res = clear_schedule(cdp, aircraft_id)
+        if not res or not res.get("result"):
+            return {"success": False,
+                    "error": f"Failed to clear existing schedule: {res}"}
 
-    payload = {"aircraftId": aircraft_id, "added": flights}
-
-    result = cdp.eval_json(
-        "((() => {\n"
-        f"  return fetch('{BASE_URL}/network/planning/0/ajax', {{\n"
-        "    method: 'POST',\n"
-        "    headers: {\n"
-        "      'Content-Type': 'application/x-www-form-urlencoded',\n"
-        "      'X-Requested-With': 'XMLHttpRequest'\n"
-        "    },\n"
-        f"    body: 'planningData=' + encodeURIComponent(JSON.stringify({json.dumps(payload)})),\n"
-        "    credentials: 'include'\n"
-        "  })\n"
-        "  .then(r => r.json())\n"
-        "  .catch(e => ({error: e.message}));\n"
-        "})())",
-        await_promise=True,
-    )
+    result = submit_flights(cdp, aircraft_id, flights)
 
     if not result:
         return {"error": "Scheduling request returned no response."}
