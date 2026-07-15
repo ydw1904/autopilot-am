@@ -23,7 +23,9 @@ from db import DB
 # Irregular nicknames the DB can't supply. Bare family names ("A380", "747") are
 # handled generically by prefix matching, so this is intentionally empty for now —
 # add only colloquialisms with no canonical/ICAO form (key -> canonical model).
-_OVERLAY: dict[str, str] = {}
+_OVERLAY: dict[str, str] = {
+    "Global 6500": "G6500",  # real marketing name; game/DB uses "G6500"
+}
 
 
 def _norm(s: str) -> str:
