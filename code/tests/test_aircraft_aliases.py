@@ -3,8 +3,12 @@
 Hermetic: builds a small temp sqlite fixture and points the resolver at it via the
 `db_path` argument, so no game DB or network is needed. Run with:
 
-    .venv/bin/python -m unittest code.tests.test_aircraft_aliases
-    # or from the code/ dir:  ../.venv/bin/python -m unittest tests.test_aircraft_aliases
+    .venv/bin/python -m pytest code/tests/ -q
+    # this file alone:  .venv/bin/python -m pytest code/tests/test_aircraft_aliases.py -q
+
+(These are unittest.TestCase classes; pytest runs them natively. `python -m
+unittest code.tests...` does NOT work from the repo root — `code` resolves to
+the stdlib module of that name.)
 """
 
 import os

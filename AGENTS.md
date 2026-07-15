@@ -16,8 +16,11 @@ has a hot path in native **C++** (`code/native/beam_search.cpp`) behind a ctypes
 wrapper. GUI is **NiceGUI**. Deps pinned in `code/requirements.txt`
 (`mcp`, `httpx`, `websocket-client`, `numpy`, `colorama`, `nicegui`).
 
-**No test suite.** Verify changes by running scripts with `--dry-run` /
-`--phase1-only`, and by booting the MCP server (see [Verification](#verification)).
+**Pure logic has a test suite:** `.venv/bin/python -m pytest code/tests/ -q`
+(offline, no Chrome, ~1s). It covers the pricing/flight-time formulas, the
+schedule builder, and `db.py`. Anything that touches CDP is still verified
+manually by running scripts with `--dry-run` / `--phase1-only`, and by booting
+the MCP server (see [Verification](#verification)).
 
 ## Three surfaces, one core
 

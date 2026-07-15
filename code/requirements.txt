@@ -22,3 +22,6 @@ colorama>=0.4.6
 
 # GUI only (gui_app.py); the MCP server and CLI scripts do not need it
 nicegui>=2.0
+
+# dev — test suite only (.venv/bin/python -m pytest code/tests/ -q)
+pytest>=8.0
