@@ -10,7 +10,7 @@ import re
 
 # wait_for_js is re-exported here — it predates cdp.wait_for_js and callers
 # import it from this module.
-from cdp import BASE_URL, wait_for_js  # noqa: F401
+from cdp import BASE_URL, js_args, wait_for_js  # noqa: F401
 
 
 def navigate_to_planning(cdp):
@@ -39,17 +39,19 @@ def select_hub(cdp, hub_iata):
     """Click the .planninghubBtn whose text starts with '<IATA> /', then wait
     for the hub's aircraft/line lists to reload. Returns True/False."""
     hub_iata = hub_iata.upper().strip()
-    result = cdp.eval_json(f"""((() => {{
-        const btns = document.querySelectorAll('.planninghubBtn');
-        for (const btn of btns) {{
-            const txt = (btn.textContent || '').trim();
-            if (txt.startsWith('{hub_iata} /') || txt.startsWith('{hub_iata}/')) {{
-                btn.click();
-                return {{found: true, id: btn.id, text: txt}};
-            }}
-        }}
-        return {{found: false, count: btns.length}};
-    }})())""")
+    result = cdp.eval_json(
+        "(((HUB) => {"
+        "  const btns = document.querySelectorAll('.planninghubBtn');"
+        "  for (const btn of btns) {"
+        "    const txt = (btn.textContent || '').trim();"
+        "    if (txt.startsWith(HUB + ' /') || txt.startsWith(HUB + '/')) {"
+        "      btn.click();"
+        "      return {found: true, id: btn.id, text: txt};"
+        "    }"
+        "  }"
+        "  return {found: false, count: btns.length};"
+        f"}})({js_args(hub_iata)}))"
+    )
     if not result or not result.get("found"):
         return False
 
@@ -78,14 +80,16 @@ def _resolve_hub_id(cdp, hub_iata):
     hub_iata = (hub_iata or "").upper().strip()
     if not re.fullmatch(r"[A-Z]{3}", hub_iata):
         return None
-    hub_id = cdp.eval(f"""((() => {{
-        for (const b of document.querySelectorAll('#hubList .planninghubBtn')) {{
-            const t = (b.textContent || '').trim();
-            if (t.startsWith('{hub_iata} /') || t.startsWith('{hub_iata}/'))
-                return b.getAttribute('data-hubId') || '';
-        }}
-        return '';
-    }})())""")
+    hub_id = cdp.eval(
+        "(((HUB) => {"
+        "  for (const b of document.querySelectorAll('#hubList .planninghubBtn')) {"
+        "    const t = (b.textContent || '').trim();"
+        "    if (t.startsWith(HUB + ' /') || t.startsWith(HUB + '/'))"
+        "      return b.getAttribute('data-hubId') || '';"
+        "  }"
+        "  return '';"
+        f"}})({js_args(hub_iata)}))"
+    )
     return str(hub_id) if hub_id and str(hub_id).isdigit() else None
 
 

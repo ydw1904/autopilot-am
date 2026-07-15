@@ -130,6 +130,20 @@ class CDP:
         return None
 
 
+def js_args(*values):
+    """Encode Python values as a comma-separated JS argument list.
+
+    Use this instead of interpolating runtime values into JS source: a value
+    holding a quote, backslash or newline (aircraft names are user-chosen —
+    O'HARE) otherwise produces a syntax error, and eval then returns None,
+    which callers read as "not found". Pass the body's inputs as IIFE
+    arguments:
+
+        cdp.eval("(((HUB) => { ...use HUB... })(" + js_args(hub) + "))")
+    """
+    return ", ".join(json.dumps(v) for v in values)
+
+
 def wait_for_js(cdp, expression, timeout=15.0, interval=0.5):
     """Poll a JS expression until it returns a truthy non-error value."""
     deadline = time.monotonic() + timeout
