@@ -38,7 +38,7 @@ from typing import List, Optional, Tuple
 from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdp import CDP, get_am_tab, BASE_URL  # noqa: E402
+from cdp import CDP, get_am_tab, js_args, BASE_URL  # noqa: E402
 from db import get_dest_country, get_player_hub_id, mark_route_owned  # noqa: E402
 from planning_page import (  # noqa: E402
     wait_for_js as _wait_for_js,
@@ -371,14 +371,16 @@ def buy_route(
             f"{BASE_URL}/network/newline",
             "document.querySelectorAll('.hubListBox[data-hubid]').length",
         )
-        hub_id = cdp.eval(f"""((() => {{
-            const boxes = document.querySelectorAll('.hubListBox[data-hubid]');
-            for (const b of boxes) {{
-                const name = (b.querySelector('.title')?.textContent || '').trim().toUpperCase();
-                if (name.startsWith('{hub_iata}')) return b.getAttribute('data-hubid');
-            }}
-            return null;
-        }})())""")
+        hub_id = cdp.eval(
+            "(((HUB) => {"
+            "  const boxes = document.querySelectorAll('.hubListBox[data-hubid]');"
+            "  for (const b of boxes) {"
+            "    const name = (b.querySelector('.title')?.textContent || '').trim().toUpperCase();"
+            "    if (name.startsWith(HUB)) return b.getAttribute('data-hubid');"
+            "  }"
+            "  return null;"
+            f"}})({js_args(hub_iata)}))"
+        )
     if not hub_id or isinstance(hub_id, dict):
         return {"error": f"Could not resolve hub_id for {hub_iata}. Pass hub_id explicitly."}
     hub_id = str(hub_id)
@@ -563,17 +565,18 @@ def schedule_flight(
     aircraft_id = str(aircraft_id)
 
     if clear_first:
-        cdp.eval_json(f"""((() => {{
-            return fetch('{BASE_URL}/network/planning/0/ajax', {{
-                method: 'POST',
-                headers: {{
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-Requested-With': 'XMLHttpRequest'
-                }},
-                body: 'planningData=' + encodeURIComponent(JSON.stringify({{"aircraftId": "{aircraft_id}"}})),
-                credentials: 'include'
-            }}).then(r => r.json());
-        }})())""", await_promise=True)
+        cdp.eval_json(
+            "(((URL, AC_ID) => {"
+            "  return fetch(URL + '/network/planning/0/ajax', {"
+            "    method: 'POST',"
+            "    headers: {"
+            "      'Content-Type': 'application/x-www-form-urlencoded',"
+            "      'X-Requested-With': 'XMLHttpRequest'"
+            "    },"
+            "    body: 'planningData=' + encodeURIComponent(JSON.stringify({aircraftId: AC_ID})),"
+            "    credentials: 'include'"
+            "  }).then(r => r.json());"
+            f"}})({js_args(BASE_URL, aircraft_id)}))", await_promise=True)
         time.sleep(1)
 
     payload = {"aircraftId": aircraft_id, "added": flights}
