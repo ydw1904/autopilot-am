@@ -39,7 +39,7 @@ Requirements:
 
 import argparse, contextlib, json, math, re, sys, time
 
-from cdp import CDP, get_am_tab, connect_cdp, BASE_URL  # noqa: F401
+from cdp import CDP, get_am_tab, connect_cdp, js_args, BASE_URL  # noqa: F401
 from db import get_db, close_db
 from aircraft_aliases import resolve as resolve_aircraft
 
@@ -134,10 +134,8 @@ def find_aircraft_on_page(cdp, model_name, game_id=None):
       2. Match by input[name="aircraft[id]"] value (if game_id known)
       3. Match by .title span text containing model_name
     """
-    return cdp.eval(f"""(() => {{
+    return cdp.eval(f"""(((want, wantId) => {{
         const boxes = document.querySelectorAll('.aircraftPurchaseBox');
-        const want = '{model_name}';
-        const wantId = {game_id or 'null'};
         for (let i = 0; i < boxes.length; i++) {{
             const box = boxes[i];
             // Strategy 1: .aircraftJson JSON data
@@ -158,7 +156,7 @@ def find_aircraft_on_page(cdp, model_name, game_id=None):
             if (titleEl && titleEl.textContent.trim().includes(want)) return i;
         }}
         return -1;
-    }})()""")
+    }})({js_args(model_name, game_id)}))""")
 
 
 def search_all_haul_pages(cdp, model_name, game_id=None):
@@ -180,17 +178,19 @@ def scrape_game_id(cdp, model_name):
         count = navigate_to_list(cdp, haul)
         if not count:
             continue
-        game_id = cdp.eval(f"""(() => {{
-            const boxes = document.querySelectorAll('.aircraftPurchaseBox');
-            for (const box of boxes) {{
-                const t = box.querySelector('.title span, .aircraftTitle, h3, h4');
-                if (t && t.textContent.trim().includes('{model_name}')) {{
-                    const id = box.querySelector('input[name="aircraft[id]"]');
-                    return id ? parseInt(id.value) : null;
-                }}
-            }}
-            return null;
-        }})()""")
+        game_id = cdp.eval(
+            "(((want) => {"
+            "  const boxes = document.querySelectorAll('.aircraftPurchaseBox');"
+            "  for (const box of boxes) {"
+            "    const t = box.querySelector('.title span, .aircraftTitle, h3, h4');"
+            "    if (t && t.textContent.trim().includes(want)) {"
+            "      const id = box.querySelector('input[name=\"aircraft[id]\"]');"
+            "      return id ? parseInt(id.value) : null;"
+            "    }"
+            "  }"
+            "  return null;"
+            f"}})({js_args(model_name)}))"
+        )
         if game_id:
             print(f"  Found {model_name} game_id={game_id} on /{haul} page")
             return game_id
@@ -259,37 +259,41 @@ def trigger_configure(cdp, box_index):
 
 
 def set_input_value(form_js, selector, value):
-    """JS expression to set an input value using native setter + jQuery trigger."""
-    return f"""(() => {{
+    """JS expression to set an input value using native setter + jQuery trigger.
+
+    `value` reaches here as a user-chosen aircraft name, so it goes in as a JS
+    argument rather than interpolated source.
+    """
+    return f"""(((SEL, VAL) => {{
         const form = {form_js};
         if (!form) return 'no_form';
-        const el = form.querySelector('{selector}');
-        if (!el) return 'no_element:{selector}';
+        const el = form.querySelector(SEL);
+        if (!el) return 'no_element:' + SEL;
         const nativeSetter = Object.getOwnPropertyDescriptor(
             HTMLInputElement.prototype, 'value'
         ).set;
-        nativeSetter.call(el, '{value}');
+        nativeSetter.call(el, VAL);
         $(el).trigger('input').trigger('change');
         return 'ok';
-    }})()"""
+    }})({js_args(selector, str(value))}))"""
 
 
 def set_seat_js(form_js, selector, value):
     """Set a seat slider's manual input. Fires the full event chain
     (input/change/keyup/blur) so the jQuery-UI slider handler recomputes the
     hidden aircraft[seats*] fields. Verified against the live configure form."""
-    return f"""(() => {{
+    return f"""(((SEL, VAL) => {{
         const form = {form_js};
         if (!form) return 'no_form';
-        const el = form.querySelector('{selector}');
-        if (!el) return 'no_element:{selector}';
+        const el = form.querySelector(SEL);
+        if (!el) return 'no_element:' + SEL;
         const ns = Object.getOwnPropertyDescriptor(
             HTMLInputElement.prototype, 'value'
         ).set;
-        ns.call(el, '{value}');
+        ns.call(el, VAL);
         $(el).trigger('input').trigger('change').trigger('keyup').trigger('blur');
         return 'ok';
-    }})()"""
+    }})({js_args(selector, str(value))}))"""
 
 
 def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
@@ -301,13 +305,11 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
     bucket_form_js = "document.getElementById('buyAircraft_bucket').querySelector('form')"
 
     # Step 1: Set hub dropdown
-    hub_result = cdp.eval(f"""(() => {{
+    hub_result = cdp.eval(f"""(((want, wantLower) => {{
         const form = {bucket_form_js};
         if (!form) return 'no_form';
         const hub = form.querySelector('#aircraft_hub, select[name*="hub"]');
         if (!hub) return 'no_hub_select';
-        const want = '{hub_iata.upper()}';
-        const wantLower = '{hub_iata.lower()}';
         // Strategy 1: data-iata attribute
         let opt = Array.from(hub.options).find(
             o => (o.getAttribute('data-iata') || '').toLowerCase() === wantLower
@@ -335,7 +337,7 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
         hub.value = opt.value;
         $(hub).trigger('change');
         return JSON.stringify({{hub: opt.value, iata: want, text: opt.textContent.trim().slice(0, 40)}});
-    }})()""")
+    }})({js_args(hub_iata.upper(), hub_iata.lower())}))""")
 
     # Parse hub result
     hub_debug = hub_result
