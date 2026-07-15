@@ -46,11 +46,11 @@ All HTTP goes via fetch() inside the open AM tab so cookies/session are preserve
 Requires Chrome with --remote-debugging-port=9222 and an AM tab open.
 """
 
-import argparse, json, math, os, re, sqlite3, sys, time
+import argparse, json, math, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL, wait_for_js  # noqa: E402
-from db import DB  # noqa: E402
+from db import get_db  # noqa: E402
 
 PRICE_RE_IDEAL_ALL = re.compile(
     r"Ideal (?:ticket )?price(?:/Tonne)?\s*:\s*[^$]*?\$([\d,]+)",
@@ -306,73 +306,60 @@ def resolve_airport_id_from_iata(cdp, iata):
 
 def load_circuit_dest_iatas(circuit_name):
     """Load destination IATAs for a circuit from DB."""
-    db = sqlite3.connect(DB)
-    try:
-        row = db.execute(
-            "SELECT hub_iata FROM circuits WHERE name=?", (circuit_name.upper(),)
-        ).fetchone()
-        if not row:
-            return None, None
-        hub_iata = row[0]
-        rows = db.execute(
-            "SELECT dest_iata FROM circuit_routes WHERE circuit_name=? ORDER BY route_order",
-            (circuit_name.upper(),),
-        ).fetchall()
-        return hub_iata, set(r[0].upper() for r in rows)
-    finally:
-        db.close()
+    db = get_db()
+    row = db.execute(
+        "SELECT hub_iata FROM circuits WHERE name=?", (circuit_name.upper(),)
+    ).fetchone()
+    if not row:
+        return None, None
+    hub_iata = row[0]
+    rows = db.execute(
+        "SELECT dest_iata FROM circuit_routes WHERE circuit_name=? ORDER BY route_order",
+        (circuit_name.upper(),),
+    ).fetchall()
+    return hub_iata, set(r[0].upper() for r in rows)
 
 
 def load_route_iatas_for_hub(hub_iata):
     """Load all destination IATAs for a hub from DB."""
-    db = sqlite3.connect(DB)
-    try:
-        rows = db.execute(
-            "SELECT dest_iata FROM routes WHERE hub_iata=? AND is_owned=1",
-            (hub_iata,),
-        ).fetchall()
-        return set(r[0].upper() for r in rows)
-    finally:
-        db.close()
+    rows = get_db().execute(
+        "SELECT dest_iata FROM routes WHERE hub_iata=? AND is_owned=1",
+        (hub_iata,),
+    ).fetchall()
+    return set(r[0].upper() for r in rows)
 
 
 def get_line_ids_from_db(hub_iata, dest_iatas=None):
     """Try to load line_ids from DB for a hub. Returns dict {iata: line_id} or None."""
-    db = sqlite3.connect(DB)
-    try:
-        if dest_iatas:
-            placeholders = ",".join("?" * len(dest_iatas))
-            rows = db.execute(
-                f"SELECT dest_iata, line_id FROM routes "
-                f"WHERE hub_iata=? AND dest_iata IN ({placeholders}) AND line_id IS NOT NULL",
-                (hub_iata.upper(), *dest_iatas)
-            ).fetchall()
-            result = {r[0].upper(): r[1] for r in rows}
-            return result if len(result) == len(dest_iatas) else None
-        else:
-            rows = db.execute(
-                "SELECT dest_iata, line_id FROM routes "
-                "WHERE hub_iata=? AND is_owned=1 AND line_id IS NOT NULL",
-                (hub_iata.upper(),)
-            ).fetchall()
-            return {r[0].upper(): r[1] for r in rows} if rows else None
-    finally:
-        db.close()
+    db = get_db()
+    if dest_iatas:
+        placeholders = ",".join("?" * len(dest_iatas))
+        rows = db.execute(
+            f"SELECT dest_iata, line_id FROM routes "
+            f"WHERE hub_iata=? AND dest_iata IN ({placeholders}) AND line_id IS NOT NULL",
+            (hub_iata.upper(), *dest_iatas)
+        ).fetchall()
+        result = {r[0].upper(): r[1] for r in rows}
+        return result if len(result) == len(dest_iatas) else None
+    else:
+        rows = db.execute(
+            "SELECT dest_iata, line_id FROM routes "
+            "WHERE hub_iata=? AND is_owned=1 AND line_id IS NOT NULL",
+            (hub_iata.upper(),)
+        ).fetchall()
+        return {r[0].upper(): r[1] for r in rows} if rows else None
 
 
 def write_line_ids_to_db(hub_iata, mapping):
     """Write line_ids back to DB as a side effect of scraping. mapping: {iata: line_id}"""
-    db = sqlite3.connect(DB)
-    try:
-        for dest, lid in mapping.items():
-            db.execute(
-                "UPDATE routes SET line_id = ?, is_owned = 1 "
-                "WHERE hub_iata = ? AND dest_iata = ?",
-                (lid, hub_iata.upper(), dest.upper())
-            )
-        db.commit()
-    finally:
-        db.close()
+    db = get_db()
+    for dest, lid in mapping.items():
+        db.execute(
+            "UPDATE routes SET line_id = ?, is_owned = 1 "
+            "WHERE hub_iata = ? AND dest_iata = ?",
+            (lid, hub_iata.upper(), dest.upper())
+        )
+    db.commit()
 
 
 def main():

@@ -27,13 +27,12 @@ Usage:
 Requirements: Chrome with --remote-debugging-port=9222 --remote-allow-origins=*
 """
 
-import argparse, json, os, re, sqlite3, sys, time
+import argparse, json, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, connect_cdp, wait_for_js, BASE_URL
-from db import DB
 from aircraft_buyer import get_balance  # noqa: E402
-from db import mark_route_owned  # noqa: E402
+from db import get_db, mark_route_owned  # noqa: E402
 
 
 
@@ -250,8 +249,7 @@ def main():
         print("ERROR: --hub-id required (your player hub_id from AM URL).", file=sys.stderr)
         sys.exit(2)
 
-    db = sqlite3.connect(DB)
-    db.row_factory = sqlite3.Row
+    db = get_db()
     routes = []  # list of (iata, country_lower, dest_name)
     hub_iata = None
 

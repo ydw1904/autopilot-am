@@ -1,11 +1,11 @@
 """Planner page — circuit search form + streaming results."""
 
-import asyncio, os, sys, sqlite3
+import asyncio, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nicegui import ui, run
 from gui.state import APP
-from db import DB
+from db import get_db
 
 _PARAM_FIELDS = [
     ('hub',        'HUB',              ''),
@@ -70,8 +70,9 @@ def build(container, on_circuits_ready):
 
         all_circuits = []
         loop = asyncio.get_event_loop()
-        # check_same_thread=False: this connection is used across executor calls
-        db = await loop.run_in_executor(None, lambda: sqlite3.connect(DB, check_same_thread=False))
+        # get_db() connects with check_same_thread=False, so the shared singleton
+        # is safe to use from the executor threads below.
+        db = await loop.run_in_executor(None, get_db)
 
         try:
             ac_list = []
@@ -175,8 +176,7 @@ def build(container, on_circuits_ready):
                 )
 
         finally:
-            # Close in an executor thread to match the thread that created the connection
-            await loop.run_in_executor(None, db.close)
+            # No close: db is the process-wide singleton shared with the other tabs.
             refs['btn_run'].enable()
             APP['planner_running'] = False
 

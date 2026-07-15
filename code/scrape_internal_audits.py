@@ -16,13 +16,12 @@ import os
 import re
 import sys
 import time
-import sqlite3
 import argparse
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab
-from db import DB
+from db import get_db
 
 
 AUDIT_RE = re.compile(
@@ -84,8 +83,7 @@ def main():
                     help="seconds between page loads")
     args = ap.parse_args()
 
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     ensure_snapshot_table(conn)
 
     rows = conn.execute(

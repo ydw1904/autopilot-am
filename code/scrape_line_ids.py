@@ -13,11 +13,11 @@ Usage:
 Requires Chrome with --remote-debugging-port=9222 and a logged-in AM tab.
 """
 
-import argparse, os, sqlite3, sys, time
+import argparse, os, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL
-from db import DB, load_player_hubs
+from db import get_db, close_db, load_player_hubs
 from planning_page import navigate_to_planning, select_hub, get_lines_at_hub
 
 
@@ -28,11 +28,11 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    db = sqlite3.connect(DB)
+    db = get_db()
     hubs = load_player_hubs(db, args.hub)
     if not hubs:
         print("No hubs found in player_hubs table")
-        db.close()
+        close_db()
         return
 
     print(f"Connecting to Chrome...")
@@ -95,7 +95,7 @@ def main():
         if args.dry_run:
             print("[dry-run] no changes made")
     finally:
-        db.close()
+        close_db()
         cdp.close()
 
 

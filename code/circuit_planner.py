@@ -18,7 +18,7 @@ Usage:
     python3 circuit_planner.py --hub HKG --aircraft B742 B743 --circuits 5 --owned-hubs FRA CGK PEK JNB
 """
 
-import sqlite3, math, argparse, heapq, time as _time, os
+import math, argparse, heapq, time as _time, os
 import numpy as np
 
 try:
@@ -33,7 +33,7 @@ except ImportError:
     search_circuits_native = None
     _HAS_NATIVE = False
 
-from db import DB
+from db import get_db, close_db
 from aircraft_aliases import resolve as resolve_aircraft
 
 
@@ -835,7 +835,7 @@ def main():
                    help="Persist resulting circuits to DB via save_circuit_full")
     args = p.parse_args()
 
-    db = sqlite3.connect(DB)
+    db = get_db()
 
     # Load aircraft
     aircraft_list = []
@@ -1050,7 +1050,7 @@ def main():
             saved.append(save_circuit_full(cdict))
         print(f"  Saved circuits to DB: {len(saved)} ({', '.join(saved)})")
 
-    db.close()
+    close_db()
 
 
 if __name__ == "__main__":

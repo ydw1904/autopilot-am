@@ -12,7 +12,7 @@ Usage:
 Requirements: Chrome running with --remote-debugging-port=9222 --remote-allow-origins=*
 """
 
-import argparse, os, sqlite3, sys, time
+import argparse, os, sys, time
 
 from colorama import init, Fore, Style
 
@@ -20,7 +20,7 @@ init(autoreset=True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab
-from db import DB, upsert_fleet
+from db import get_db, close_db, upsert_fleet
 from planning_page import navigate_to_planning, select_hub, get_aircraft_at_hub
 
 
@@ -58,12 +58,11 @@ def main():
     p.add_argument("--summary", action="store_true", help="Print DB summary and exit")
     args = p.parse_args()
 
-    db = sqlite3.connect(DB)
-    db.row_factory = sqlite3.Row
+    db = get_db()
 
     if args.summary:
         print_summary(db)
-        db.close()
+        close_db()
         return
 
     tab = get_am_tab()
@@ -105,7 +104,7 @@ def main():
         print_summary(db)
     finally:
         cdp.close()
-        db.close()
+        close_db()
 
 
 if __name__ == "__main__":

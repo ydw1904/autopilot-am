@@ -112,6 +112,17 @@ def get_line_id(hub_iata: str, dest_iata: str) -> int | None:
     ).fetchone()
     return row["line_id"] if row and row["line_id"] else None
 
+def get_dest_country(hub_iata: str, dest_iata: str) -> str | None:
+    """Country slug (lowercase) for a route, or None."""
+    if not os.path.exists(DB):
+        return None
+    row = get_db().execute(
+        "SELECT dest_country FROM routes "
+        "WHERE UPPER(hub_iata)=? AND UPPER(dest_iata)=? LIMIT 1",
+        (hub_iata.upper().strip(), dest_iata.upper().strip()),
+    ).fetchone()
+    return row[0].lower() if row and row[0] else None
+
 def get_owned_routes(hub_iata: str) -> list[dict]:
     db = get_db()
     rows = db.execute(

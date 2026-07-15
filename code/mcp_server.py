@@ -29,7 +29,6 @@ Requirements:
 
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import time
@@ -40,7 +39,7 @@ from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL  # noqa: E402
-from db import DB as DB_PATH, get_player_hub_id, mark_route_owned  # noqa: E402
+from db import get_dest_country, get_player_hub_id, mark_route_owned  # noqa: E402
 from planning_page import (  # noqa: E402
     wait_for_js as _wait_for_js,
     wait_for_hub_buttons as _wait_for_hub_buttons,
@@ -220,18 +219,7 @@ def _get_aircraft_at_selected_hub(cdp, hub_iata=None):
 
 def _lookup_dest_country(hub_iata: str, dest_iata: str) -> Optional[str]:
     """Resolve a destination's country slug (lowercase) from the routes table."""
-    if not os.path.exists(DB_PATH):
-        return None
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        row = conn.execute(
-            "SELECT dest_country FROM routes "
-            "WHERE UPPER(hub_iata)=? AND UPPER(dest_iata)=? LIMIT 1",
-            (hub_iata.upper().strip(), dest_iata.upper().strip()),
-        ).fetchone()
-        return row[0].lower() if row and row[0] else None
-    finally:
-        conn.close()
+    return get_dest_country(hub_iata, dest_iata)
 
 
 def _mark_route_owned(hub_iata: str, dest_iata: str) -> None:

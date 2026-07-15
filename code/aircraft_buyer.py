@@ -37,10 +37,10 @@ Requirements:
   - httpx and websocket-client pip packages
 """
 
-import argparse, json, math, re, sqlite3, sys, time
+import argparse, json, math, re, sys, time
 
 from cdp import CDP, get_am_tab, connect_cdp, BASE_URL  # noqa: F401
-from db import DB
+from db import get_db, close_db
 from aircraft_aliases import resolve as resolve_aircraft
 
 AIRCRAFT_GAME_IDS = {
@@ -609,8 +609,7 @@ List:
     p.add_argument("--list", action="store_true")
     args = p.parse_args()
 
-    db = sqlite3.connect(DB)
-    db.row_factory = sqlite3.Row
+    db = get_db()
 
     if args.list:
         circuits = db.execute(
@@ -853,7 +852,7 @@ List:
 
     if args.dry_run:
         cdp.close()
-        db.close()
+        close_db()
         sys.exit(0)
 
     balance_after = get_balance(cdp)
@@ -862,7 +861,7 @@ List:
         print(f"\nBalance: ${balance_before:,.0f} -> ${balance_after:,.0f} (spent: ${spent:,.0f})")
     print(f"\nBought {bought_total}/{requested} aircraft.")
     cdp.close()
-    db.close()
+    close_db()
     sys.exit(0 if bought_total == requested else 2)
 
 

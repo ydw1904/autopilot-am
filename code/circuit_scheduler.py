@@ -22,13 +22,13 @@ Requirements: Chrome running with --remote-debugging-port=9222 --remote-allow-or
               httpx, websocket-client, colorama pip packages
 """
 
-import argparse, json, math, re, sqlite3, sys, time
+import argparse, json, math, re, sys, time
 from urllib.parse import quote
 
 from colorama import init, Fore, Style
 
 from cdp import CDP, get_am_tab, connect_cdp, BASE_URL  # noqa: F401
-from db import DB
+from db import get_db, close_db
 # Re-exported for callers that import these through circuit_scheduler
 # (gui/warehouse.py etc.).
 from planning_page import (  # noqa: F401
@@ -358,8 +358,7 @@ def main():
                         "(preserves in-progress weeks).")
     args = p.parse_args()
 
-    db = sqlite3.connect(DB)
-    db.row_factory = sqlite3.Row
+    db = get_db()
 
     # ── --list mode ─────────────────────────────────────────────────────
     if args.list:
@@ -400,7 +399,7 @@ def main():
         print(f"{Fore.RED}No bought circuits found for hub {hub_iata}", file=sys.stderr)
         if args.circuit:
             print(f"  (looking for: {args.circuit})", file=sys.stderr)
-        db.close()
+        close_db()
         sys.exit(1)
 
     # ── Summary ─────────────────────────────────────────────────────────
@@ -443,7 +442,7 @@ def main():
                     print(f"    {Fore.YELLOW}WARNING: Schedule exceeds 1 week boundary")
             print()
         print(f"{Fore.YELLOW}DRY RUN - no changes made to the game.\n")
-        db.close()
+        close_db()
         return
 
     # ── Live scheduling ─────────────────────────────────────────────────
@@ -460,7 +459,7 @@ def main():
     if not select_hub(cdp, hub_iata):
         print(f"{Fore.RED}ERROR: Cannot select hub {hub_iata}", file=sys.stderr)
         cdp.close()
-        db.close()
+        close_db()
         sys.exit(1)
 
     # Step 3: Read aircraft at this hub
@@ -470,7 +469,7 @@ def main():
               file=sys.stderr)
         print(f"  Make sure the correct hub is selected.", file=sys.stderr)
         cdp.close()
-        db.close()
+        close_db()
         sys.exit(1)
     print(f"  {len(hub_aircraft)} aircraft at hub:")
     for ac in hub_aircraft:
@@ -493,7 +492,7 @@ def main():
             print(f"{Fore.RED}ERROR: No lines found at hub {hub_iata} on planning page",
                   file=sys.stderr)
             cdp.close()
-            db.close()
+            close_db()
             sys.exit(1)
         # Write scraped line_ids back to DB
         _write_line_ids_to_db(hub_iata, hub_lines, db)
@@ -616,7 +615,7 @@ def main():
     print(f"{'=' * 62}\n")
 
     cdp.close()
-    db.close()
+    close_db()
 
 
 if __name__ == "__main__":
