@@ -33,29 +33,11 @@ except ImportError:
     search_circuits_native = None
     _HAS_NATIVE = False
 
-from db import get_db, close_db
-from aircraft_aliases import resolve as resolve_aircraft
+from db import get_db, close_db, load_aircraft  # noqa: F401  (re-exported)
 
 
 def flight_time_rt(distance_km, speed_kmh):
     return math.ceil((((distance_km / speed_kmh) + 1) * 2) * 4) / 4
-
-
-def load_aircraft(db, name):
-    r = resolve_aircraft(name)
-    resolved = r.model if r.status == "ok" else name  # keep LIKE fallback for partials
-    row = db.execute(
-        "SELECT model, category, speed_kmh, range_km, max_pax, max_tonnage, gross_price "
-        "FROM aircraft WHERE model=? OR model LIKE ?",
-        (resolved, f"%{resolved}%")
-    ).fetchone()
-    if not row:
-        return None
-    return {
-        "alias": name.upper(), "model": row[0], "cat": row[1],
-        "speed": row[2], "range": row[3], "pax": row[4], "tonnage": row[5],
-        "price": row[6] or 0,
-    }
 
 
 def load_routes(db, hub, ac, exclude_iatas=None, min_dist=None, max_dist=None):

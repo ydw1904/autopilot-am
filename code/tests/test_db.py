@@ -97,8 +97,8 @@ def conn(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dbmod, "DB", path)
     monkeypatch.setattr(dbmod, "_conn", None)
-    # aircraft_aliases binds DB at import time and caches its index per path.
-    monkeypatch.setattr(aa, "DB", path)
+    # aircraft_aliases reads db.DB at call time, so patching dbmod above covers
+    # it; it does cache its index per path, hence the reset.
     aa.reset_cache()
 
     c = dbmod.get_db()   # runs _migrate on the base schema

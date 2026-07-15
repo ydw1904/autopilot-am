@@ -3,6 +3,11 @@
 import sqlite3
 import os
 
+# Imported as a module, not `from aircraft_aliases import resolve`: that module
+# reads db.DB for its default path, so the two import each other. Module objects
+# tolerate the cycle in either import order; resolve is looked up at call time.
+import aircraft_aliases
+
 DB = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "db", "am_aircraft.db",
@@ -453,6 +458,30 @@ def rename_circuit_in_db(old_name: str, new_name: str) -> None:
     db.commit()
 
 
+def load_aircraft(db, name):
+    """Look up an aircraft by alias/ICAO/model name. Returns a dict, or None.
+
+    Lives here rather than in circuit_planner because it is a plain DB lookup:
+    load_saved_circuit needs it, and the data layer must not import the planner.
+    circuit_planner re-exports it, so `from circuit_planner import load_aircraft`
+    still works.
+    """
+    r = aircraft_aliases.resolve(name)
+    resolved = r.model if r.status == "ok" else name  # keep LIKE fallback for partials
+    row = db.execute(
+        "SELECT model, category, speed_kmh, range_km, max_pax, max_tonnage, gross_price "
+        "FROM aircraft WHERE model=? OR model LIKE ?",
+        (resolved, f"%{resolved}%")
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "alias": name.upper(), "model": row[0], "cat": row[1],
+        "speed": row[2], "range": row[3], "pax": row[4], "tonnage": row[5],
+        "price": row[6] or 0,
+    }
+
+
 def load_saved_circuit(name: str) -> dict | None:
     """Load a saved circuit back into the in-memory shape used by Circuits tab."""
     db = get_db()
@@ -465,9 +494,6 @@ def load_saved_circuit(name: str) -> dict | None:
         "WHERE cr.circuit_name = ? ORDER BY cr.route_order",
         (c["hub_iata"], name),
     ).fetchall()
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-    from circuit_planner import load_aircraft
     ac = load_aircraft(db, c["aircraft_model"]) or {
         "alias": c["aircraft_model"], "model": c["aircraft_model"],
         "pax": 0, "tonnage": 0, "price": 0, "speed": 0, "range": 0,

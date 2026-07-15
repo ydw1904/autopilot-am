@@ -18,7 +18,11 @@ import sqlite3
 import sys
 from dataclasses import dataclass, field
 
-from db import DB
+# Imported as a module, not `from db import DB`: db.py imports this module for
+# load_aircraft, so a from-import here breaks whenever aircraft_aliases is the
+# one imported first. Module objects tolerate the cycle; attributes are read
+# at call time (see _index_path).
+import db
 
 # Irregular nicknames the DB can't supply. Bare family names ("A380", "747") are
 # handled generically by prefix matching, so this is intentionally empty for now —
@@ -84,7 +88,7 @@ def _build(path: str) -> _Index:
 
 
 def _index(db_path: str | None = None) -> _Index:
-    path = db_path or DB
+    path = db_path or db.DB
     if path not in _cache:
         _cache[path] = _build(path)
     return _cache[path]
