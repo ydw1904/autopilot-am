@@ -33,6 +33,18 @@ except ImportError:
     search_circuits_native = None
     _HAS_NATIVE = False
 
+_slow_path_hint_shown = False
+
+
+def _warn_slow_path_once():
+    global _slow_path_hint_shown
+    if _HAS_NATIVE or njit is not None or _slow_path_hint_shown:
+        return
+    _slow_path_hint_shown = True
+    print("note: native beam search not built and numba not installed — "
+          "using slow pure-Python path (see code/native/build.sh)",
+          file=sys.stderr)
+
 from db import get_db, close_db, load_aircraft  # noqa: F401  (re-exported)
 
 
@@ -488,6 +500,7 @@ def search_circuits(routes, ac, comfort, speed, top_n=3, beam_width=1200,
         return _search_circuits_native(
             routes, ac, comfort, speed, top_n, beam_width,
             max_steps, max_routes, max_waves, match, overshoot_pct)
+    _warn_slow_path_once()
     return _search_circuits_python(
         routes, ac, comfort, speed, top_n, beam_width,
         max_steps, max_routes, max_waves, match, score_mode, overshoot_pct)

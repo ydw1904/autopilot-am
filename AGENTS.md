@@ -13,8 +13,9 @@ revenue by selecting circuits (route sets), seat configs, schedules, and prices.
 **Language:** Python 3.10+. Browser automation via Chrome DevTools Protocol (CDP,
 primary) with an optional OpenClaw backend in `scraping/`. The circuit beam search
 has a hot path in native **C++** (`code/native/beam_search.cpp`) behind a ctypes
-wrapper. GUI is **NiceGUI**. Deps pinned in `code/requirements.txt`
-(`mcp`, `httpx`, `websocket-client`, `numpy`, `colorama`, `nicegui`).
+wrapper. GUI is **NiceGUI**. Deps declared with minimum versions in
+`code/requirements.txt` (`mcp`, `httpx`, `websocket-client`, `numpy`,
+`colorama`, `nicegui`; `pytest` for the test suite).
 
 **Pure logic has a test suite:** `.venv/bin/python -m pytest code/tests/ -q`
 (offline, no Chrome, ~1s). It covers the pricing/flight-time formulas, the

@@ -23,5 +23,8 @@ colorama>=0.4.6
 # GUI only (gui_app.py); the MCP server and CLI scripts do not need it
 nicegui>=2.0
 
+# Optional accelerators (planner falls back gracefully without them)
+# numba>=0.60   # JIT fallback for beam search when code/native isn't built
+
 # dev — test suite only (.venv/bin/python -m pytest code/tests/ -q)
 pytest>=8.0
