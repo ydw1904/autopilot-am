@@ -39,7 +39,7 @@ Requirements:
 
 import argparse, contextlib, json, math, re, sys, time
 
-from cdp import CDP, get_am_tab, connect_cdp, js_args, BASE_URL  # noqa: F401
+from cdp import CDP, get_am_tab, connect_cdp, js_args, get_balance, BASE_URL  # noqa: F401
 from db import get_db, close_db
 from aircraft_aliases import resolve as resolve_aircraft
 
@@ -68,17 +68,6 @@ def resolve_model(name):
     """
     r = resolve_aircraft(name)
     return r.model if r.status == "ok" else name
-
-
-def get_balance(cdp):
-    """Player's dollar balance from the header resource bar, or None."""
-    val = cdp.eval(
-        "document.querySelector('#ressource3[title=Dollars]')?.textContent")
-    if val and not isinstance(val, dict):
-        digits = re.sub(r"[^0-9]", "", str(val))
-        if digits:
-            return int(digits)
-    return None
 
 
 # ── Page interaction ────────────────────────────────────────────────────────

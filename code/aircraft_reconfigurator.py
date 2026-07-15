@@ -22,7 +22,7 @@ Requirements: Chrome with --remote-debugging-port=9222 and a logged-in AM tab.
 import argparse, json, os, re, sys, time
 from urllib.parse import quote
 
-from cdp import CDP, get_am_tab, wait_for_js  # noqa: E402
+from cdp import CDP, get_am_tab, get_balance, wait_for_js  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import get_db  # noqa: E402
@@ -222,7 +222,13 @@ def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
 
     Returns (status_code, message)."""
     target_url = f"https://www.airlines-manager.com/aircraft/show/{aircraft_id}/reconfigure"
-    if not cdp.navigate_and_wait(target_url, "!!document.getElementById('sliderEco')"):
+    # Wait for the jQuery-UI widget to be initialized, not just the element:
+    # reading .slider('value') before init throws and aborts the reconfigure.
+    slider_ready = (
+        "!!document.getElementById('sliderEco')"
+        " && document.getElementById('sliderEco').classList.contains('ui-slider')"
+    )
+    if not cdp.navigate_and_wait(target_url, slider_ready):
         return 500, "page_did_not_load"
 
     state = cdp.eval(
@@ -272,7 +278,7 @@ def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
         "document.readyState === 'complete' && !document.getElementById('showEquipment')",
         timeout=15.0,
     )
-    if not cdp.navigate_and_wait(target_url, "!!document.getElementById('sliderEco')"):
+    if not cdp.navigate_and_wait(target_url, slider_ready):
         return 500, "page_did_not_load_after_submit"
     vals_raw = cdp.eval(
         "JSON.stringify({"
@@ -315,6 +321,16 @@ def reconfigure_circuit(circuit_name: str, dry_run: bool = False) -> int:
     cdp = CDP(get_am_tab()["webSocketDebuggerUrl"], timeout=PAGE_FETCH_TIMEOUT)
     cdp.connect()
     try:
+        # Reconfigure/relocate are paid actions. With a non-positive balance
+        # the game rejects them SILENTLY (the form re-renders with the old
+        # values, indistinguishable from the in-flight rejection) — so refuse
+        # up front with a clear reason instead of failing every aircraft.
+        balance = get_balance(cdp)
+        if balance is not None and balance <= 0 and not dry_run:
+            print(f"ERROR: balance is ${balance:,} — the game silently "
+                  "rejects paid actions (reconfigure/relocate) until it is "
+                  "positive. Aborting.", file=sys.stderr)
+            return 1
         total_pages = discover_total_pages(cdp, name_filter=circuit_name)
         print(f"Scraping {total_pages} filtered /aircraft pages (name~{circuit_name!r}) …")
         all_ac = scrape_all_aircraft(cdp, total_pages, name_filter=circuit_name)

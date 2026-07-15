@@ -13,6 +13,7 @@ console. Requires Chrome started with:
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -147,6 +148,25 @@ class CDP:
         if val and not isinstance(val, dict):
             return val
         return None
+
+
+def get_balance(cdp):
+    """Player's dollar balance from the header resource bar, or None.
+
+    Keeps the sign: a negative balance blocks every paid action in the game
+    (reconfigure, relocate, buy...) and those failures are otherwise silent —
+    the form just re-renders with the old values.
+    """
+    val = cdp.eval(
+        "document.querySelector('#ressource3[title=Dollars]')?.textContent")
+    if val and not isinstance(val, dict):
+        m = re.search(r"-?[\d,.\s ]*\d", str(val))
+        if m:
+            digits = re.sub(r"[^0-9]", "", m.group(0))
+            if digits:
+                n = int(digits)
+                return -n if m.group(0).lstrip().startswith("-") else n
+    return None
 
 
 def js_args(*values):
