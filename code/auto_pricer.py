@@ -15,14 +15,19 @@ Flow:
        - parse ideal eco + cargo prices (trusted)
        - parse current prices for all classes
        - derive corrected bus/fir from eco ideal
-  3. Submit via a REAL click in the tab (see submit_prices_native): navigate
-     to the pricing page, fill the four line[price*] inputs, and dispatch a
-     CDP mouse click on the "Confirm these prices" submit button.
+  3. Submit via the masstool's bulk apply-prices endpoint
+     (see submit_prices_masstool), then verify from the line's own page.
 
-Why not POST?  fetch()-POSTs are silently rejected by the server (returns
-200/204 but the price never changes), and form.submit() omits the submit
-button's name so the server can't tell "Confirm these prices" from "Perform
-a simulation".  Only a genuine click works (verified live 2026-07-14).
+Why not POST the pricing form?  Every scripted route to
+/marketing/pricing/<line_id> answers 204 and discards the change — a
+token'd fetch POST, a real navigational form.submit(), and a
+keyboard-activated submit were all verified dead (2026-07-24).  Only a
+genuine mouse click on "Confirm these prices" drives that form, and
+synthetic clicks are dropped whenever the Chrome window isn't actually
+on-screen and focused, which rules them out for unattended runs.  The AM+
+masstool's own save button posts to /masstool/pricingAjax/applyprices as
+ordinary AJAX; that path needs no gesture and no focus, so it is the
+default.  --submit click keeps the old behaviour.
 
 The game enforces a 24h cooldown per line between price changes; pages in
 cooldown render without the form and are reported as skipped, not failed.
@@ -31,6 +36,10 @@ Modes:
   --mode ideal           target = corrected ideal price (default)
   --mode percent --pct N target = corrected ideal * N/100
   --mode raw-ideal       target = game's displayed ideal (uncorrected)
+  --mode fill            target = price that drives remaining demand to 0,
+                         i.e. the highest price at which demand still fills
+                         every seat offered.  Needs live masstool data for
+                         seats-flown and demand, so it requires a hub.
 
 Filters:
   --airport <id>         pricing dropdown's internal id (default 0 = all hubs)
@@ -50,7 +59,8 @@ import argparse, contextlib, json, math, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL, wait_for_js  # noqa: E402
-from db import get_db  # noqa: E402
+from db import get_db, get_player_hub_id  # noqa: E402
+from masstool import fetch_masstool_hub  # noqa: E402
 
 PRICE_RE_IDEAL_ALL = re.compile(
     r"Ideal (?:ticket )?price(?:/Tonne)?\s*:\s*[^$]*?\$([\d,]+)",
@@ -99,6 +109,67 @@ def correct_ideal_prices(ideal):
     }
 
 
+# Demand is flat at its maximum up to the ideal price, then falls linearly
+# with slope 3 (a +1% price is −3% demand), hitting zero at 4/3 × ideal.
+# Confirmed live 2026-07-14; same model as circuit_planner.supersim_price.
+ELASTICITY_SLOPE = 3.0
+
+
+def demand_factor(ideal, price):
+    """Fraction of maximum demand realised at `price`."""
+    if ideal <= 0:
+        return 0.0
+    if price <= ideal:
+        return 1.0
+    return max(0.0, 1.0 - ELASTICITY_SLOPE * (price - ideal) / ideal)
+
+
+def fill_price(ideal, cur_price, cur_demand, capacity):
+    """Highest price that still sells every seat — i.e. remaining demand 0.
+
+    `cur_demand` is the demand observed at `cur_price` (masstool reports
+    demand *after* the price effect), so it is first un-scaled back to the
+    demand at ideal price before solving for the target.
+
+    Revenue is price × min(demand, capacity): while demand exceeds capacity
+    the plane flies full and revenue rises with price, and past that point
+    slope-3 elasticity makes it fall.  So the fill price is the revenue
+    maximum, not merely the "no wasted demand" price.
+
+    Returns None when there is nothing to solve (no ideal, no demand, or a
+    current price already past the zero-demand point).
+    """
+    if ideal <= 0 or cur_demand <= 0:
+        return None
+    factor = demand_factor(ideal, cur_price)
+    if factor <= 0:
+        return None  # demand should already be zero; model can't be inverted
+    max_demand = cur_demand / factor
+    if capacity <= 0 or capacity >= max_demand:
+        # No seats, or seats already cover peak demand: ideal is optimal.
+        return ideal
+    target = math.floor(
+        ideal * (1 + (max_demand - capacity) / (ELASTICITY_SLOPE * max_demand))
+    )
+    # Floor (rather than round up) keeps the last few seats sold: one price
+    # step is worth far less than the passengers it would price off.
+    return max(ideal, min(target, math.floor(ideal * 4 / 3)))
+
+
+def fill_prices(ideal, current, route):
+    """Per-class fill prices for one masstool route entry."""
+    out = {}
+    for cls in CLASS_ORDER:
+        tgt = fill_price(
+            ideal[cls],
+            current[cls],
+            route.get("demand", {}).get(cls, 0),
+            route.get("carried", {}).get(cls, 0),
+        )
+        out[cls] = ideal[cls] if tgt is None else tgt
+    return out
+
+
 def fetch_text(cdp, path, retries=4):
     # Post-change pages often return an empty body to fetch() for a while —
     # treat empties as transient and retry with backoff.
@@ -143,6 +214,77 @@ def read_current_prices_rendered(cdp):
     if len(vals) < 4:
         return None
     return dict(zip(CLASS_ORDER, vals))
+
+
+MASSTOOL_APPLY_URL = "/masstool/pricingAjax/applyprices"
+
+
+def read_current_prices(html):
+    """Read the four 'Current ... price' values out of a pricing page.
+
+    Works on cooldown pages too, where the editable form (and hence
+    parse_price_page) is absent but the current prices are still shown.
+    """
+    if not html:
+        return None
+    vals = [int(s.replace(",", "")) for s in PRICE_RE_CURRENT_ALL.findall(html)]
+    if len(vals) < 4:
+        return None
+    return dict(zip(CLASS_ORDER, vals))
+
+
+def submit_prices_masstool(cdp, line_id, targets):
+    """Set prices through the AM+ masstool's bulk 'apply prices' endpoint.
+
+    The plain form POST to /marketing/pricing/<line_id> answers 204 and
+    discards the change no matter how it is sent — token'd fetch, real
+    navigational form.submit(), even a keyboard-activated submit — so the
+    only script-drivable write path is the masstool endpoint the game's own
+    "save" button calls.  It is ordinary jQuery AJAX, so it needs no user
+    gesture and no focused window, which is what the click path depended on.
+
+    Prices are sent per class; -1 means "leave this class alone".
+
+    Returns the same (status, detail) pairs as submit_prices_native.
+    """
+    fields = {f"linePrices[{line_id}][lineId]": str(line_id)}
+    for cls in CLASS_ORDER:
+        key = "price" + cls.capitalize()
+        fields[f"linePrices[{line_id}][{key}]"] = str(targets[cls])
+
+    js = f"""(async () => {{
+        const body = new URLSearchParams({json.dumps(fields)});
+        const r = await fetch({json.dumps(MASSTOOL_APPLY_URL)}, {{
+            method: 'POST',
+            credentials: 'include',
+            cache: 'no-store',
+            headers: {{
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+            }},
+            body,
+        }});
+        return JSON.stringify({{status: r.status, text: (await r.text()).slice(0, 2000)}});
+    }})()"""
+    out = cdp.eval(js, await_promise=True)
+    if not out or not out.startswith("{"):
+        return "fail", out or "apply-prices POST returned nothing"
+    resp = json.loads(out)
+    if resp.get("status") != 200:
+        return "fail", f"apply-prices HTTP {resp.get('status')}"
+
+    # The endpoint reports success generically, so confirm against the line's
+    # own page.  A line already in cooldown silently keeps its old prices.
+    html = fetch_text(cdp, f"/marketing/pricing/{line_id}")
+    cur = read_current_prices(html)
+    if not cur:
+        return "fail", "could not read prices back"
+    if all(cur[k] == targets[k] for k in CLASS_ORDER):
+        return "ok", ""
+    remaining = cooldown_remaining(html)
+    if remaining:
+        return "cooldown", remaining
+    return "fail", f"prices after apply {cur} != targets"
 
 
 def submit_prices_native(cdp, line_id, targets):
@@ -376,9 +518,16 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--mode", choices=["ideal", "percent", "raw-ideal"],
+    p.add_argument("--mode", choices=["ideal", "percent", "raw-ideal", "fill"],
                    default="ideal",
                    help="Pricing mode (default: ideal with corrected bus/fir)")
+    p.add_argument("--submit", choices=["masstool", "click"], default="masstool",
+                   help="Write path: the masstool apply-prices endpoint "
+                        "(default) or a synthetic click, which only lands "
+                        "when the Chrome window is genuinely focused")
+    p.add_argument("--price-empty-routes", action="store_true",
+                   help="--mode fill: also price routes flying no seats at "
+                        "all (they get the plain ideal price)")
     p.add_argument("--pct", type=float, default=100.0,
                    help="Percent of ideal (only with --mode percent)")
     p.add_argument("--airport", default="0",
@@ -440,10 +589,28 @@ def _price(args, doc):
         target_iatas = set(i.upper() for i in args.routes)
         print(f"Filtering to {len(target_iatas)} routes: {' '.join(sorted(target_iatas))}")
 
+    if args.mode == "fill" and not (hub_iata or args.hub):
+        print("ERROR: --mode fill needs --hub or --circuit (live seat and "
+              "demand data is fetched per hub).", file=sys.stderr)
+        doc["error"] = "--mode fill requires a hub"
+        sys.exit(1)
+
     print("Connecting to Chrome…")
     cdp = CDP(get_am_tab()["webSocketDebuggerUrl"], timeout=60)
     cdp.connect()
     try:
+        live = {}
+        if args.mode == "fill":
+            mt_hub = (hub_iata or args.hub).upper()
+            mt_id = get_player_hub_id(mt_hub)
+            if not mt_id:
+                print(f"ERROR: no player_hubs entry for {mt_hub}; masstool "
+                      f"data is unavailable.", file=sys.stderr)
+                doc["error"] = f"no player_hubs entry for {mt_hub}"
+                sys.exit(1)
+            live = fetch_masstool_hub(cdp, mt_id)
+            print(f"Masstool {mt_hub}: live seats/demand for {len(live)} routes")
+
         airport_id = args.airport
         if args.hub:
             airport_id = resolve_airport_id_from_iata(cdp, args.hub)
@@ -473,6 +640,8 @@ def _price(args, doc):
                 print("Nothing to do.")
                 return
 
+        iata_by_line_id = {str(v): k for k, v in (db_line_ids or {}).items()}
+
         ok = fail = skipped = cooldown = not_matched = 0
         for i, lid in enumerate(ids, 1):
             html = fetch_text(cdp, f"/marketing/pricing/{lid}")
@@ -480,12 +649,7 @@ def _price(args, doc):
             if not data:
                 remaining = cooldown_remaining(html)
                 if remaining:
-                    label = lid
-                    if db_line_ids:
-                        for d, d_lid in db_line_ids.items():
-                            if str(d_lid) == str(lid):
-                                label = d
-                                break
+                    label = iata_by_line_id.get(str(lid), lid)
                     print(f"  [{i:4d}/{len(ids)}] {label}: "
                           f"skipped (cooldown, {remaining})")
                     cooldown += 1
@@ -501,12 +665,10 @@ def _price(args, doc):
                                       "detail": f"parse fail (html len={hl})"})
                 continue
 
-            dest = data.get("dest_iata")
-            if db_line_ids and (not dest or (target_iatas and dest not in target_iatas)):
-                for d, d_lid in db_line_ids.items():
-                    if str(d_lid) == str(lid):
-                        dest = d
-                        break
+            # The DB's line_id → IATA mapping is authoritative; only fall back
+            # to scraping the destination out of the page when it is missing,
+            # since extract_dest_iata regularly picks up the wrong code.
+            dest = iata_by_line_id.get(str(lid)) or data.get("dest_iata")
             label = dest or lid
 
             if target_iatas:
@@ -524,6 +686,29 @@ def _price(args, doc):
                 tgt = dict(game_ideal)
             elif args.mode == "ideal":
                 tgt = correct_ideal_prices(game_ideal)
+            elif args.mode == "fill":
+                ideal = correct_ideal_prices(game_ideal)
+                route = live.get(label)
+                if route is None:
+                    print(f"  [{i:4d}/{len(ids)}] {label}: no masstool row "
+                          f"(skip)")
+                    skipped += 1
+                    doc["routes"].append({"route": label, "old": dict(cur),
+                                          "new": None, "changed": False,
+                                          "status": "skipped",
+                                          "detail": "no masstool row"})
+                    continue
+                seats = sum(route.get("carried", {}).values())
+                if not seats and not args.price_empty_routes:
+                    print(f"  [{i:4d}/{len(ids)}] {label}: no seats flown "
+                          f"(skip)")
+                    skipped += 1
+                    doc["routes"].append({"route": label, "old": dict(cur),
+                                          "new": None, "changed": False,
+                                          "status": "skipped",
+                                          "detail": "no seats flown"})
+                    continue
+                tgt = fill_prices(ideal, cur, route)
             else:
                 base = correct_ideal_prices(game_ideal)
                 tgt = {k: max(1, int(round(v * args.pct / 100.0)))
@@ -531,11 +716,16 @@ def _price(args, doc):
 
             changed = any(tgt[k] != cur[k] for k in tgt)
 
-            bus_diff = tgt["bus"] - game_ideal["bus"]
-            fir_diff = tgt["first"] - game_ideal["first"]
-            corrections = ""
-            if bus_diff or fir_diff:
-                corrections = f" [bus{bus_diff:+d} fir{fir_diff:+d}]"
+            if args.mode == "fill":
+                rem = live[label].get("remaining", {})
+                corrections = (" [rem " + "/".join(
+                    str(rem.get(c, 0)) for c in CLASS_ORDER) + "]")
+            else:
+                bus_diff = tgt["bus"] - game_ideal["bus"]
+                fir_diff = tgt["first"] - game_ideal["first"]
+                corrections = ""
+                if bus_diff or fir_diff:
+                    corrections = f" [bus{bus_diff:+d} fir{fir_diff:+d}]"
 
             tag = (f"e:{cur['eco']}→{tgt['eco']} "
                    f"b:{cur['bus']}→{tgt['bus']} "
@@ -556,7 +746,10 @@ def _price(args, doc):
                                       "changed": changed, "status": "dry_run"})
                 continue
 
-            status, detail = submit_prices_native(cdp, lid, tgt)
+            if args.submit == "masstool":
+                status, detail = submit_prices_masstool(cdp, lid, tgt)
+            else:
+                status, detail = submit_prices_native(cdp, lid, tgt)
             entry = {"route": label, "old": dict(cur), "new": dict(tgt),
                      "changed": changed, "status": status}
             if detail:

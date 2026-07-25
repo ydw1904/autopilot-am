@@ -883,10 +883,18 @@ def auto_price_routes(
 ) -> dict:
     """Run the pricing script.
 
+    Modes: 'ideal' (corrected ideal price), 'percent' (ideal * pct/100),
+    'raw-ideal' (the game's displayed ideal), and 'fill' — the price at which
+    remaining demand reaches zero, i.e. the most each seat can be sold for
+    while still filling the aircraft.  'fill' needs live seat/demand data, so
+    it requires hub or circuit.
+
     Safety default: dry_run=True because live pricing mutates the game.
     """
-    if mode not in {"ideal", "percent", "raw-ideal"}:
-        return {"error": "mode must be one of: ideal, percent, raw-ideal"}
+    if mode not in {"ideal", "percent", "raw-ideal", "fill"}:
+        return {"error": "mode must be one of: ideal, percent, raw-ideal, fill"}
+    if mode == "fill" and not (hub or circuit):
+        return {"error": "mode 'fill' requires hub or circuit."}
 
     route_list = _normalize_iatas(routes)
     args = ["--mode", mode]
