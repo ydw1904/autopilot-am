@@ -175,6 +175,12 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   `shm_market`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch`,
   `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`. Mutating ones
   default `dry_run=True`. `mobile_daily_slot` is intentionally slow (~9s/spin).
+- **Where the token comes from:** `tools/mobile-capture/` — the mitmproxy capture
+  pipeline that produces the JSONL `import_from_capture()` reads. `capture_am.py`
+  is the mitmdump addon, `bluestacks_mitm_setup.sh` wires the emulator to the
+  proxy, and `bluestacks_mitm_runbook.md` covers the manual steps (root toggle /
+  APK-repackage route). `market_usage.md` records the SHM economics and the
+  daily-reward gotchas. **Captures are gitignored — they hold live tokens.**
 
 ### Fleet / data-sync scripts
 `aircraft_numberer`, `aircraft_reconfigurator`, `circuit_renamer`, `mass_renamer`,

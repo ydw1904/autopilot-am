@@ -50,6 +50,10 @@ tickets/
 # Decompiled game APK (429M, local reference only)
 apk/
 
+# mitmproxy captures — contain live access_token / PHPSESSID values
+tools/mobile-capture/captures/
+*.jsonl
+
 # macOS / sync conflict clutter
 .sync-conflict-*
 
