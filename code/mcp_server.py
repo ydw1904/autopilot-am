@@ -1152,6 +1152,365 @@ def scrape_audit_line_ids(hub: Optional[str] = None, dry_run: bool = True) -> di
     return result
 
 
+# ── Mobile-app tools (SHM + daily login rewards) ─────────────────────────────
+# These target the MOBILE game API (auction/second-hand market and daily
+# rewards), which the browser/CDP surface does not expose. They authenticate
+# with the mobile access_token (not the web session), stored at
+# ~/.airlines_manager/session.json. Separate endpoints, separate auth — not
+# merged with the CDP tools above.
+
+import random  # noqa: E402
+import time as _time  # noqa: E402
+
+DEFAULT_CAPTURE = os.path.expanduser(
+    "~/Python Projects/airlines-manager-tools/tools/captures/am_api.jsonl")
+
+
+def _mobile_call(fn, *, min_delay: float = 0.0, store: bool = True):
+    """Build a mobile client, run fn(client), return its dict; errors → dict."""
+    try:
+        from mobile_api import AMClient, AMSession, AMError, AMAuthError
+        from mobile_store import MobileStore
+    except Exception as e:  # httpx / import issue
+        return {"ok": False, "error": f"mobile module import failed: {e}"}
+    try:
+        session = AMSession.load()
+    except AMAuthError as e:
+        return {"ok": False, "error": str(e),
+                "hint": "Refresh with mobile_session_import(capture_path=...)."}
+    client = AMClient(session, min_delay=min_delay,
+                      store=(MobileStore() if store else None))
+    try:
+        return fn(client)
+    except AMError as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        client.close()
+
+
+@mcp.tool()
+def mobile_session_import(capture_path: Optional[str] = None) -> dict:
+    """Refresh the mobile API session from a mitmproxy capture of the app.
+
+    The mobile access_token expires (~daily). Open the mobile app so it makes a
+    fresh authenticated call through the running capture, then call this to pull
+    the newest token from the capture JSONL and save it to
+    ~/.airlines_manager/session.json. Validates immediately.
+    """
+    try:
+        from mobile_api import import_from_capture, AMClient
+    except Exception as e:
+        return {"ok": False, "error": f"mobile module import failed: {e}"}
+    path = capture_path or DEFAULT_CAPTURE
+    if not os.path.exists(path):
+        return {"ok": False, "error": f"capture not found: {path}"}
+    try:
+        sess = import_from_capture(path)
+        sess.save()
+    except Exception as e:
+        return {"ok": False, "error": f"import failed: {e}"}
+    client = AMClient(sess)
+    try:
+        res = client.resources()
+        return {"ok": True, "player_id": sess.player_id,
+                "token_tail": sess.access_token[-8:],
+                "balance": res.get("dollar"), "coins": res.get("amCoins")}
+    except Exception as e:
+        return {"ok": False, "error": f"saved but validation failed: {e}"}
+    finally:
+        client.close()
+
+
+@mcp.tool()
+def mobile_balance() -> dict:
+    """Mobile account balances: dollars, AM coins, research$, travel cards."""
+    return _mobile_call(lambda cl: {"ok": True, **cl.resources()}, store=False)
+
+
+@mcp.tool()
+def shm_market(contains: str = "", model_id: Optional[int] = None,
+               pool_only: bool = False, limit: int = 20) -> dict:
+    """Browse the second-hand market. Price stats + live listings for a model.
+
+    Filter by skin/model name substring (contains) or model id. pool_only limits
+    to your star bracket. Read-only — use for arbitrage price discovery.
+    """
+    def run(cl):
+        aucs = cl.auctions(pool_only=pool_only)
+        rows = []
+        for a in aucs:
+            ac = a["aircraft"]
+            if model_id is not None and ac.get("aircraftListId") != model_id:
+                continue
+            if contains and contains.lower() not in ac["skin"]["name"].lower():
+                continue
+            rows.append(a)
+        rows.sort(key=lambda x: x.get("timeLeft", 0))
+        cur = sorted(a["currentPrice"] for a in rows) if rows else []
+        bins = sorted(a["binPrice"] for a in rows if a["binPrice"] > 0)
+        listings = [{"auction_id": a["id"], "model_id": a["aircraft"]["aircraftListId"],
+                     "skin": a["aircraft"]["skin"]["name"],
+                     "current": a["currentPrice"], "bin": a["binPrice"],
+                     "time_left_s": a["timeLeft"], "bids": a.get("countParticipant", 0)}
+                    for a in rows[:limit]]
+        return {"ok": True, "matched": len(rows),
+                "current_price": {"min": cur[0], "median": cur[len(cur)//2],
+                                  "max": cur[-1]} if cur else None,
+                "bin_price": {"min": bins[0], "median": bins[len(bins)//2],
+                              "max": bins[-1]} if bins else None,
+                "listings": listings}
+    return _mobile_call(run)
+
+
+@mcp.tool()
+def shm_fleet(name_contains: str = "", skin_id: Optional[int] = None,
+              limit: int = 40, all_pages: bool = False) -> dict:
+    """List owned (mobile) aircraft — pick sell candidates.
+
+    Filter by nickname substring or skin id. Freshly-bought planes are named
+    SHOP-<model> or your buy-name, so e.g. name_contains='747' finds them.
+    """
+    def run(cl):
+        out = []
+        for it in cl.fleet(max_pages=None if all_pages else 2):
+            if name_contains and name_contains.lower() not in it.get("n", "").lower():
+                continue
+            if skin_id is not None and it.get("as_id") != skin_id:
+                continue
+            out.append({"aircraft_id": it["id"], "name": it.get("n"),
+                        "skin_id": it.get("as_id"), "hub_id": it.get("h_id"),
+                        "wear": it.get("w")})
+            if len(out) >= limit:
+                break
+        return {"ok": True, "count": len(out), "aircraft": out}
+    return _mobile_call(run)
+
+
+@mcp.tool()
+def shm_aircraft(aircraft_id: int) -> dict:
+    """Full profile of one owned mobile aircraft (model, raw price, hub, seats)."""
+    return _mobile_call(lambda cl: {"ok": True, **(cl.aircraft(aircraft_id) or {})})
+
+
+@mcp.tool()
+def shm_sell(aircraft_id: int, bin_price: int, price: Optional[int] = None,
+             duration: int = 11, dry_run: bool = True) -> dict:
+    """List one owned aircraft on the second-hand market.
+
+    bin_price = buy-it-now (the sell target); price = starting bid (defaults to
+    bin_price); duration in hours. Safety default: dry_run=True (a listing is a
+    real market action). The SHM allows at most 10 active listings at once.
+    """
+    price = price if price is not None else bin_price
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_list": aircraft_id,
+                "price": price, "bin_price": bin_price, "duration_h": duration}
+
+    def run(cl):
+        auc = cl.put_up(aircraft_id, price, bin_price, duration)
+        return {"ok": True, "aircraft_id": aircraft_id, "auction_id": auc.get("id"),
+                "bin_price": auc.get("binPrice"),
+                "fair_value": auc.get("alertThreshold"),
+                "time_left_s": auc.get("timeLeft")}
+    return _mobile_call(run)
+
+
+@mcp.tool()
+def shm_sell_batch(bin_price: int, ids: Optional[List[int]] = None,
+                   name_contains: str = "", skin_id: Optional[int] = None,
+                   price: Optional[int] = None, duration: int = 11,
+                   limit: int = 10, min_delay: float = 3.0,
+                   dry_run: bool = True) -> dict:
+    """Bulk-list aircraft on the SHM, respecting the 10-active-listing cap.
+
+    Provide explicit `ids` (e.g. freshly-minted planes, reliable during delivery)
+    OR a fleet filter (name_contains / skin_id). Caps the run at the free listing
+    slots (10 − current active listings), stops on the auction limit, retries the
+    put_up rate-limit (204). Safety default: dry_run=True.
+    """
+    price = price if price is not None else bin_price
+    from mobile_api import MAX_ACTIVE_LISTINGS, AMAuctionLimit, AMRateLimited, AMError
+
+    def run(cl):
+        # Resolve candidates.
+        if ids:
+            candidates = [{"id": int(i), "n": "(by id)"} for i in ids]
+        else:
+            candidates = []
+            for it in cl.fleet(max_pages=None):
+                if name_contains and name_contains.lower() not in it.get("n", "").lower():
+                    continue
+                if skin_id is not None and it.get("as_id") != skin_id:
+                    continue
+                candidates.append({"id": it["id"], "n": it.get("n")})
+        # Cap to free listing slots.
+        active = cl.my_listings_count() or 0
+        free_slots = max(0, MAX_ACTIVE_LISTINGS - active)
+        cap = min(limit, free_slots if free_slots else limit)
+        planned = candidates[:cap]
+        if dry_run:
+            return {"ok": True, "dry_run": True, "active_listings": active,
+                    "free_slots": free_slots, "would_list": len(planned),
+                    "aircraft": planned, "bin_price": bin_price}
+        if free_slots == 0:
+            return {"ok": False, "error": "Auction limit reached (10 active). "
+                    "List more as current auctions conclude.",
+                    "active_listings": active}
+
+        listed, failed, limit_hit = [], [], False
+        for c in planned:
+            ok = False
+            for attempt in range(5):
+                try:
+                    auc = cl.put_up(c["id"], price, bin_price, duration)
+                    listed.append({"aircraft_id": c["id"], "auction_id": auc.get("id")})
+                    ok = True
+                    break
+                except AMRateLimited:
+                    _time.sleep(min_delay * (attempt + 2) + random.uniform(0, 1.5))
+                except AMAuctionLimit:
+                    limit_hit = True
+                    break
+                except AMError as e:
+                    failed.append({"aircraft_id": c["id"], "error": str(e)})
+                    break
+            if limit_hit:
+                break
+            if ok:
+                _time.sleep(min_delay + random.uniform(0, min_delay))
+        return {"ok": True, "listed": len(listed), "auctions": listed,
+                "failed": failed, "auction_limit_reached": limit_hit,
+                "active_before": active}
+    # min_delay=0 on the client so the fleet scan is fast; the put_up posts are
+    # paced explicitly in the loop above.
+    return _mobile_call(run, min_delay=0.0)
+
+
+# ---- daily login rewards ----
+
+_CURRENCY_LABEL = {"d": "money", "rd": "research", "tr": "travel_cards", "t": "tickets"}
+
+
+def _free_daily_offers(offers):
+    return [o for o in offers if o.get("purchaseCost") == 0
+            and o.get("subCategoryId") == 308
+            and o.get("purchaseCurrency") in ("adv", "free")]
+
+
+@mcp.tool()
+def mobile_daily_status() -> dict:
+    """Read-only: what daily rewards are still claimable (currency / wheel / slot)."""
+    def run(cl):
+        offers = _free_daily_offers(cl.shop_offers())
+        wheel = cl.wheel_rules()
+        slot = cl.slot_rules()
+        return {"ok": True,
+                "currency_offers": [{"offer_id": o["id"], "remaining": o.get("remaining"),
+                                     "picture": o.get("picturePath", "").rsplit("/", 1)[-1]}
+                                    for o in offers],
+                "wheel": {"can_play": wheel.get("isAllowToPlay"),
+                          "can_replay": wheel.get("isAllowToRePlay")},
+                "slot": {"free_games_left": slot.get("nbRemainingGames"),
+                         "can_play": slot.get("isAllowToPlay")}}
+    return _mobile_call(run)
+
+
+@mcp.tool()
+def mobile_daily_bonuses(dry_run: bool = True, min_delay: float = 1.0) -> dict:
+    """Claim the FAST daily rewards: free shop currency (5×/day each) + the wheel.
+
+    Free currency: money/coins/research/tickets. Wheel: spin + always respin
+    (server keeps the higher). The slow slot machine is a separate tool
+    (mobile_daily_slot) because of its per-spin cooldown. Safety default:
+    dry_run=True — pass dry_run=False to actually claim.
+    """
+    def run(cl):
+        offers = _free_daily_offers(cl.shop_offers())
+        wheel = cl.wheel_rules()
+        plan = {o["id"]: int(o.get("remaining", 0) or 0) for o in offers
+                if o.get("isAvailable")}
+        if dry_run:
+            return {"ok": True, "dry_run": True,
+                    "currency_claims": sum(plan.values()),
+                    "wheel_available": bool(wheel.get("isAllowToPlay")
+                                            or wheel.get("isAllowToRePlay"))}
+        before = cl.last_resources or cl.resources()
+        claims = 0
+        for oid, n in plan.items():
+            for _ in range(n):
+                try:
+                    cl.claim_offer(oid)
+                    claims += 1
+                    _time.sleep(random.uniform(0, min_delay))
+                except Exception:
+                    break
+        wheel_gain = None
+        if wheel.get("isAllowToPlay"):
+            r = cl.wheel_play()
+            if r.get("isAllowToReplay"):
+                _time.sleep(random.uniform(0.5, 1.5))
+                r = cl.wheel_replay()
+            wheel_gain = r.get("keptGain")
+        elif wheel.get("isAllowToRePlay"):
+            r = cl.wheel_replay()
+            wheel_gain = r.get("keptGain")
+        after = cl.last_resources or {}
+        gains = {k: (after.get(k, 0) - before.get(k, 0))
+                 for k in ("dollar", "amCoins", "researchDollars", "travelCards")
+                 if before.get(k) is not None and after.get(k) is not None}
+        return {"ok": True, "currency_claims": claims, "gains": gains,
+                "wheel_travel_cards": wheel_gain}
+    return _mobile_call(run, min_delay=0.0)  # claims paced in-loop
+
+
+@mcp.tool()
+def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
+                      dry_run: bool = True) -> dict:
+    """Spin the slot machine for all FREE daily games (never spends tickets).
+
+    Bounded to nbRemainingGames — never spins into paid territory. Paces ~9s/spin
+    to clear the reel cooldown (spins under it are rejected but still burn a game,
+    so they are never retried). SLOW: a full day (~20 spins) takes ~3 min. Safety
+    default: dry_run=True.
+    """
+    def run(cl):
+        rules = cl.slot_rules()
+        free = int(rules.get("nbRemainingGames", 0) or 0)
+        if not rules.get("isAllowToPlay") or free <= 0:
+            return {"ok": True, "spun": 0, "note": "no free games left today"}
+        n = free if max_spins is None else min(free, max_spins)
+        if dry_run:
+            return {"ok": True, "dry_run": True, "free_games": free,
+                    "would_spin": n, "eta_seconds": int(n * (spin_delay + 1.5))}
+        tally, jackpots, spun, ghosts = {}, 0, 0, 0
+        for i in range(n):
+            if i > 0:
+                _time.sleep(spin_delay + random.uniform(0, 2.0))
+            res = cl.slot_play()
+            spun += 1
+            if not res:
+                ghosts += 1
+                continue
+            g = res.get("gain", {})
+            gt = _CURRENCY_LABEL.get(g.get("gainType"), g.get("gainType", "?"))
+            tally[gt] = tally.get(gt, 0) + int(g.get("gainAmount", 0) or 0)
+            if g.get("isJackpot"):
+                jackpots += 1
+            if not res.get("isAllowToPlay"):
+                break
+        return {"ok": True, "spun": spun, "unread": ghosts,
+                "winnings": tally, "jackpots": jackpots}
+    return _mobile_call(run)
+
+
+@mcp.tool()
+def mobile_catalog() -> dict:
+    """Reference data collected from the mobile API so far (models/skins/fleet)."""
+    def run(cl):
+        return {"ok": True, **cl.store.counts()}
+    return _mobile_call(run)
+
+
 # ── Entry Point ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

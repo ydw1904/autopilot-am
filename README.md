@@ -11,7 +11,7 @@ can reason in natural language — *"find the best 5 circuits out of HKG, buy th
 routes, schedule the planes, price every seat"* — and the server executes it against
 a live, logged-in game session.
 
-The interesting engineering is not the game. It's the **harness**: 24 typed tools
+The interesting engineering is not the game. It's the **harness**: 36 typed tools
 over a real, hostile web app (CSRF tokens, jQuery handlers, silent server-side
 rejections), with safety boundaries baked in so an autonomous agent can run the
 loop without breaking things.
@@ -68,7 +68,7 @@ code/launch_chrome.sh
 # 3. Verify the server boots and registers its tools
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
   print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"
-# -> 24 tools
+# -> 36 tools
 ```
 
 `.mcp.json` at the repo root already declares the server for Claude Code. Once Chrome
@@ -76,9 +76,11 @@ is up and logged in, an agent can call the tools directly:
 
 > "What's my balance? Plan 3 circuits out of HKG with B742, then dry-run buying the routes."
 
-### The 24 tools
+### The 36 tools
 
-Mutating tools default to `dry_run=True`.
+Mutating tools default to `dry_run=True`. Two API surfaces: **web/CDP** (the browser
+game) and **mobile** (`mobile_*` / `shm_*`, the mobile app's JSON API for the
+second-hand market and daily rewards — features the browser game lacks).
 
 | Group | Tools |
 |---|---|
@@ -86,10 +88,12 @@ Mutating tools default to `dry_run=True`.
 | **Direct game actions (CDP)** | `buy_route`, `schedule_flight` |
 | **Planning & bulk ops** | `plan_circuits`, `buy_circuit_routes`, `buy_aircraft`, `schedule_circuits`, `auto_price_routes`, `number_circuit_aircraft`, `reconfigure_circuit_aircraft`, `rename_circuit`, `mass_rename_aircraft`, `mass_unschedule_aircraft` |
 | **Data sync / scraping** | `refresh_internal_audits`, `sync_warehouse`, `get_masstool_data`, `scrape_line_ids`, `scrape_audit_line_ids` |
+| **Mobile — second-hand market** | `shm_market`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch` |
+| **Mobile — daily rewards & session** | `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`, `mobile_balance`, `mobile_catalog`, `mobile_session_import` |
 
-Each of these is also a standalone CLI script under `code/` — the MCP server is a thin,
-typed layer over the same code paths, so everything is runnable and testable without an
-agent in the loop.
+The web/CDP tools are each also a standalone CLI script under `code/`. The mobile tools
+call the mobile HTTP API directly via `code/mobile_api.py` (access_token auth, stored at
+`~/.airlines_manager/session.json`; the SHM allows at most **10 active listings**).
 
 ---
 
@@ -103,7 +107,7 @@ airlines-manager/
 ├── CHANGELOG.md         ← project evolution
 ├── .mcp.json            ← Claude Code MCP registration
 └── code/
-    ├── mcp_server.py            ← MCP server: 24 tools (the control plane)
+    ├── mcp_server.py            ← MCP server: 36 tools (the control plane)
     ├── cdp.py                   ← shared Chrome DevTools Protocol layer
     ├── db.py                    ← shared SQLite access layer
     ├── circuit_planner.py       ← primary optimizer (Phase 1 + Phase 2)
