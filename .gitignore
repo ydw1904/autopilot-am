@@ -44,6 +44,11 @@ reconfig_*.html
 
 # Internal-only docs (kept local, not published)
 CHANGELOG.md
+DESIGN.md
+tickets/
+
+# Decompiled game APK (429M, local reference only)
+apk/
 
 # macOS / sync conflict clutter
 .sync-conflict-*
