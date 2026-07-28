@@ -6,9 +6,15 @@ This file is for an AI agent (Claude Code, etc.) editing the code.
 ## Project Overview
 
 Agent control plane for the browser game [Airlines Manager](https://www.airlines-manager.com):
-an **MCP server exposing 24 tools** over a live, logged-in game session, plus the
+an **MCP server exposing 36 tools** over a live, logged-in game session, plus the
 optimization engine and browser-automation layer it drives. Goal: maximize weekly
 revenue by selecting circuits (route sets), seat configs, schedules, and prices.
+
+Two API surfaces, one server: 25 **web/CDP** tools drive the browser game; 11
+**mobile** tools (`mobile_*`, `shm_*`) hit the mobile app's JSON API for features
+the browser lacks — the second-hand aircraft market and daily login rewards. The
+mobile tools authenticate with the mobile access_token, not the web session, and
+are otherwise independent of CDP (see "Mobile API surface" below).
 
 **Language:** Python 3.10+. Browser automation via Chrome DevTools Protocol (CDP,
 primary) with an optional OpenClaw backend in `scraping/`. The circuit beam search
@@ -35,8 +41,9 @@ Everything funnels through two shared layers — touch these and you touch every
 
 The three surfaces on top:
 
-1. **MCP server** (`code/mcp_server.py`) — 24 typed tools; the agent-facing control
-   plane. Live-state tools call CDP directly; heavier ops shell out to the CLI scripts.
+1. **MCP server** (`code/mcp_server.py`) — 36 typed tools; the agent-facing control
+   plane. Live-state tools call CDP directly; heavier ops shell out to the CLI scripts;
+   the mobile tools call the mobile HTTP API via `mobile_api.py`.
    **Mutating tools default to `dry_run=True`.**
 2. **CLI scripts** (`code/*.py`) — each game operation is a standalone `argparse`
    script, runnable and testable without an agent. The heavy ones the MCP server
@@ -54,7 +61,7 @@ airlines-manager/
 ├── AGENTS.md / README.md / MCP_SETUP.md / CHANGELOG.md
 ├── .mcp.json                       ← Claude Code MCP registration
 └── code/
-    ├── mcp_server.py               ← MCP server: 24 tools
+    ├── mcp_server.py               ← MCP server: 36 tools (25 web/CDP + 11 mobile)
     ├── cdp.py                      ← shared CDP client  ← SHARED LAYER
     ├── db.py                       ← shared SQLite layer ← SHARED LAYER
     ├── circuit_planner.py          ← PRIMARY: Phase 1 + Phase 2 optimization
@@ -77,6 +84,9 @@ airlines-manager/
     ├── scrape_line_ids.py          ← line_ids from /network/planning → DB
     ├── scrape_audit_line_ids.py    ← line_ids from /marketing/internalaudit → DB
     ├── scrape_internal_audits.py   ← refresh owned-route demand via /marketing/pricing
+    │
+    ├── mobile_api.py               ← MOBILE app JSON API client (httpx, access_token)
+    ├── mobile_store.py             ← reference store for mobile ids (mobile_* tables)
     │
     ├── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
     └── gui/                        ← NiceGUI pages (planner, hub, library, mass,
@@ -141,6 +151,37 @@ Modes: `ideal` (corrected, default), `percent --pct N`, `raw-ideal` (uncorrected
 Reads circuit config from DB, resolves game ids for aircraft + routes, submits
 schedules via the planning AJAX API. Exposes `get_lines_at_hub()` (reused by MCP).
 
+### Mobile API surface (`mobile_api.py`, `mobile_store.py`)
+The mobile app exposes a JSON API the browser game does **not**: the second-hand
+aircraft market (auction) and daily login rewards. These endpoints (`/api/{player_id}/…`)
+authenticate with the **mobile access_token**, not the web session cookies — the
+web/CDP session gets **401** from them, so they can't be driven through `cdp.py`.
+
+- **`mobile_api.py`** — httpx client (`trust_env=False`, like cdp.py). `AMSession`
+  loads/saves `~/.airlines_manager/session.json`; `import_from_capture()` pulls the
+  newest token from a mitmproxy capture of the app (the token expires ~daily).
+  `AMClient` methods: `auctions/put_up/bid` (SHM), `fleet/aircraft/model_skins`,
+  `shop_offers/claim_offer` + `wheel_*` + `slot_*` (daily). No request signing.
+- **Quirks baked in:** fleet paging is **1-based** (page 0 aliases page 1);
+  empty POSTs (slot spins, put_up) need a zero-length form body or the server 204s;
+  slot spins faster than the ~10s reel cooldown 204 but still burn a game (never
+  retried); **the SHM caps active listings at 10** (`MAX_ACTIVE_LISTINGS`; the 11th
+  put_up → errorCode 170011 "Auction limit reached"). `shm_sell_batch` reads the
+  current listing count and lists only up to the free slots.
+- **`mobile_store.py`** — best-effort reference store (mobile_* tables in the shared
+  DB) populated as the client reads: model specs, skin/livery ids + Playrion status,
+  the mobile fleet, and a market price-history log.
+- **MCP tools:** `mobile_session_import`, `mobile_balance`, `mobile_catalog`,
+  `shm_market`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch`,
+  `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`. Mutating ones
+  default `dry_run=True`. `mobile_daily_slot` is intentionally slow (~9s/spin).
+- **Where the token comes from:** `tools/mobile-capture/` — the mitmproxy capture
+  pipeline that produces the JSONL `import_from_capture()` reads. `capture_am.py`
+  is the mitmdump addon, `bluestacks_mitm_setup.sh` wires the emulator to the
+  proxy, and `bluestacks_mitm_runbook.md` covers the manual steps (root toggle /
+  APK-repackage route). `market_usage.md` records the SHM economics and the
+  daily-reward gotchas. **Captures are gitignored — they hold live tokens.**
+
 ### Fleet / data-sync scripts
 `aircraft_numberer`, `aircraft_reconfigurator`, `circuit_renamer`, `mass_renamer`,
 `mass_unscheduler`, `warehouse_sync`, `masstool`, `scrape_line_ids`,
@@ -158,6 +199,8 @@ its module docstring. Most are also wrapped as MCP tools.
 | `circuits` / `circuit_routes` | saved circuits and their routes |
 | `fleet` | scraped aircraft inventory (from `warehouse_sync`) |
 | `routes_demand_snapshot` | pre-overwrite demand snapshots (from `scrape_internal_audits`) |
+| `mobile_models` / `mobile_skins` | mobile model specs + skin/livery ids (creator, Playrion status) |
+| `mobile_aircraft` / `mobile_market` | mobile account fleet + SHM auction price-history log |
 
 Aircraft **aliases** (e.g. `B742` → `747-200B`) live in the `ALIASES` dict in
 `circuit_planner.py` (mirrored in `aircraft_buyer.py`).
@@ -188,7 +231,11 @@ python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2   # full 
 
 # MCP server boots and registers all tools
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
-  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 24 tools
+  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 36 tools
+
+# Mobile API surface (needs a valid ~/.airlines_manager/session.json)
+.venv/bin/python -c "import sys; sys.path.insert(0,'code'); import mcp_server; \
+  print(mcp_server.mobile_balance())"   # a dollar balance means the mobile token is live
 
 # Live stack (Chrome up + logged in): a dollar balance means CDP + session work
 .venv/bin/python -c "import sys; sys.path.insert(0,'code'); import mcp_server; \
@@ -223,3 +270,6 @@ absent).
    `code/native/build.sh`; the planner falls back to pure Python without it.
 4. **`aircraft_buyer.py` game-id table** may need a manual lookup for aircraft outside
    the current set.
+5. **Mobile session expires (~daily)** — mobile tools then return an auth error; refresh
+   with `mobile_session_import` (open the app so it emits a fresh call through a running
+   mitmproxy capture, then import). Distinct account/token from the web session.
