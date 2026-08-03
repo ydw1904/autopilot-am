@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "airlines-manager": {
-      "command": "/Users/dawei/lobster-shared/autopilot-am/.venv/bin/python",
+      "command": "${HOME}/lobster-shared/autopilot-am/.venv/bin/python",
       "args": [
-        "/Users/dawei/lobster-shared/autopilot-am/code/mcp_server.py"
+        "${HOME}/lobster-shared/autopilot-am/code/mcp_server.py"
       ],
       "env": {}
     }

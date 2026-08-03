@@ -46,30 +46,58 @@ cookie persists in the `--user-data-dir` profile, so you only log in once.
 ### Claude Code (this repo)
 
 `.mcp.json` at the repo root already declares the server, pointing at the venv
-interpreter and the absolute path to `mcp_server.py`:
+interpreter and `mcp_server.py`:
 
 ```json
 {
   "mcpServers": {
     "airlines-manager": {
-      "command": "/Users/dawei/lobster-shared/autopilot-am/.venv/bin/python",
-      "args": ["/Users/dawei/lobster-shared/autopilot-am/code/mcp_server.py"]
+      "command": "${HOME}/lobster-shared/autopilot-am/.venv/bin/python",
+      "args": ["${HOME}/lobster-shared/autopilot-am/code/mcp_server.py"],
+      "env": {}
     }
   }
 }
 ```
 
 Claude Code picks up `.mcp.json` from the project root on launch. Approve the
-server when prompted, then `/mcp` lists its tools. Use absolute paths — the
-server is launched from an arbitrary working directory.
+server when prompted, then `/mcp` lists its tools.
+
+**Why `${HOME}` and not a hardcoded path.** This file syncs between hosts whose
+home directories differ (`/Users/dawei` on the MacBook, `/Users/lobster` on the
+Mac mini), so a hardcoded path only ever works on one of them. Claude Code
+expands environment variables in `.mcp.json`, and the Syncthing folder is
+configured as `~/lobster-shared` — so the repo is at `$HOME/lobster-shared/…` on
+every host by construction and `${HOME}` always resolves correctly. Verified with
+`claude mcp get airlines-manager` → `✔ Connected`.
+
+Do NOT substitute a relative path: the server is launched from an arbitrary
+working directory, so the path must be absolute after expansion.
+
+The `.venv` is Syncthing-ignored, so each host builds its own — see §1. That is
+what makes one shared interpreter path safe.
 
 ### Hermes (`~/.hermes/config.yaml`)
+
+`~/.hermes` is **not** a Syncthing folder, so this config is per-machine and
+takes literal absolute paths — register the server separately on each host.
+
+MacBook:
 
 ```yaml
 mcp_servers:
   airlines-manager:
     command: "/Users/dawei/lobster-shared/autopilot-am/.venv/bin/python"
     args: ["/Users/dawei/lobster-shared/autopilot-am/code/mcp_server.py"]
+```
+
+Mac mini:
+
+```yaml
+mcp_servers:
+  airlines-manager:
+    command: "/Users/lobster/lobster-shared/autopilot-am/.venv/bin/python"
+    args: ["/Users/lobster/lobster-shared/autopilot-am/code/mcp_server.py"]
 ```
 
 ## 4. Smoke test the full stack
