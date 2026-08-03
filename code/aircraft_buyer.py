@@ -43,12 +43,17 @@ from cdp import CDP, get_am_tab, connect_cdp, js_args, get_balance, BASE_URL  # 
 from db import get_db, close_db
 from aircraft_aliases import resolve as resolve_aircraft
 
+# Purchase-box ids, read off the live /aircraft/buy/new/{haul} pages. The web
+# and the mobile API share ONE model-id space (checked across 27 models on the
+# auction feed — no mismatches), so these are also the mobile aircraftListId.
+# Keys are canonical names from aircraft_aliases; anything missing falls back
+# to scrape_game_id().
 AIRCRAFT_GAME_IDS = {
-    "747-200B": 114, "777-200": 148, "777-300": 149, "747-400": 153,
-    "747-100B": 131, "747-SP": 136, "767-200": 141, "767-300": 142,
-    "A310": 143, "A300-600": 145, "A340-300": 151, "A340-600": 152,
-    "MD-11": 146, "DC8-55": 123, "707-320C": 124, "777F": 154, "747-400F": 155,
-    "L-1049G": 179, "A321neo": 93, "737 MAX 8": 112,
+    "A310-300": 1, "777-200": 5, "767-200ER": 9, "767-300ER": 10,
+    "A340-300": 12, "A340-600": 16, "777-300": 17, "747-400": 20,
+    "A300-600R": 41, "MD-11": 62, "707-320C": 109, "747-100B": 113,
+    "747-200B": 114, "DC8-55": 123, "737-MAX8": 132, "A321neo": 133,
+    "747-SP": 151, "L-1049G": 179,
 }
 
 CATEGORY_TO_HAUL = {

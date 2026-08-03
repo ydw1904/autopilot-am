@@ -168,6 +168,11 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   retried); **the SHM caps active listings at 10** (`MAX_ACTIVE_LISTINGS`; the 11th
   put_up → errorCode 170011 "Auction limit reached"). `shm_sell_batch` reads the
   current listing count and lists only up to the free slots.
+- **Model ids are shared across surfaces:** the mobile `aircraftListId` and the web
+  purchase box's `aircraft[id]` are the same id space (spot-checked on 27 models via
+  the auction feed, no mismatches), so one table serves both —
+  `aircraft_buyer.AIRCRAFT_GAME_IDS`, keyed by canonical `aircraft_aliases` names.
+  Re-read it off `/aircraft/buy/new/{haul}` if the game renumbers.
 - **`mobile_store.py`** — best-effort reference store (mobile_* tables in the shared
   DB) populated as the client reads: model specs, skin/livery ids + Playrion status,
   the mobile fleet, and a market price-history log.
