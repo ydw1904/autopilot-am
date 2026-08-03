@@ -193,3 +193,101 @@ The auto-mode permission classifier blocked the interception steps as a group:
 Nothing about the environment blocks them — approve those commands (or run the
 two blocks above yourself) and the flow completes. ADB access, the APK pull, and
 all read-only recon already succeeded.
+
+---
+
+## Mac mini (host `lobster`, /Users/lobster) — set up 2026-08-03
+
+Route 2 confirmed working here too. Differences from the MacBook that will bite
+you if you copy commands verbatim:
+
+| Thing | MacBook | Mac mini |
+|---|---|---|
+| Repo | `/Users/dawei/lobster-shared/autopilot-am` | `/Users/lobster/lobster-shared/autopilot-am` |
+| Proxy address for the device | host LAN IP | **`10.0.2.2`** (see below) |
+| mitmdump bind | `0.0.0.0` | **`127.0.0.1`** |
+| Splits | base + config.arm64_v8a + vending | base + config.arm64_v8a (apkmirror `.apkm`, no vending) |
+| APK version | 4.00.0604 | 4.00.0803 |
+
+**Use `10.0.2.2`, not the en0 IP.** `bluestacks_mitm_setup.sh` auto-detects en0,
+which here is a public campus address (Tsinghua). The emulator cannot reach the
+host on it — connections are reset. BlueStacks Air runs slirp NAT (device
+`10.0.2.15/24`, gateway `10.0.2.2`), and `10.0.2.2` forwards to the host's
+**loopback** — verified: traffic arrives at mitmdump as `127.0.0.1:*`. So
+mitmdump binds to localhost only, which also avoids running an open proxy on a
+public network.
+
+**"BlueStacks has no internet" here was NOT a stale proxy.** `http_proxy` was
+already `null`. ICMP, DNS, TCP and TLS all work. The cause is that Android's
+connectivity probe hits `connectivitycheck.gstatic.com`, which from this network
+resolves to a blackhole (`220.181.174.x`), so the network is flagged
+`PARTIAL_CONNECTIVITY` and the UI claims no internet while real traffic is fine.
+Probes were repointed:
+
+```bash
+adb -s 127.0.0.1:5555 shell settings put global captive_portal_http_url  http://connect.rom.miui.com/generate_204
+adb -s 127.0.0.1:5555 shell settings put global captive_portal_https_url https://connect.rom.miui.com/generate_204
+```
+
+The `PARTIAL_CONNECTIVITY` flag is sticky on the existing BlueStacks ethernet
+agent and survives an airplane-mode cycle, but it is cosmetic — the app logs in
+and the API works. Only AppLovin ad endpoints fail TLS (blocked from this
+network); no game endpoint is affected.
+
+**A device proxy left set with no proxy running looks exactly like "no
+internet."** Always clear it: `adb shell settings put global http_proxy :0`.
+`refresh_mobile_session.sh` does this in an EXIT trap.
+
+### Refreshing the token (the ~daily job)
+
+```bash
+cd /Users/lobster/lobster-shared/autopilot-am
+./tools/mobile-capture/refresh_mobile_session.sh
+```
+
+That picks a reachable proxy address, starts mitmdump + `capture_am.py`, rotates
+the capture (it holds a live bearer token), relaunches the game (it auto-logs-in
+from saved credentials), waits for a fresh `access_token`, imports it, then
+clears the device proxy and stops mitmdump. Prints `player_id`, `token_tail`,
+balance.
+
+Manual equivalent, if the script fails:
+
+```bash
+mitmdump -s tools/mobile-capture/capture_am.py --listen-host 127.0.0.1 -p 8080 &
+adb -s 127.0.0.1:5555 shell settings put global http_proxy 10.0.2.2:8080
+adb -s 127.0.0.1:5555 shell am force-stop com.Playrion.AirlinesManager2
+adb -s 127.0.0.1:5555 shell monkey -p com.Playrion.AirlinesManager2 -c android.intent.category.LAUNCHER 1
+# wait for grep -q access_token tools/mobile-capture/captures/am_api.jsonl, then:
+.venv/bin/python -c "import sys,logging; logging.disable(logging.INFO); sys.path.insert(0,'code'); import mcp_server; \
+  print(mcp_server.mobile_session_import(capture_path='$PWD/tools/mobile-capture/captures/am_api.jsonl'))"
+adb -s 127.0.0.1:5555 shell settings put global http_proxy :0   # ALWAYS
+kill %1
+```
+
+`mobile_session_import()` **must** be given `capture_path`. Its `DEFAULT_CAPTURE`
+points at `~/Python Projects/airlines-manager-tools/...`, which does not exist
+here.
+
+> Note: httpx logs full request URLs at INFO, and the mobile API passes
+> `access_token` in the query string — so an unsuppressed run prints the live
+> token to the terminal. Keep `logging.disable(logging.INFO)` in any wrapper.
+
+### Rebuilding the patched APK
+
+Signed splits are at `scratchpad/apk/{base_patched,arm64}_signed.apk` (gitignored,
+does not sync). Reinstall after a BlueStacks image reset:
+
+```bash
+adb -s 127.0.0.1:5555 uninstall com.Playrion.AirlinesManager2
+adb -s 127.0.0.1:5555 install-multiple -r scratchpad/apk/base_patched_signed.apk scratchpad/apk/arm64_signed.apk
+```
+
+`install-multiple` may print `INSTALL_FAILED_MEDIA_UNAVAILABLE: Failed to prepare
+image.` from the incremental-install path and then `Success` — that is the
+non-incremental fallback working. Verify with `pm path`, not the message.
+
+Toolchain here: `brew install apktool mitmproxy`, `brew install --cask
+android-commandlinetools`, `sdkmanager 'build-tools;34.0.0'` (zipalign/apksigner
+at `/opt/homebrew/share/android-commandlinetools/build-tools/34.0.0/`), JDK at
+`/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home`.
