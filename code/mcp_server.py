@@ -27,10 +27,12 @@ Requirements:
   - pip install mcp httpx websocket-client
 """
 
+import functools
 import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import asdict
 from typing import List, Optional, Tuple
 
@@ -173,6 +175,18 @@ def _normalize_iatas(values: Optional[List[str]]) -> List[str]:
 # This is more efficient than reconnecting per-call and preserves state.
 
 _cdp = None  # Module-level singleton
+# FastMCP dispatches sync tools on a thread pool, and the shared CDP socket
+# has a single _msg_id counter: two concurrent tool calls would eat each
+# other's responses. Serialize the tools that drive the socket.
+_cdp_lock = threading.RLock()
+
+
+def _serialized_cdp(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _cdp_lock:
+            return fn(*args, **kwargs)
+    return wrapper
 
 
 def _get_cdp():
@@ -180,14 +194,19 @@ def _get_cdp():
     global _cdp
 
     if _cdp:
-        # Check if WebSocket is still alive with a ping
+        # Check if WebSocket is still alive with a ping. eval() swallows
+        # timeouts (returns None without raising), so only an exception
+        # proves the socket is dead — a hung-but-open socket stays.
         try:
             _cdp.eval("1")
             return _cdp
         except Exception:
             _cdp = None
 
-    am_tab = get_am_tab()
+    try:
+        am_tab = get_am_tab()
+    except Exception:
+        return None  # Chrome down / debugging port unreachable
     if not am_tab:
         return None
 
@@ -245,6 +264,7 @@ def _mark_route_owned(hub_iata: str, dest_iata: str) -> None:
 
 
 @mcp.tool()
+@_serialized_cdp
 def get_balance() -> dict:
     """Get the player's current dollar balance.
 
@@ -262,6 +282,7 @@ def get_balance() -> dict:
 
 
 @mcp.tool()
+@_serialized_cdp
 def list_hubs() -> dict:
     """List all hubs with their internal IDs and names.
 
@@ -295,6 +316,7 @@ def list_hubs() -> dict:
 
 
 @mcp.tool()
+@_serialized_cdp
 def list_routes(hub_iata: str) -> dict:
     """List owned routes from a hub.
 
@@ -326,12 +348,13 @@ def list_routes(hub_iata: str) -> dict:
 
 
 @mcp.tool()
+@_serialized_cdp
 def buy_route(
     hub_iata: str,
     dest_iata: str,
     hub_id: Optional[str] = None,
     country: Optional[str] = None,
-    dry_run: bool = False,
+    dry_run: bool = True,
     legacy: bool = False,
 ) -> dict:
     """Purchase a single route from a hub to a destination.
@@ -478,6 +501,7 @@ def aircraft_catalog() -> str:
 
 
 @mcp.tool()
+@_serialized_cdp
 def list_aircraft_for_sale(haul: str = "long") -> dict:
     """List aircraft available for purchase.
 
@@ -520,6 +544,7 @@ def list_aircraft_for_sale(haul: str = "long") -> dict:
 
 
 @mcp.tool()
+@_serialized_cdp
 def get_aircraft_at_hub(hub_iata: str) -> dict:
     """List owned aircraft at a hub by navigating to the planning page.
 
@@ -548,6 +573,7 @@ def get_aircraft_at_hub(hub_iata: str) -> dict:
 
 
 @mcp.tool()
+@_serialized_cdp
 def schedule_flight(
     aircraft_id: str,
     flights: list,
@@ -594,6 +620,7 @@ def schedule_flight(
 
 
 @mcp.tool()
+@_serialized_cdp
 def get_page_text() -> dict:
     """Get visible text of the current Airlines Manager page.
 
@@ -614,6 +641,7 @@ def get_page_text() -> dict:
 
 
 @mcp.tool()
+@_serialized_cdp
 def navigate_to(path: str) -> dict:
     """Navigate the AM tab to a specific game page.
 

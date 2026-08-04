@@ -338,7 +338,9 @@ def _search_circuits_native(routes, ac, comfort, speed, top_n, beam_width,
                              max_steps, max_routes, max_waves, match,
                              overshoot_pct=0.0):
     routes_ranked = sorted(enumerate(routes), key=lambda x: -x[1]["eco_d"])
-    top = routes_ranked[:max_routes]
+    # The C++ RouteSet is a fixed 3xuint64 bitset: indices >= 192 would write
+    # out of bounds. Clamp the user-controllable --max-routes here.
+    top = routes_ranked[:min(max_routes, 192)]
     M = len(top)
 
     demands = np.empty((M, 4), dtype=np.float64)

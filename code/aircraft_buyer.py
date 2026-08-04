@@ -490,7 +490,12 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
         print(f"  ERROR: submit returned {submit_result}", file=sys.stderr)
         return False, f"submit_failed: {submit_result}"
 
-    # Wait for navigation/response
+    # Wait for navigation/response. The click triggers a real form.submit(),
+    # but the first poll can land BEFORE navigation starts — the page is then
+    # still the list page, which must not be mistaken for a failed purchase
+    # (the money may already be in flight). Only declare failure after the
+    # list page persists across several consecutive polls (~4s grace).
+    list_page_polls = 0
     for _ in range(20):
         cdp.wait(0.5)
         result = cdp.eval_json("""(() => ({
@@ -507,8 +512,12 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
             return False, "Redirected to home — purchase FAILED"
         # Still on aircraft pages — keep waiting
         if "/aircraft/buy" in pn and "configure" not in pn.lower() and "/new/" in pn:
-            # Navigated back to list — purchase likely failed
-            return False, f"Back on list page: {pn}"
+            list_page_polls += 1
+            if list_page_polls >= 8:
+                # Navigated back to (or never left) the list — purchase failed
+                return False, f"Back on list page: {pn}"
+        else:
+            list_page_polls = 0
 
     # Timeout
     result = cdp.eval_json("""({pathname: window.location.pathname})""")
@@ -874,9 +883,11 @@ def _buy(args, doc):
             bought_total += batch_qty
             remaining -= batch_qty
 
-            # Update DB if in circuit mode
+            # Update DB if in circuit mode. Derive waves from aircraft
+            # actually bought — batch_idx counts batches (up to 99 aircraft
+            # each), not waves of 7.
             if args.circuit and waves is not None:
-                new_bought = waves_bought + batch_idx
+                new_bought = (waves_bought * 7 + bought_total) // 7
                 try:
                     db.execute(
                         "UPDATE circuits SET waves_bought=? WHERE name=?",

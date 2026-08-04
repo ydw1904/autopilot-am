@@ -57,6 +57,22 @@ def search_circuits_native(demands, prices, flight_times, eco_demands,
     cargo_demands = np.ascontiguousarray(cargo_demands, dtype=np.float64)
     top_indices = np.ascontiguousarray(top_indices, dtype=np.int64)
 
+    if len(top_indices) > _MAX_ROUTES:
+        raise ValueError(
+            f"top_indices has {len(top_indices)} entries; the native RouteSet "
+            f"bitset holds at most {_MAX_ROUTES}")
+    if top_n <= 0:
+        raise ValueError("top_n must be positive")
+    m = len(top_indices)
+    for name, arr in (("demands", demands), ("prices", prices)):
+        if arr.shape != (m, 4):
+            raise ValueError(f"{name} must have shape ({m}, 4), got {arr.shape}")
+    for name, arr in (("flight_times", flight_times),
+                      ("eco_demands", eco_demands),
+                      ("cargo_demands", cargo_demands)):
+        if arr.shape != (m,):
+            raise ValueError(f"{name} must have shape ({m},), got {arr.shape}")
+
     out_scores = np.empty(top_n, dtype=np.float64)
     out_times = np.empty(top_n, dtype=np.float64)
     out_counts = np.empty(top_n, dtype=np.int32)

@@ -2,6 +2,7 @@
 
 import sqlite3
 import os
+import threading
 
 # Imported as a module, not `from aircraft_aliases import resolve`: that module
 # reads db.DB for its default path, so the two import each other. Module objects
@@ -30,22 +31,27 @@ EXTRA_CIRCUIT_COLUMNS = [
 ]
 
 def _migrate(conn):
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(circuits)").fetchall()}
-    needs_route_investment_backfill = "route_investment" not in cols
-    for name, sql_type in EXTRA_CIRCUIT_COLUMNS:
-        if name not in cols:
-            conn.execute(f"ALTER TABLE circuits ADD COLUMN {name} {sql_type}")
-    if needs_route_investment_backfill:
-        # Sum gross_price from the routes table for each circuit's destinations.
-        conn.execute("""
-            UPDATE circuits SET route_investment = (
-                SELECT COALESCE(SUM(r.gross_price), 0)
-                FROM circuit_routes cr
-                JOIN routes r ON r.hub_iata = circuits.hub_iata
-                            AND r.dest_iata = cr.dest_iata
-                WHERE cr.circuit_name = circuits.name
-            )
-        """)
+    # Tolerate a fresh/empty DB: the base tables are created by other scripts,
+    # so skip column migrations for any table that doesn't exist yet.
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "circuits" in tables:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(circuits)").fetchall()}
+        needs_route_investment_backfill = "route_investment" not in cols
+        for name, sql_type in EXTRA_CIRCUIT_COLUMNS:
+            if name not in cols:
+                conn.execute(f"ALTER TABLE circuits ADD COLUMN {name} {sql_type}")
+        if needs_route_investment_backfill and "circuit_routes" in tables and "routes" in tables:
+            # Sum gross_price from the routes table for each circuit's destinations.
+            conn.execute("""
+                UPDATE circuits SET route_investment = (
+                    SELECT COALESCE(SUM(r.gross_price), 0)
+                    FROM circuit_routes cr
+                    JOIN routes r ON r.hub_iata = circuits.hub_iata
+                                AND r.dest_iata = cr.dest_iata
+                    WHERE cr.circuit_name = circuits.name
+                )
+            """)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS circuit_counters ("
         "hub_iata TEXT PRIMARY KEY, last_n INTEGER NOT NULL DEFAULT 0)"
@@ -57,23 +63,27 @@ def _migrate(conn):
         "hub_iata TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     )
 
+    if "routes" not in tables:
+        conn.commit()
+        return
     # Check and add is_owned column to routes
     route_cols = {r[1] for r in conn.execute("PRAGMA table_info(routes)").fetchall()}
     if "is_owned" not in route_cols:
         conn.execute("ALTER TABLE routes ADD COLUMN is_owned INTEGER NOT NULL DEFAULT 0")
-        conn.execute("""
-            UPDATE routes SET is_owned = 1 
-            WHERE (hub_iata, dest_iata) IN (
-                SELECT c.hub_iata, cr.dest_iata 
-                FROM circuit_routes cr 
-                JOIN circuits c ON c.name = cr.circuit_name 
-                WHERE c.status IN ('bought', 'completed')
-            )
-        """)
+        if "circuits" in tables and "circuit_routes" in tables:
+            conn.execute("""
+                UPDATE routes SET is_owned = 1
+                WHERE (hub_iata, dest_iata) IN (
+                    SELECT c.hub_iata, cr.dest_iata
+                    FROM circuit_routes cr
+                    JOIN circuits c ON c.name = cr.circuit_name
+                    WHERE c.status IN ('bought', 'completed')
+                )
+            """)
     if "line_id" not in route_cols:
         conn.execute("ALTER TABLE routes ADD COLUMN line_id INTEGER DEFAULT NULL")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_routes_line_id ON routes(line_id) WHERE line_id IS NOT NULL")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_routes_owned ON routes(hub_iata, is_owned)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_routes_line_id ON routes(line_id) WHERE line_id IS NOT NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_routes_owned ON routes(hub_iata, is_owned)")
     conn.commit()
 
 def get_player_hub_id(hub_iata: str) -> int | None:
@@ -173,12 +183,46 @@ def hub_financial_stats(hub_iata: str) -> dict:
     base["fleet_idle"] = ac["idle"] if ac else 0
     return base
 
+class _LockedConn:
+    """Thread-safe facade over the shared sqlite3 connection.
+
+    The MCP server runs tools on a thread pool, and a sqlite3 connection is
+    not safe for concurrent use even with check_same_thread=False. Each call
+    is serialized. Multi-statement transactions can still interleave between
+    calls — write paths here commit immediately, so keep it that way.
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        self._lock = threading.RLock()
+
+    def execute(self, *args, **kwargs):
+        with self._lock:
+            return self._raw.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        with self._lock:
+            return self._raw.executemany(*args, **kwargs)
+
+    def commit(self):
+        with self._lock:
+            self._raw.commit()
+
+    def close(self):
+        with self._lock:
+            self._raw.close()
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
 def get_db():
     global _conn
     if _conn is None:
-        _conn = sqlite3.connect(DB, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _migrate(_conn)
+        raw = sqlite3.connect(DB, check_same_thread=False)
+        raw.row_factory = sqlite3.Row
+        _migrate(raw)
+        _conn = _LockedConn(raw)
     return _conn
 
 def close_db():
@@ -516,8 +560,12 @@ def load_saved_circuit(name: str) -> dict | None:
             "eco": c["eco_seats"] or 0, "bus": c["bus_seats"] or 0,
             "fir": c["fir_seats"] or 0, "cargo": c["cargo_seats"] or 0,
         }
+    try:
+        num = int(c["name"].rsplit("C", 1)[-1])
+    except ValueError:
+        num = 1  # custom names need not end in a C-number
     return {
-        "num": int(c["name"].rsplit("C", 1)[-1]) if "C" in c["name"] else 1,
+        "num": num,
         "name": c["name"], "hub": c["hub_iata"], "ac": ac, "routes": routes,
         "total_time": c["total_hours"] or 0,
         "cfg": cfg, "waves": c["waves"] or 0,

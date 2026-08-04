@@ -27,6 +27,10 @@ from cdp import CDP, get_am_tab, get_balance, wait_for_js  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import get_db  # noqa: E402
 
+# Seconds to let the reconfigure POST commit server-side before navigating
+# again. Below ~2s the next navigation cancels it and the seats never change.
+POST_SUBMIT_SETTLE_S = 3.0
+
 
 PAGE_BATCH = 10
 PAGE_FETCH_TIMEOUT = 120
@@ -216,9 +220,13 @@ def fetch_reconfigure_page(cdp, aircraft_id: int):
     }
 
 
-def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
+def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo,
+                     dry_run: bool = False):
     """Reconfigure an aircraft's seats. Navigates to the reconfigure page,
     reads current state, sets sliders, submits, and verifies.
+
+    With dry_run, reads the current seats and reports what would change
+    without submitting the form.
 
     Returns (status_code, message)."""
     target_url = f"https://www.airlines-manager.com/aircraft/show/{aircraft_id}/reconfigure"
@@ -254,6 +262,11 @@ def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
     if state.get("skin") is None:
         return 500, "no_checked_skin (refusing — would risk livery)"
 
+    if dry_run:
+        return 200, (f"would reconfigure e{state['eco']} b{state['bus']} "
+                     f"f{state['first']} c{state['cargo']} -> "
+                     f"e{eco} b{bus} f{first} c{cargo}")
+
     cdp.eval(
         f"$('#sliderEco').slider('value', {eco});"
         f" $('#sliderBus').slider('value', {bus});"
@@ -268,6 +281,24 @@ def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
         f" $('#payloadUsedInput').val({cargo});"
     )
 
+    # The #...Input fields are the visible, *unnamed* number boxes; the values
+    # that actually POST live in hidden aircraft[...] inputs which the page
+    # syncs from the sliders' 'slide' handler. Setting a slider through the API
+    # never fires 'slide', so without this the form submits the old seats and
+    # the verify below reports values_mismatch.
+    cdp.eval(
+        "(() => {"
+        " const set = (n, v) => {"
+        "   const el = document.querySelector(`#showEquipment input[name=\"${n}\"]`);"
+        "   if (el) el.value = v;"
+        " };"
+        f" set('aircraft[seatsEco]', {eco});"
+        f" set('aircraft[seatsBus]', {bus});"
+        f" set('aircraft[seatsFirst]', {first});"
+        f" set('aircraft[payloadUsed]', {cargo});"
+        "})()"
+    )
+
     cdp.eval("window.onbeforeunload = null; $(window).off('beforeunload');")
     cdp.eval("document.getElementById('showEquipment').submit()")
 
@@ -278,6 +309,11 @@ def post_reconfigure(cdp, aircraft_id: int, *, eco, bus, first, cargo):
         "document.readyState === 'complete' && !document.getElementById('showEquipment')",
         timeout=15.0,
     )
+    # The form disappearing is not proof the server committed: re-navigating
+    # right after it goes cancels the POST in flight and the seats stay put
+    # (observed as a ~96% false values_mismatch rate over a 119-aircraft run).
+    # The server needs a beat before the next navigation.
+    time.sleep(POST_SUBMIT_SETTLE_S)
     if not cdp.navigate_and_wait(target_url, slider_ready):
         return 500, "page_did_not_load_after_submit"
     vals_raw = cdp.eval(
@@ -354,6 +390,11 @@ def reconfigure_circuit(circuit_name: str, dry_run: bool = False) -> int:
 
             # 1) Current hub from /show page (cheaper than parsing /attribute).
             cur_iata = get_current_hub_iata(cdp, aid)
+            if cur_iata is None:
+                print(f"  {label} FAIL: could not parse current hub — skipping "
+                      "(refusing to relocate blind)")
+                failed += 1
+                continue
             need_relocate = cur_iata != target_iata
             if need_relocate:
                 if dry_run:
@@ -369,7 +410,17 @@ def reconfigure_circuit(circuit_name: str, dry_run: bool = False) -> int:
                         failed += 1; continue
                     s = post_relocate(cdp, aid, target_hub_id, attr["token"])
                     if s in (200, 204, 302):
-                        relocated += 1
+                        # HTTP 200 is not proof: the game silently rejects paid
+                        # actions by re-rendering the form with old values.
+                        # Re-read the hub to confirm the move actually landed.
+                        time.sleep(0.5)
+                        new_iata = get_current_hub_iata(cdp, aid)
+                        if new_iata == target_iata:
+                            relocated += 1
+                        else:
+                            print(f"  {label} relocate FAIL: hub still "
+                                  f"{new_iata} after POST"); failed += 1
+                            continue
                     else:
                         print(f"  {label} relocate FAIL HTTP {s}"); failed += 1
                         continue
@@ -380,10 +431,13 @@ def reconfigure_circuit(circuit_name: str, dry_run: bool = False) -> int:
                 cdp, aid,
                 eco=target_seats["eco"], bus=target_seats["bus"],
                 first=target_seats["first"], cargo=target_seats["cargo"],
+                dry_run=dry_run,
             )
             if s == 200 and msg == "already_correct":
                 skipped += 1
             elif s == 200:
+                if dry_run:
+                    print(f"  {label} {msg}")
                 reconfigured += 1
             else:
                 print(f"  {label} reconfigure FAIL ({msg})"); failed += 1
