@@ -180,6 +180,22 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   `shm_market`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch`,
   `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`. Mutating ones
   default `dry_run=True`. `mobile_daily_slot` is intentionally slow (~9s/spin).
+- **`daily_routine.py`** — the freebies, once a day, tasks in random order with a
+  `--jitter` start delay. Calls the MCP tools directly; on an auth error it runs
+  `refresh_mobile_session.sh` once and retries that task (so BlueStacks has to be
+  up). Slots are event-gated: it skips them unless `specialEvent` shows a running
+  spin milestone. Scheduled by the `com.lobster.am-daily-routine` LaunchAgent at
+  09:00 Asia/Shanghai = **01:00 UTC**, just after the game's daily reset; the
+  jitter spreads the real start across 01:00–01:35 UTC. Log:
+  `~/.airlines_manager/daily.log`.
+- **Not covered yet — boosters and Bob.** `booster` and `booster/history` read
+  fine, and the free Economy pack is purchase option **id 1** (`freeWithAds`, 8h
+  cooldown; the account's `bypassAds` runs to 2026-09-04). But `booster/ads/purchase`
+  rejects `purchaseId`/`id`/`boosterPurchaseId`/`offerId` with errorCode 10205, so
+  the body shape still needs a capture. Bob is the maintenance mini-game
+  (`maintenance/bob/2` → errorCode 99 as a bare GET); it is a *skill* game with
+  a score submission, so automating it means posting fabricated scores — a
+  different risk class from claiming a free reward. Capture both before building.
 - **Where the token comes from:** `tools/mobile-capture/` — the mitmproxy capture
   pipeline that produces the JSONL `import_from_capture()` reads. `capture_am.py`
   is the mitmdump addon, `bluestacks_mitm_setup.sh` wires the emulator to the
