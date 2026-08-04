@@ -32,7 +32,7 @@ import contextlib
 import json
 import sys
 
-from cdp import connect_cdp, js_args
+from cdp import CDP, ensure_am_tab, js_args
 
 PROFILE_URL = "https://www.airlines-manager.com/alliance/profile"
 
@@ -94,11 +94,18 @@ def post_donation(cdp, url: str, amount: int) -> dict:
 
 def run(dry_run: bool = True, reserve: int = 0) -> dict:
     """Donate the daily max. Returns a result dict (the routine calls this)."""
+    # Starts Chrome if it is not up. connect_cdp() is not used here because it
+    # sys.exit()s when there is no tab, which would take the whole daily
+    # routine down instead of failing this one task.
+    tab = ensure_am_tab()
+    if not tab:
+        return {"ok": False, "error": "could not get a Chrome CDP tab",
+                "hint": "Check that code/launch_chrome.sh runs and port 9222 is free."}
     try:
-        cdp = connect_cdp()
+        cdp = CDP(tab["webSocketDebuggerUrl"])
+        cdp.connect()
     except Exception as e:
-        return {"ok": False, "error": f"no Chrome CDP tab on airlines-manager.com: {e}",
-                "hint": "Start code/launch_chrome.sh and log in."}
+        return {"ok": False, "error": f"could not attach to the AM tab: {e}"}
     try:
         cdp.navigate_and_wait(PROFILE_URL,
                               "!!document.querySelector('#alliance-slider') "

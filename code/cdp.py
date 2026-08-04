@@ -208,6 +208,63 @@ def get_am_tab():
     return None
 
 
+def _debugger_alive() -> bool:
+    """Is anything listening on the CDP debug port?"""
+    try:
+        with httpx.Client(timeout=3, trust_env=False) as client:
+            return client.get(f"{CDP_URL}/json/version").status_code == 200
+    except Exception:
+        return False
+
+
+def ensure_am_tab(timeout: float = 60.0, url: str = BASE_URL):
+    """Return an AM tab, starting Chrome and/or opening the tab if needed.
+
+    Three cases: the debugger is down (launch launch_chrome.sh detached and
+    wait for the port), the debugger is up but has no AM tab (ask it to open
+    one — /json/new needs PUT on current Chrome), or a tab already exists.
+    Returns the tab dict, or None if it could not get one in `timeout`.
+
+    Being logged in is a separate matter: this can hand back a tab sitting on
+    /login, which only a human can clear.
+    """
+    def _safe_tab():  # get_am_tab raises when the debug port is dead
+        try:
+            return get_am_tab()
+        except Exception:
+            return None
+
+    tab = _safe_tab()
+    if tab:
+        return tab
+
+    deadline = time.time() + timeout
+    if not _debugger_alive():
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "launch_chrome.sh")
+        if not os.access(script, os.X_OK):
+            return None
+        import subprocess
+        subprocess.Popen([script, url], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while time.time() < deadline and not _debugger_alive():
+            time.sleep(1.0)
+        if not _debugger_alive():
+            return None
+
+    while time.time() < deadline:
+        tab = _safe_tab()
+        if tab:
+            return tab
+        try:  # debugger is up but nothing is on airlines-manager.com
+            with httpx.Client(timeout=10, trust_env=False) as client:
+                client.put(f"{CDP_URL}/json/new?{url}")
+        except Exception:
+            pass
+        time.sleep(1.5)
+    return None
+
+
 def connect_cdp():
     """Connect to the AM tab's CDP websocket, or exit with an error."""
     tab = get_am_tab()
