@@ -1463,6 +1463,24 @@ def mobile_daily_bonuses(dry_run: bool = True, min_delay: float = 1.0) -> dict:
     return _mobile_call(run, min_delay=0.0)  # claims paced in-loop
 
 
+def _slot_event(rules: dict) -> Optional[dict]:
+    """Progress toward the running slot event's spin-milestone gift, if any.
+
+    `specialEvent.playCountForGift` is the spin count that earns the event
+    reward (a livery); `playCount` is the running total, which the server keeps
+    across days for the event window — so the milestone is reached by spinning
+    the free daily allowance on enough days, not by paying for extra games.
+    """
+    ev = rules.get("specialEvent") or {}
+    target = int(ev.get("playCountForGift") or 0)
+    if not target:
+        return None
+    done = int(ev.get("playCount") or 0)
+    return {"event": ev.get("label"), "spins_done": done,
+            "spins_for_gift": target, "spins_to_go": max(0, target - done),
+            "ends": (ev.get("endDate") or {}).get("date")}
+
+
 @mcp.tool()
 def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
                       dry_run: bool = True) -> dict:
@@ -1473,20 +1491,33 @@ def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
     so they are never retried). SLOW: a full day (~20 spins) takes ~3 min. Safety
     default: dry_run=True.
     """
+    from mobile_api import AMAuthError, AMError
+
     def run(cl):
         rules = cl.slot_rules()
         free = int(rules.get("nbRemainingGames", 0) or 0)
+        event = _slot_event(rules)
         if not rules.get("isAllowToPlay") or free <= 0:
-            return {"ok": True, "spun": 0, "note": "no free games left today"}
+            return {"ok": True, "spun": 0, "note": "no free games left today",
+                    "event": event}
         n = free if max_spins is None else min(free, max_spins)
         if dry_run:
             return {"ok": True, "dry_run": True, "free_games": free,
-                    "would_spin": n, "eta_seconds": int(n * (spin_delay + 1.5))}
+                    "would_spin": n, "eta_seconds": int(n * (spin_delay + 1.5)),
+                    "event": event}
         tally, jackpots, spun, ghosts = {}, 0, 0, 0
+        expired = False
         for i in range(n):
             if i > 0:
                 _time.sleep(spin_delay + random.uniform(0, 2.0))
-            res = cl.slot_play()
+            try:
+                res = cl.slot_play()
+            except AMAuthError:
+                # The token rotates out from under long runs. Spins already
+                # played are counted server-side, so stop and report the haul
+                # instead of losing it to an exception.
+                expired = True
+                break
             spun += 1
             if not res:
                 ghosts += 1
@@ -1498,8 +1529,21 @@ def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
                 jackpots += 1
             if not res.get("isAllowToPlay"):
                 break
-        return {"ok": True, "spun": spun, "unread": ghosts,
-                "winnings": tally, "jackpots": jackpots}
+        out = {"ok": True, "spun": spun, "unread": ghosts,
+               "winnings": tally, "jackpots": jackpots}
+        if expired:
+            out["auth_expired"] = True
+            out["hint"] = ("Token expired mid-run — refresh the mobile session "
+                           "and re-run to spin the rest of today's games.")
+        if event:
+            try:  # authoritative post-run count, if the session still works
+                out["event"] = _slot_event(cl.slot_rules()) or event
+            except AMError:
+                event["spins_done"] += spun
+                event["spins_to_go"] = max(0, event["spins_for_gift"]
+                                           - event["spins_done"])
+                out["event"] = event
+        return out
     return _mobile_call(run)
 
 
