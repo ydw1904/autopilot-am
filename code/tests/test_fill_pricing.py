@@ -7,7 +7,7 @@ not captured from a run of the code.
 
 import pytest
 
-from auto_pricer import demand_factor, fill_price, fill_prices
+from auto_pricer import demand_factor, fill_price, fill_prices, revenue_at
 
 
 # ── demand_factor: 1 at or below ideal, 1 - 3*(p/ideal - 1) above it ──
@@ -76,6 +76,37 @@ def test_fill_price_unsolvable_cases_return_none(ideal, cur_price, demand, capac
     assert fill_price(ideal, cur_price, demand, capacity) is None
 
 
+# ── audit_demand caps the un-scaled peak, which is only sound when the
+#    demand and price reads are simultaneous ──
+
+def test_audit_demand_stops_a_stale_read_ratcheting_the_price_up():
+    # MPM-C023 BOG eco.  A demand figure that has not yet absorbed the last
+    # price change (8170 reported while already 2% over the 4268 ideal)
+    # un-scales to a peak of ~8700 that does not exist, and the raw formula
+    # asks for 4357 — one more turn of the ratchet, and a price that then
+    # reproduces itself on every later run.  The audit says the peak is 8170,
+    # which against 8160 seats justifies exactly one dollar of markup.
+    assert fill_price(4268, 4356, 8170, 8160) == 4357
+    assert fill_price(4268, 4356, 8170, 8160, audit_demand=8170) == 4269
+
+
+def test_audit_demand_is_a_cap_not_a_replacement():
+    # Live demand un-scales to 1000, well under the 5000 the audit last saw,
+    # so the live figure stands and the price is solved against it.
+    assert fill_price(1000, 1000, 1000, 500, audit_demand=5000) == 1166
+
+
+def test_no_audit_demand_leaves_the_un_scaled_figure_alone():
+    assert (fill_price(1000, 1000, 1000, 500, audit_demand=None)
+            == fill_price(1000, 1000, 1000, 500))
+
+
+def test_a_route_read_consistently_needs_no_cap():
+    # Same route read simultaneously (7642 pax at 4356) already prices back
+    # down to ideal: the peak un-scales to 8146, under the 8160 seats.
+    assert fill_price(4268, 4356, 7642, 8160) == 4268
+
+
 # ── fill_prices: per class, falling back to ideal where unsolvable ──
 
 def test_fill_prices_per_class():
@@ -96,3 +127,47 @@ def test_fill_prices_per_class():
 def test_fill_prices_missing_masstool_classes_fall_back_to_ideal():
     ideal = {"eco": 1000, "bus": 1330, "first": 2300, "cargo": 900}
     assert fill_prices(ideal, dict(ideal), {}) == ideal
+
+
+def test_fill_prices_applies_the_audit_cap_per_class():
+    ideal = {"eco": 1000, "bus": 1330, "first": 2300, "cargo": 900}
+    current = {"eco": 1100, "bus": 1330, "first": 2300, "cargo": 900}
+    route = {
+        "demand":  {"eco": 1000, "bus": 200, "first": 10, "cargo": 300},
+        "carried": {"eco": 900,  "bus": 200, "first": 0,  "cargo": 150},
+    }
+    # eco reads 1000 pax at 1100 (factor 0.7) -> un-scaled peak 1428, so the
+    # raw answer marks up on demand the audit never saw.  Capping at 1000
+    # leaves 900 seats against 1000 peak: markup = (1 - 0.9)/3.
+    assert fill_prices(ideal, current, route)["eco"] == 1123
+    capped = fill_prices(ideal, current, route, audit={"eco": 1000})
+    assert capped["eco"] == 1033
+    # Classes with no audit entry are untouched by the cap.
+    assert capped["cargo"] == fill_prices(ideal, current, route)["cargo"]
+
+
+# ── revenue_at: price x min(demand, seats) on the same slope-3 curve ──
+
+def test_revenue_at_is_capped_by_the_seats_on_offer():
+    # 1000 pax want the route at the ideal price but only 500 seats fly.
+    assert revenue_at(1000, 1000, 1000, 1000, 500) == pytest.approx(500_000)
+
+
+def test_revenue_at_prices_the_demand_it_sheds():
+    # At 1200 (factor 0.4) only 400 of the 1000 want it — under the 500 seats,
+    # so revenue is 1200 x 400, not 1200 x 500.
+    assert revenue_at(1000, 1200, 1000, 1000, 500) == pytest.approx(480_000)
+
+
+def test_revenue_at_shows_bog_losing_money_above_ideal():
+    # MPM-C023 BOG eco, 2026-08-04: 7642 pax at 4356 against 8160 seats.
+    # Dropping to the 4268 ideal is worth ~1.48M/period.
+    now  = revenue_at(4268, 4356, 4356, 7642, 8160)
+    best = revenue_at(4268, 4268, 4356, 7642, 8160)
+    assert best - now == pytest.approx(1_478_013, abs=1)
+
+
+def test_revenue_at_needs_seats_demand_and_an_ideal():
+    assert revenue_at(0, 1000, 1000, 1000, 500) == 0.0
+    assert revenue_at(1000, 1000, 1000, 0, 500) == 0.0
+    assert revenue_at(1000, 1000, 1000, 1000, 0) == 0.0

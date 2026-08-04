@@ -124,7 +124,7 @@ def demand_factor(ideal, price):
     return max(0.0, 1.0 - ELASTICITY_SLOPE * (price - ideal) / ideal)
 
 
-def fill_price(ideal, cur_price, cur_demand, capacity):
+def fill_price(ideal, cur_price, cur_demand, capacity, audit_demand=None):
     """Highest price that still sells every seat — i.e. remaining demand 0.
 
     `cur_demand` is the demand observed at `cur_price` (masstool reports
@@ -136,6 +136,15 @@ def fill_price(ideal, cur_price, cur_demand, capacity):
     slope-3 elasticity makes it fall.  So the fill price is the revenue
     maximum, not merely the "no wasted demand" price.
 
+    `audit_demand` is the market's peak demand as last measured by an audit
+    (`routes.<cls>_demand`).  It caps the un-scaled figure, because that
+    un-scaling is only sound when the demand and price reads are
+    simultaneous.  When they are not — a demand figure that has not yet
+    absorbed the last price change — the inferred peak comes out too high,
+    and the resulting over-price is itself a fixed point of this formula, so
+    no later run undoes it.  MPM-C023 sat 0.2–7.7% over ideal for 10 days that
+    way, costing ~4% of the circuit's turnover.
+
     Returns None when there is nothing to solve (no ideal, no demand, or a
     current price already past the zero-demand point).
     """
@@ -145,6 +154,8 @@ def fill_price(ideal, cur_price, cur_demand, capacity):
     if factor <= 0:
         return None  # demand should already be zero; model can't be inverted
     max_demand = cur_demand / factor
+    if audit_demand:
+        max_demand = min(max_demand, audit_demand)
     if capacity <= 0 or capacity >= max_demand:
         # No seats, or seats already cover peak demand: ideal is optimal.
         return ideal
@@ -156,8 +167,37 @@ def fill_price(ideal, cur_price, cur_demand, capacity):
     return max(ideal, min(target, math.floor(ideal * 4 / 3)))
 
 
-def fill_prices(ideal, current, route):
-    """Per-class fill prices for one masstool route entry."""
+def revenue_at(ideal, price, cur_price, cur_demand, capacity):
+    """Revenue per period at `price`, inferred from the demand seen at
+    `cur_price`.  Revenue is price × min(demand, seats), with demand read off
+    the same slope-3 curve fill_price solves against."""
+    if ideal <= 0 or capacity <= 0 or cur_demand <= 0:
+        return 0.0
+    factor = demand_factor(ideal, cur_price)
+    if factor <= 0:
+        return 0.0
+    max_demand = cur_demand / factor
+    return price * min(max_demand * demand_factor(ideal, price), capacity)
+
+
+def fill_revenue(ideal, current, target, route):
+    """(revenue at current prices, revenue at target prices) for one route."""
+    demand = route.get("demand", {})
+    carried = route.get("carried", {})
+    now = tgt = 0.0
+    for cls in CLASS_ORDER:
+        seen = (current[cls], demand.get(cls, 0), carried.get(cls, 0))
+        now += revenue_at(ideal[cls], current[cls], *seen)
+        tgt += revenue_at(ideal[cls], target[cls], *seen)
+    return now, tgt
+
+
+def fill_prices(ideal, current, route, audit=None):
+    """Per-class fill prices for one masstool route entry.
+
+    `audit` is the stored per-class audit demand for this route, if known.
+    """
+    audit = audit or {}
     out = {}
     for cls in CLASS_ORDER:
         tgt = fill_price(
@@ -165,6 +205,7 @@ def fill_prices(ideal, current, route):
             current[cls],
             route.get("demand", {}).get(cls, 0),
             route.get("carried", {}).get(cls, 0),
+            audit.get(cls),
         )
         out[cls] = ideal[cls] if tgt is None else tgt
     return out
@@ -480,6 +521,24 @@ def load_route_iatas_for_hub(hub_iata):
     return set(r[0].upper() for r in rows)
 
 
+def load_audit_demand(hub_iata):
+    """Per-class audit demand for a hub's owned routes: {iata: {cls: pax}}.
+
+    These are the market's peak-demand figures written by
+    scrape_internal_audits, independent of what you charge — unlike the live
+    masstool reading, which is already reduced by the current price.
+    """
+    rows = get_db().execute(
+        "SELECT dest_iata, eco_demand, bus_demand, fir_demand, cargo_demand "
+        "FROM routes WHERE hub_iata = ? AND is_owned = 1",
+        (hub_iata.upper(),),
+    ).fetchall()
+    return {
+        r[0].upper(): dict(zip(CLASS_ORDER, r[1:]))
+        for r in rows if any(r[1:])
+    }
+
+
 def get_line_ids_from_db(hub_iata, dest_iatas=None):
     """Try to load line_ids from DB for a hub. Returns dict {iata: line_id} or None."""
     db = get_db()
@@ -600,6 +659,7 @@ def _price(args, doc):
     cdp.connect()
     try:
         live = {}
+        audit = {}
         if args.mode == "fill":
             mt_hub = (hub_iata or args.hub).upper()
             mt_id = get_player_hub_id(mt_hub)
@@ -610,6 +670,10 @@ def _price(args, doc):
                 sys.exit(1)
             live = fetch_masstool_hub(cdp, mt_id)
             print(f"Masstool {mt_hub}: live seats/demand for {len(live)} routes")
+            audit = load_audit_demand(mt_hub)
+            print(f"Audit demand from DB for {len(audit)} routes "
+                  f"(caps the inferred peak demand; refresh with "
+                  f"scrape_internal_audits.py --hub {mt_hub})")
 
         airport_id = args.airport
         if args.hub:
@@ -643,6 +707,7 @@ def _price(args, doc):
         iata_by_line_id = {str(v): k for k, v in (db_line_ids or {}).items()}
 
         ok = fail = skipped = cooldown = not_matched = 0
+        rev_before = rev_after = 0.0
         for i, lid in enumerate(ids, 1):
             html = fetch_text(cdp, f"/marketing/pricing/{lid}")
             data = parse_price_page(html)
@@ -708,18 +773,25 @@ def _price(args, doc):
                                           "status": "skipped",
                                           "detail": "no seats flown"})
                     continue
-                tgt = fill_prices(ideal, cur, route)
+                tgt = fill_prices(ideal, cur, route, audit.get(label))
             else:
                 base = correct_ideal_prices(game_ideal)
                 tgt = {k: max(1, int(round(v * args.pct / 100.0)))
                        for k, v in base.items()}
 
             changed = any(tgt[k] != cur[k] for k in tgt)
+            gain = None
 
             if args.mode == "fill":
                 rem = live[label].get("remaining", {})
                 corrections = (" [rem " + "/".join(
                     str(rem.get(c, 0)) for c in CLASS_ORDER) + "]")
+                rev_now, rev_tgt = fill_revenue(ideal, cur, tgt, live[label])
+                gain = rev_tgt - rev_now
+                rev_before += rev_now
+                rev_after += rev_tgt
+                if round(gain):
+                    corrections += f" [{gain:+,.0f}/period]"
             else:
                 bus_diff = tgt["bus"] - game_ideal["bus"]
                 fir_diff = tgt["first"] - game_ideal["first"]
@@ -735,7 +807,8 @@ def _price(args, doc):
             if args.skip_unchanged and not changed:
                 skipped += 1
                 doc["routes"].append({"route": label, "old": dict(cur), "new": dict(tgt),
-                                      "changed": False, "status": "skipped"})
+                                      "changed": False, "status": "skipped",
+                                      "revenue_gain": gain})
                 if i % 25 == 0:
                     print(f"  [{i:4d}/{len(ids)}] {label}: unchanged (skip)")
                 continue
@@ -743,7 +816,8 @@ def _price(args, doc):
             if args.dry_run:
                 print(f"  [{i:4d}/{len(ids)}] {label:>4s}  {tag}{corrections}")
                 doc["routes"].append({"route": label, "old": dict(cur), "new": dict(tgt),
-                                      "changed": changed, "status": "dry_run"})
+                                      "changed": changed, "status": "dry_run",
+                                      "revenue_gain": gain})
                 continue
 
             if args.submit == "masstool":
@@ -751,7 +825,7 @@ def _price(args, doc):
             else:
                 status, detail = submit_prices_native(cdp, lid, tgt)
             entry = {"route": label, "old": dict(cur), "new": dict(tgt),
-                     "changed": changed, "status": status}
+                     "changed": changed, "status": status, "revenue_gain": gain}
             if detail:
                 entry["detail"] = detail
             doc["routes"].append(entry)
@@ -773,6 +847,13 @@ def _price(args, doc):
               f"not_in_filter={not_matched}")
         doc["totals"] = {"ok": ok, "fail": fail, "skipped": skipped,
                          "cooldown": cooldown, "not_in_filter": not_matched}
+        if args.mode == "fill" and rev_before:
+            pct = (rev_after / rev_before - 1) * 100
+            print(f"Revenue at these prices ${rev_before:,.0f}/period → "
+                  f"${rev_after:,.0f} ({pct:+.2f}%)")
+            doc["totals"].update({"revenue_before": rev_before,
+                                  "revenue_after": rev_after,
+                                  "revenue_gain": rev_after - rev_before})
         sys.exit(0 if fail == 0 else 2)
     finally:
         cdp.close()
