@@ -7,6 +7,9 @@ Tasks (every one is bounded to free actions; none of them spends a balance):
   slots       the slot machine's free daily games, ONLY while a spin-milestone
               event is running -- the event is read live off specialEvent, so
               no calendar of event windows has to be maintained here
+  donate      the alliance treasury donation, maxed at the daily cap. This one
+              rides the BROWSER (Chrome CDP), not the mobile API, so it needs a
+              logged-in tab; it is idempotent, so a repeat run donates 0
 
 The game's day rolls over at 00:00 UTC, so this is meant to run shortly after.
 --jitter sleeps a random 0..N minutes before starting, so the wall-clock time
@@ -36,6 +39,10 @@ CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(CODE_DIR)
 REFRESH_SCRIPT = os.path.join(REPO_DIR, "tools", "mobile-capture",
                               "refresh_mobile_session.sh")
+
+# Dollars held back from the alliance donation. The cap is $200M/day against a
+# balance in the billions, so 0 is the sane default; --reserve overrides it.
+DONATION_RESERVE = 0
 
 sys.path.insert(0, CODE_DIR)
 
@@ -83,9 +90,21 @@ def task_slots(dry_run: bool) -> dict:
     return _tool("mobile_daily_slot")(dry_run=dry_run)
 
 
+def task_donate(dry_run: bool) -> dict:
+    """Max out the daily alliance donation.
+
+    The odd one out: this is the browser/CDP surface, not the mobile API, so it
+    needs Chrome up on port 9222 with a logged-in tab. A dead web session fails
+    this task alone — the mobile refresh can't fix it, so it says so plainly.
+    """
+    import alliance_donator
+    return alliance_donator.run(dry_run=dry_run, reserve=DONATION_RESERVE)
+
+
 TASKS = {
     "currencies": task_currencies,
     "slots": task_slots,
+    "donate": task_donate,
 }
 
 
@@ -134,6 +153,7 @@ def run_task(name: str, dry_run: bool, fh=None) -> dict:
 
 
 def main():
+    global DONATION_RESERVE
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dry-run", action="store_true",
@@ -145,7 +165,10 @@ def main():
                    help="run just these tasks (repeatable)")
     p.add_argument("--json", action="store_true",
                    help="print the result document to stdout as JSON")
+    p.add_argument("--reserve", type=int, default=DONATION_RESERVE,
+                   help="dollars to keep on hand when donating (default 0)")
     args = p.parse_args()
+    DONATION_RESERVE = args.reserve
 
     fh = open(os.path.expanduser(args.log), "a") if args.log else None
     try:

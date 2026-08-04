@@ -181,7 +181,10 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`. Mutating ones
   default `dry_run=True`. `mobile_daily_slot` is intentionally slow (~9s/spin).
 - **`daily_routine.py`** — the freebies, once a day, tasks in random order with a
-  `--jitter` start delay. Calls the MCP tools directly; on an auth error it runs
+  `--jitter` start delay. Tasks: `currencies`, `slots`, `donate` (the last one via
+  `alliance_donator`, so that task alone needs **Chrome up and logged in** — the
+  mobile refresh cannot fix a dead web session). Calls the MCP tools directly; on
+  a mobile auth error it runs
   `refresh_mobile_session.sh` once and retries that task (so BlueStacks has to be
   up). Slots are event-gated: it skips them unless `specialEvent` shows a running
   spin milestone. Scheduled by the `com.lobster.am-daily-routine` LaunchAgent at
@@ -208,6 +211,16 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
 `mass_unscheduler`, `warehouse_sync`, `masstool`, `scrape_line_ids`,
 `scrape_audit_line_ids`, `scrape_internal_audits` — each is a focused CDP/DB CLI; see
 its module docstring. Most are also wrapped as MCP tools.
+
+### `alliance_donator.py` — daily treasury donation
+Maxes the donate box at the bottom of `/alliance/profile`. It does **not** drag the
+jQuery-UI slider; it reads the same state the page's own handler reads
+(`#alliance-slider`'s `data-airline-money` + `data-donation-profile`,
+`#donation-validation`'s `data-url`) and POSTs `donation=<amount>` to
+`/alliance/donate` from the page's origin. Amount = `donationMax - airlineDonations`,
+capped by cash minus `--reserve`. `donationMax` is a per-day ceiling, so the script
+is idempotent — a second run donates 0. The airline pays the full amount; the
+treasury gets it less `dollarTax` (10%). Cap observed 2026-08-04: **$200M/day**.
 
 ## Data Model — SQLite (`db/am_aircraft.db`, not committed)
 
