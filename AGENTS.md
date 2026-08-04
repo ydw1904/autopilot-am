@@ -87,6 +87,7 @@ airlines-manager/
     │
     ├── mobile_api.py               ← MOBILE app JSON API client (httpx, access_token)
     ├── mobile_store.py             ← reference store for mobile ids (mobile_* tables)
+    ├── mobile_reconfigurator.py    ← aircraft_reconfigurator over the mobile API
     │
     ├── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
     └── gui/                        ← NiceGUI pages (planner, hub, library, mass,
@@ -161,7 +162,8 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   loads/saves `~/.airlines_manager/session.json`; `import_from_capture()` pulls the
   newest token from a mitmproxy capture of the app (the token expires ~daily).
   `AMClient` methods: `auctions/put_up/bid` (SHM), `fleet/aircraft/model_skins`,
-  `shop_offers/claim_offer` + `wheel_*` + `slot_*` (daily). No request signing.
+  `reconfigure/assign_hub` (fleet config), `shop_offers/claim_offer` + `wheel_*`
+  + `slot_*` (daily). No request signing.
 - **Quirks baked in:** fleet paging is **1-based** (page 0 aliases page 1);
   empty POSTs (slot spins, put_up) need a zero-length form body or the server 204s;
   slot spins faster than the ~10s reel cooldown 204 but still burn a game (never
@@ -191,6 +193,26 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   09:00 Asia/Shanghai = **01:00 UTC**, just after the game's daily reset; the
   jitter spreads the real start across 01:00–01:35 UTC. Log:
   `~/.airlines_manager/daily.log`.
+- **`mobile_reconfigurator.py`** — the mobile twin of `aircraft_reconfigurator.py`
+  (same DB, same `<HUB>-C<NNN>` convention, same `--circuit/--dry-run` CLI).
+  Endpoints, captured 2026-08-04: `POST aircraft/reconfigure`
+  (`aircraftId,name,seatsEco,seatsBus,seatsFirst,payload`) and
+  `POST aircraft/<id>/assignHub` (`hubId,aircraftID`). Both answer `status: 1`
+  with a semantic message, so a rejected write raises instead of failing
+  silently the way the web form does. Three things to know:
+  **(1)** the reconfigure payload carries `name` and writes it — always echo the
+  current name back or the plane gets renamed; **(2)** the livery is *not* in the
+  payload and survives the call, so there's no checked-skin guard to get wrong
+  (this is the web path's biggest hazard, absent here); **(3)** hub ids are the
+  same id space as the web side, so `player_hubs` resolves IATA → `hubId`
+  (verified FRA → 9480309).
+  The fleet listing ignores every name-filter param tried, so discovery pages the
+  whole fleet — but `itemPerPage=500` makes that 6 requests for a ~2.8k fleet.
+  **Exercised live** on 246 aircraft (MPM-C039/C042/C022, 0 failures, 4m42s);
+  the web tool's mandatory 3s settle alone would be ~12min for the same work.
+  Caveat: all three circuits were seat-only, so `assign_hub` is capture-verified
+  but has **not** yet been posted by this client — run `--limit 1` first on the
+  next circuit that needs a hub move.
 - **Not covered yet — boosters and Bob.** `booster` and `booster/history` read
   fine, and the free Economy pack is purchase option **id 1** (`freeWithAds`, 8h
   cooldown; the account's `bypassAds` runs to 2026-09-04). But `booster/ads/purchase`

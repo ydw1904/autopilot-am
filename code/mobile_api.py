@@ -29,6 +29,9 @@ SESSION_PATH = Path.home() / ".airlines_manager" / "session.json"
 
 # Match the app so traffic looks identical to a real client.
 USER_AGENT = "UnityPlayer/2022.3.67f2 (UnityWebRequest/1.0, libcurl/8.10.1-DEV)"
+# The app sends this alongside the UA on every call; keep the pair in sync if
+# the client version ever moves.
+UNITY_VERSION = "2022.3.67f2"
 DEFAULT_BASE = "https://www.airlines-manager.com"
 
 # The game caps how many aircraft you can have listed on the SHM at once.
@@ -126,6 +129,7 @@ class AMClient:
         self.http = httpx.Client(
             timeout=30, trust_env=False, cookies=dict(session.cookies),
             headers={"User-Agent": USER_AGENT,
+                     "X-Unity-Version": UNITY_VERSION,
                      "X-Requested-With": "XMLHttpRequest"})
         self.last_resources: Optional[dict] = None
         self._last_call = 0.0
@@ -303,6 +307,45 @@ class AMClient:
                              data={"auctionId": int(auction_id),
                                    "bid": int(amount)})
         return body.get("auction", body)
+
+    def reconfigure(self, aircraft_id: int, *, name: str,
+                    eco: int, bus: int, first: int, payload: int) -> dict:
+        """Set an owned aircraft's seat/cargo configuration (a paid action).
+
+        Seats are ABSOLUTE targets, not deltas. Returns the response dict; the
+        server answers `status: 1, message: "aircraft.reconfigure.success"` on a
+        real commit, so — unlike the web form — success is directly observable
+        and `_request` already raises on `status: 0`.
+
+        `name` is echoed back deliberately: the endpoint takes the name in the
+        same payload and writes it, so passing the CURRENT name is what keeps a
+        reconfigure from also renaming the aircraft. Callers must read it first.
+
+        The livery is NOT part of this payload and is preserved across the call
+        (verified: skin id survived a capture-confirmed reconfigure). That's why
+        this has no equivalent of the web path's checked-skin safety guard.
+        """
+        return self._request("POST", "aircraft/reconfigure",
+                             data={"aircraftId": int(aircraft_id),
+                                   "name": name,
+                                   "seatsEco": int(eco),
+                                   "seatsBus": int(bus),
+                                   "seatsFirst": int(first),
+                                   "payload": int(payload)})
+
+    def assign_hub(self, aircraft_id: int, hub_id: int) -> dict:
+        """Relocate an owned aircraft to one of the player's hubs (paid).
+
+        `hub_id` is the player's hub id (the same id space as the web side —
+        `player_hubs.hub_id` resolves it from an IATA code). Answers
+        `message: "aircraft.hubAssigned"` on success.
+
+        The app posts aircraftID in the body as well as the path; kept so the
+        request matches a real client byte for byte.
+        """
+        return self._request("POST", f"aircraft/{int(aircraft_id)}/assignHub",
+                             data={"hubId": int(hub_id),
+                                   "aircraftID": int(aircraft_id)})
 
     # ── daily: free shop currency ───────────────────────────────────────
     def shop_offers(self) -> list:
