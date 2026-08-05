@@ -95,33 +95,54 @@ adb -s "$DEVICE" shell "am force-stop $PKG"
 adb -s "$DEVICE" shell "monkey -p $PKG -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1
 log "game relaunched; it auto-logs-in with the saved credentials"
 
-echo "── 5. wait for a fresh access_token ────────────────────"
-for i in $(seq 1 60); do
-  if grep -q "access_token=" "$CAPTURE" 2>/dev/null; then
-    log "token seen after ${i}s"; break
-  fi
-  sleep 1
-done
-grep -q "access_token=" "$CAPTURE" 2>/dev/null || {
-  echo "No authenticated call captured in 60s."
-  echo "Open the BlueStacks window and tap into the game, then re-run."
-  exit 1
-}
-
-echo "── 6. import + validate ────────────────────────────────"
-"$VENV_PY" -c "
+echo "── 5. acquire a live session ───────────────────────────"
+# A token in the capture is NOT proof of a live session. When the refresh token
+# has expired too, the app stops auto-logging-in and instead REPLAYS the stale
+# access_token — the capture fills with "access_token=" requests that all answer
+# invalid_grant (errorCode 11), and the old grep-for-a-token check passed while
+# nothing worked. So the test is a real validated import.
+import_session() {
+  "$VENV_PY" -c "
 import sys, logging
 logging.disable(logging.INFO)          # httpx logs full URLs incl. the token
 sys.path.insert(0, '$REPO/code')
 import mcp_server
 r = mcp_server.mobile_session_import(capture_path='$CAPTURE')
 if not r.get('ok'):
-    print('  FAILED:', r.get('error')); raise SystemExit(1)
-print('  ok        :', r['ok'])
+    raise SystemExit(1)
 print('  player_id :', r['player_id'])
 print('  token_tail:', r['token_tail'])
 print('  balance   :', f\"{r['balance']:,}\")
-" 2>&1 | grep -v "access_token" || exit 1
+" 2>/dev/null
+}
+
+wait_for_session() {   # $1 = seconds to keep trying
+  local deadline=$(( SECONDS + $1 ))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if grep -q "access_token=" "$CAPTURE" 2>/dev/null && import_session; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+if wait_for_session 45; then
+  log "session live (the app auto-logged-in)"
+else
+  log "no live session yet — the refresh token is gone too, so the app is"
+  log "parked on 'Session expired'. Pressing OK / Login over adb …"
+  "$VENV_PY" "$REPO/code/mobile_login.py" --device "$DEVICE" || true
+  if wait_for_session 60; then
+    log "session live (after driving the login screen)"
+  else
+    echo
+    echo "Could not get a live session."
+    echo "Check what the app is actually showing:"
+    echo "  $VENV_PY $REPO/code/mobile_login.py --dry-run"
+    exit 1
+  fi
+fi
 
 echo
 echo "Session refreshed -> ~/.airlines_manager/session.json"

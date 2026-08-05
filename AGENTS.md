@@ -88,6 +88,7 @@ airlines-manager/
     ├── mobile_api.py               ← MOBILE app JSON API client (httpx, access_token)
     ├── mobile_store.py             ← reference store for mobile ids (mobile_* tables)
     ├── mobile_reconfigurator.py    ← aircraft_reconfigurator over the mobile API
+    ├── mobile_login.py             ← press OK/Login over adb when the session dies
     │
     ├── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
     └── gui/                        ← NiceGUI pages (planner, hub, library, mass,
@@ -221,6 +222,19 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   (`maintenance/bob/2` → errorCode 99 as a bare GET); it is a *skill* game with
   a score submission, so automating it means posting fabricated scores — a
   different risk class from claiming a free reward. Capture both before building.
+- **`mobile_login.py`** — adb driver for the two-tap login the app needs once its
+  refresh token dies: `[OK]` on the "Session expired" dialog, then `[Login]` on
+  the screen behind it (credentials are pre-filled, so no typing). Called
+  automatically by `refresh_mobile_session.sh` when auto-login doesn't produce a
+  *validating* session. It decides by outcome, not by pixels — the game stacks
+  white promo panels ("Word of the day") after login that make every brightness
+  probe read ~255, so a screen-recognition state machine misfires. Pixels are
+  only a **guard**, used when we already know we're logged out, where just two
+  screens are possible and they separate cleanly (OK-box 181 vs 37, Login-box
+  35 vs 177). Without that guard a blind tap could land on "Play in Tycoon mode"
+  and start creating a new airline. Screenshots use the raw `screencap`
+  framebuffer (16-byte header + RGBA8888) so numpy suffices and Pillow isn't
+  needed. Coordinates are screen fractions, measured on the 1920x1080 instance.
 - **Where the token comes from:** `tools/mobile-capture/` — the mitmproxy capture
   pipeline that produces the JSONL `import_from_capture()` reads. `capture_am.py`
   is the mitmdump addon, `bluestacks_mitm_setup.sh` wires the emulator to the
@@ -327,5 +341,10 @@ absent).
 4. **`aircraft_buyer.py` game-id table** may need a manual lookup for aircraft outside
    the current set.
 5. **Mobile session expires (~daily)** — mobile tools then return an auth error; refresh
-   with `mobile_session_import` (open the app so it emits a fresh call through a running
-   mitmproxy capture, then import). Distinct account/token from the web session.
+   with `refresh_mobile_session.sh` (or `mobile_session_import` by hand). Distinct
+   account/token from the web session. If the *refresh* token has gone too, the
+   app stops auto-logging-in and parks on "Session expired. Please log in
+   again." — the refresh script now presses through that itself via
+   `mobile_login.py`. Note a token in the capture is **not** proof of a live
+   session: in that state the app replays the stale one and every call answers
+   `invalid_grant` / errorCode 11, so validate rather than grep.
