@@ -43,8 +43,37 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-command -v mitmdump >/dev/null || { echo "mitmdump not found (brew install mitmproxy)"; exit 1; }
 [ -x "$VENV_PY" ] || { echo "venv missing: $VENV_PY"; exit 1; }
+
+# ── 0. try to renew over HTTP first ─────────────────────────────────────
+# Once a session has been bootstrapped, it holds the app's OAuth client
+# credentials and can mint a new access_token with one POST — no emulator, no
+# proxy, no capture. That is the normal path; everything below is the
+# bootstrap, needed only for a brand-new session or if the credentials change.
+echo "── 0. renew over HTTP ──────────────────────────────────"
+if "$VENV_PY" -c "
+import sys, logging
+logging.disable(logging.INFO)
+sys.path.insert(0, '$REPO/code')
+import mcp_server
+r = mcp_server.mobile_session_renew()
+if not r.get('ok'):
+    print('  ' + str(r.get('error'))[:120]); raise SystemExit(1)
+print('  grant     :', r['grant'])
+print('  player_id :', r['player_id'])
+print('  expires_in:', r['expires_in_min'], 'min')
+print('  balance   :', f\"{r['balance']:,}\")
+" 2>/dev/null; then
+  echo
+  echo "Session renewed over HTTP -> ~/.airlines_manager/session.json"
+  echo "(BlueStacks and mitmproxy were not needed.)"
+  trap - EXIT INT TERM     # nothing was started, so nothing to clean up
+  exit 0
+fi
+log "HTTP renewal unavailable — falling back to the capture bootstrap"
+echo
+
+command -v mitmdump >/dev/null || { echo "mitmdump not found (brew install mitmproxy)"; exit 1; }
 
 echo "── 1. connect device ───────────────────────────────────"
 adb connect "$DEVICE" >/dev/null 2>&1

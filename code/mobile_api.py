@@ -33,6 +33,16 @@ USER_AGENT = "UnityPlayer/2022.3.67f2 (UnityWebRequest/1.0, libcurl/8.10.1-DEV)"
 # the client version ever moves.
 UNITY_VERSION = "2022.3.67f2"
 DEFAULT_BASE = "https://www.airlines-manager.com"
+# The OAuth2 token endpoint lives on a different host from the game API.
+AUTH_BASE = "https://auth.airlines-manager.com"
+# The app posts the token endpoint as /oauth/v2/token?version=40008 — a QUERY
+# param, not a body field, and it is load-bearing: omit it and the grant still
+# returns HTTP 200 with a usable-looking token, but the session is stamped
+# `version: 0` and the newer endpoints refuse it ("Invalid or missing
+# parameter" / error 10205 on bfa/paged/aircraft, "Update your game to access
+# the new secondhand market features" on the auctions). Bump this when the app
+# does; the value is visible in the app's own oauth request.
+APP_VERSION = 40008
 
 # The game caps how many aircraft you can have listed on the SHM at once.
 # The 11th put_up is rejected with errorCode 170011 "Auction limit reached".
@@ -55,12 +65,50 @@ class AMAuctionLimit(AMError):
     """SHM auction limit (10 active listings) reached."""
 
 
+def _token_request(data: dict, auth_base: str = AUTH_BASE) -> dict:
+    """POST the OAuth2 token endpoint. Raises AMAuthError on any refusal."""
+    with httpx.Client(timeout=30, trust_env=False,
+                      headers={"User-Agent": USER_AGENT,
+                               "X-Unity-Version": UNITY_VERSION}) as c:
+        resp = c.post(f"{auth_base}/oauth/v2/token",
+                      params={"version": APP_VERSION}, data=data)
+    try:
+        body = resp.json()
+    except Exception:
+        raise AMAuthError(
+            f"token endpoint returned {resp.status_code}, non-JSON") from None
+    if resp.status_code != 200 or "access_token" not in body:
+        raise AMAuthError(
+            f"{data.get('grant_type')} grant refused ({resp.status_code}): "
+            f"{body.get('fullErrorMessage') or body.get('message', body)}")
+    # A version-0 session looks fine here and then fails obscurely several
+    # calls later, so refuse it at the source rather than shipping a token
+    # that can read bfa/hub but not bfa/paged/aircraft.
+    if "version" in body and not body["version"]:
+        raise AMAuthError(
+            f"grant returned version={body['version']!r} — the ?version= query "
+            f"param did not take (expected {APP_VERSION}). The token would be "
+            "rejected by the paged-fleet and auction endpoints.")
+    return body
+
+
 @dataclass
 class AMSession:
     base_url: str
     player_id: str
     access_token: str
     cookies: dict
+    # ── OAuth material, all optional so pre-existing session.json files load ──
+    # With these present the session renews itself over HTTP and the whole
+    # BlueStacks/mitmproxy/adb rig is only ever needed once, to bootstrap them.
+    refresh_token: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    device_id: Optional[str] = None
+    locale: str = "en"
+    username: Optional[str] = None
+    password: Optional[str] = None
+    expires_at: Optional[float] = None  # unix seconds
 
     @classmethod
     def load(cls, path: Path = SESSION_PATH) -> "AMSession":
@@ -69,25 +117,95 @@ class AMSession:
                 f"No mobile session at {path}. Import one from a capture "
                 "(mobile_session_import).")
         data = json.loads(path.read_text())
-        return cls(
-            base_url=data.get("base_url", DEFAULT_BASE),
-            player_id=str(data["player_id"]),
-            access_token=data["access_token"],
-            cookies=data.get("cookies", {}),
-        )
+        known = {f for f in cls.__dataclass_fields__}
+        kwargs = {k: v for k, v in data.items() if k in known}
+        kwargs["base_url"] = data.get("base_url", DEFAULT_BASE)
+        kwargs["player_id"] = str(data["player_id"])
+        kwargs.setdefault("cookies", {})
+        return cls(**kwargs)
 
     def save(self, path: Path = SESSION_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=2))
-        os.chmod(path, 0o600)  # contains a live token
+        os.chmod(path, 0o600)  # live token, refresh token, maybe the password
+
+    # ── self-renewal ────────────────────────────────────────────────────
+    @property
+    def can_renew(self) -> bool:
+        return bool(self.client_id and self.client_secret
+                    and (self.refresh_token or (self.username and self.password)))
+
+    def _absorb(self, body: dict) -> None:
+        self.access_token = body["access_token"]
+        # The refresh token is SINGLE-USE and rotates on every grant — the
+        # server answers "Invalid refresh token" (errorCode 10) if an old one is
+        # replayed. Persisting the new one immediately is what keeps the chain
+        # alive; drop it once and only the password grant can recover.
+        if body.get("refresh_token"):
+            self.refresh_token = body["refresh_token"]
+        if body.get("expires_in"):
+            self.expires_at = time.time() + int(body["expires_in"])
+        if body.get("airlineId"):
+            self.player_id = str(body["airlineId"])
+        if body.get("gameServer"):
+            self.base_url = f"https://{body['gameServer']}"
+
+    def renew(self, save: bool = True) -> str:
+        """Mint a fresh access_token over HTTP. Returns the grant used.
+
+        Tries the refresh token first (so a stored password isn't required),
+        then falls back to the password grant. Tokens live 3h, so this runs
+        far more often than the old ~daily capture assumed.
+        """
+        if not (self.client_id and self.client_secret):
+            raise AMAuthError(
+                "no OAuth client credentials stored — bootstrap once with "
+                "mobile_session_import from a capture, which now records them.")
+        errors = []
+        if self.refresh_token:
+            try:
+                self._absorb(_token_request({
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.refresh_token,
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret}))
+                if save:
+                    self.save()
+                return "refresh_token"
+            except AMAuthError as e:
+                # Expired or already consumed. Clear it so we don't retry a
+                # known-dead token on every call.
+                errors.append(f"refresh_token: {e}")
+                self.refresh_token = None
+        if self.username and self.password:
+            self._absorb(_token_request({
+                "grant_type": "password",
+                "username": self.username, "password": self.password,
+                "client_id": self.client_id, "client_secret": self.client_secret,
+                "device_id": self.device_id or "", "locale": self.locale}))
+            if save:
+                self.save()
+            return "password"
+        raise AMAuthError(
+            "could not renew: " + "; ".join(errors or ["no refresh token"])
+            + ". No stored password to fall back on — re-bootstrap from a "
+              "capture (refresh_mobile_session.sh).")
 
 
 def import_from_capture(jsonl_path, base_url: str = DEFAULT_BASE) -> AMSession:
-    """Build a session from the newest game request in a mitmproxy capture log."""
+    """Build a session from the newest game request in a mitmproxy capture log.
+
+    Also harvests the OAuth material from any `oauth/v2/token` exchange in the
+    same capture (client id/secret, device id, the credentials the app posted,
+    and the returned refresh token). That is what lets the session renew itself
+    over HTTP afterwards — so this capture-based bootstrap is a ONE-TIME step
+    rather than a daily chore.
+    """
     from urllib.parse import urlsplit, parse_qs
     import http.cookies
 
     newest = None
+    oauth_req = oauth_res = None
     with open(jsonl_path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -96,6 +214,12 @@ def import_from_capture(jsonl_path, base_url: str = DEFAULT_BASE) -> AMSession:
             r = json.loads(line)
             if "/api/" in r.get("path", "") and "access_token=" in r.get("path", ""):
                 newest = r  # keep last (file is chronological)
+            elif "oauth/v2/token" in r.get("path", "") and r.get("status") == 200:
+                try:
+                    oauth_req = parse_qs(r.get("req_body") or "")
+                    oauth_res = json.loads(r.get("res_body") or "{}")
+                except Exception:
+                    oauth_req = oauth_res = None
 
     if not newest:
         raise AMError(f"No authenticated /api/ request found in {jsonl_path}")
@@ -113,17 +237,33 @@ def import_from_capture(jsonl_path, base_url: str = DEFAULT_BASE) -> AMSession:
         for k, morsel in jar.items():
             cookies[k] = morsel.value
 
-    return AMSession(base_url=base_url, player_id=player_id,
+    sess = AMSession(base_url=base_url, player_id=player_id,
                      access_token=token, cookies=cookies)
+
+    if oauth_req and oauth_res:
+        one = lambda k: (oauth_req.get(k) or [None])[0]  # noqa: E731
+        sess.client_id = one("client_id")
+        sess.client_secret = one("client_secret")
+        sess.device_id = one("device_id")
+        sess.locale = one("locale") or "en"
+        sess.username = one("username")
+        sess.password = one("password")
+        # Prefer the token pair from the oauth exchange itself: it is newer than
+        # anything scraped off a URL, and carries the refresh token.
+        if oauth_res.get("access_token"):
+            sess._absorb(oauth_res)
+    return sess
 
 
 class AMClient:
     """Thin wrapper over the mobile /api/{player_id}/... endpoints (httpx)."""
 
-    def __init__(self, session: AMSession, min_delay: float = 0.0, store=None):
+    def __init__(self, session: AMSession, min_delay: float = 0.0, store=None,
+                 auto_renew: bool = True):
         self.s = session
         self.min_delay = min_delay
         self.store = store  # optional MobileStore; populated best-effort on reads
+        self.auto_renew = auto_renew
         # trust_env=False: don't route through a system proxy (Clash etc.),
         # matching cdp.py — a proxy breaks httpx here.
         self.http = httpx.Client(
@@ -148,6 +288,26 @@ class AMClient:
                  params: Optional[dict] = None,
                  data: Optional[dict] = None,
                  allow_empty: bool = False) -> dict:
+        """Perform a call, renewing the session once if the token has died.
+
+        Access tokens live 3h, so a long-running job (a 2.8k-aircraft sweep,
+        the daily routine) can easily start valid and expire mid-flight. When
+        the session carries OAuth material it renews in-process and retries;
+        otherwise the AMAuthError propagates as before.
+        """
+        try:
+            return self._request_once(method, endpoint, params, data, allow_empty)
+        except AMAuthError:
+            if not (self.auto_renew and self.s.can_renew):
+                raise
+            self.s.renew()
+            self.http.cookies.update(self.s.cookies)
+            return self._request_once(method, endpoint, params, data, allow_empty)
+
+    def _request_once(self, method: str, endpoint: str,
+                      params: Optional[dict] = None,
+                      data: Optional[dict] = None,
+                      allow_empty: bool = False) -> dict:
         if self.min_delay:
             wait = self.min_delay - (time.monotonic() - self._last_call)
             if wait > 0:

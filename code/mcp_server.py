@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import asdict
 from typing import List, Optional, Tuple
 
@@ -1245,6 +1246,49 @@ def mobile_session_import(capture_path: Optional[str] = None) -> dict:
                 "balance": res.get("dollar"), "coins": res.get("amCoins")}
     except Exception as e:
         return {"ok": False, "error": f"saved but validation failed: {e}"}
+    finally:
+        client.close()
+
+
+@mcp.tool()
+def mobile_session_renew() -> dict:
+    """Mint a fresh mobile access_token over HTTP — no emulator, no capture.
+
+    Access tokens last 3h. Once a session has been bootstrapped once (see
+    mobile_session_import), it carries the OAuth client credentials and can
+    renew itself: refresh-token grant first, password grant as fallback. The
+    mobile tools also do this automatically on an auth error, so calling this
+    by hand is mostly for checking the plumbing.
+    """
+    try:
+        from mobile_api import AMSession, AMClient, AMError, AMAuthError
+    except Exception as e:
+        return {"ok": False, "error": f"mobile module import failed: {e}"}
+    try:
+        sess = AMSession.load()
+    except AMAuthError as e:
+        return {"ok": False, "error": str(e)}
+    if not sess.can_renew:
+        return {"ok": False,
+                "error": "session has no OAuth material — bootstrap once with "
+                         "refresh_mobile_session.sh, then this works over HTTP.",
+                "has_client": bool(sess.client_id),
+                "has_refresh_token": bool(sess.refresh_token),
+                "has_password": bool(sess.password)}
+    try:
+        how = sess.renew()
+    except AMError as e:
+        return {"ok": False, "error": str(e)}
+    client = AMClient(sess)
+    try:
+        res = client.resources()
+        return {"ok": True, "grant": how, "player_id": sess.player_id,
+                "token_tail": sess.access_token[-8:],
+                "expires_in_min": (round((sess.expires_at - time.time()) / 60)
+                                   if sess.expires_at else None),
+                "balance": res.get("dollar")}
+    except Exception as e:
+        return {"ok": False, "error": f"renewed but validation failed: {e}"}
     finally:
         client.close()
 

@@ -6,11 +6,11 @@ This file is for an AI agent (Claude Code, etc.) editing the code.
 ## Project Overview
 
 Agent control plane for the browser game [Airlines Manager](https://www.airlines-manager.com):
-an **MCP server exposing 36 tools** over a live, logged-in game session, plus the
+an **MCP server exposing 37 tools** over a live, logged-in game session, plus the
 optimization engine and browser-automation layer it drives. Goal: maximize weekly
 revenue by selecting circuits (route sets), seat configs, schedules, and prices.
 
-Two API surfaces, one server: 25 **web/CDP** tools drive the browser game; 11
+Two API surfaces, one server: 25 **web/CDP** tools drive the browser game; 12
 **mobile** tools (`mobile_*`, `shm_*`) hit the mobile app's JSON API for features
 the browser lacks — the second-hand aircraft market and daily login rewards. The
 mobile tools authenticate with the mobile access_token, not the web session, and
@@ -41,7 +41,7 @@ Everything funnels through two shared layers — touch these and you touch every
 
 The three surfaces on top:
 
-1. **MCP server** (`code/mcp_server.py`) — 36 typed tools; the agent-facing control
+1. **MCP server** (`code/mcp_server.py`) — 37 typed tools; the agent-facing control
    plane. Live-state tools call CDP directly; heavier ops shell out to the CLI scripts;
    the mobile tools call the mobile HTTP API via `mobile_api.py`.
    **Mutating tools default to `dry_run=True`.**
@@ -61,7 +61,7 @@ airlines-manager/
 ├── AGENTS.md / README.md / MCP_SETUP.md / CHANGELOG.md
 ├── .mcp.json                       ← Claude Code MCP registration
 └── code/
-    ├── mcp_server.py               ← MCP server: 36 tools (25 web/CDP + 11 mobile)
+    ├── mcp_server.py               ← MCP server: 37 tools (25 web/CDP + 12 mobile)
     ├── cdp.py                      ← shared CDP client  ← SHARED LAYER
     ├── db.py                       ← shared SQLite layer ← SHARED LAYER
     ├── circuit_planner.py          ← PRIMARY: Phase 1 + Phase 2 optimization
@@ -159,9 +159,31 @@ aircraft market (auction) and daily login rewards. These endpoints (`/api/{playe
 authenticate with the **mobile access_token**, not the web session cookies — the
 web/CDP session gets **401** from them, so they can't be driven through `cdp.py`.
 
+- **Sessions renew themselves over HTTP — the emulator is a one-time bootstrap.**
+  Login is plain OAuth2 at `auth.airlines-manager.com/oauth/v2/token`, so once
+  `import_from_capture()` has harvested the app's client id/secret, device id and
+  credentials (it does this automatically now), `AMSession.renew()` mints a new
+  token with one POST: refresh-token grant first, password grant as fallback.
+  `AMClient` calls it automatically on an auth error and retries, so a long
+  sweep can't die halfway. `refresh_mobile_session.sh` tries this first and only
+  falls back to the BlueStacks/mitmproxy path if it can't (2.6s vs 22.6s).
+  Three things that bite:
+  **(1) `?version=40008` is a QUERY param on the token endpoint and is
+  load-bearing.** Omit it and the grant still returns HTTP 200 with a
+  usable-looking token, but the session is stamped `version: 0` and the newer
+  endpoints reject it — error 10205 on `bfa/paged/aircraft`, "Update your game
+  to access the new secondhand market features" on the auctions, while
+  `aircraft/{id}` and `bfa/hub` keep working. `_token_request` refuses a
+  version-0 grant so this fails loudly. Bump `APP_VERSION` when the app does.
+  **(2) Refresh tokens are single-use and rotate** — replaying one gives
+  `Invalid refresh token` (errorCode 10), so the new one must be persisted on
+  every grant. Lose it once and only the password grant can recover.
+  **(3) Tokens live 3h (`expires_in: 10800`), not ~daily** as the old
+  capture-based flow assumed.
 - **`mobile_api.py`** — httpx client (`trust_env=False`, like cdp.py). `AMSession`
-  loads/saves `~/.airlines_manager/session.json`; `import_from_capture()` pulls the
-  newest token from a mitmproxy capture of the app (the token expires ~daily).
+  loads/saves `~/.airlines_manager/session.json` (0600 — it holds the token, the
+  refresh token and, if bootstrapped from a password grant, the password);
+  `import_from_capture()` pulls the newest token plus the OAuth material.
   `AMClient` methods: `auctions/put_up/bid` (SHM), `fleet/aircraft/model_skins`,
   `reconfigure/assign_hub` (fleet config), `shop_offers/claim_offer` + `wheel_*`
   + `slot_*` (daily). No request signing.
@@ -181,7 +203,8 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   the mobile fleet, and a market price-history log.
 - **MCP tools:** `mobile_session_import`, `mobile_balance`, `mobile_catalog`,
   `shm_market`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch`,
-  `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`. Mutating ones
+  `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`,
+  `mobile_session_renew`. Mutating ones
   default `dry_run=True`. `mobile_daily_slot` is intentionally slow (~9s/spin).
 - **`daily_routine.py`** — the freebies, once a day, tasks in random order with a
   `--jitter` start delay. Tasks: `currencies`, `slots`, `donate` (the last one via
@@ -301,7 +324,7 @@ python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2   # full 
 
 # MCP server boots and registers all tools
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
-  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 36 tools
+  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 37 tools
 
 # Mobile API surface (needs a valid ~/.airlines_manager/session.json)
 .venv/bin/python -c "import sys; sys.path.insert(0,'code'); import mcp_server; \
@@ -340,11 +363,13 @@ absent).
    `code/native/build.sh`; the planner falls back to pure Python without it.
 4. **`aircraft_buyer.py` game-id table** may need a manual lookup for aircraft outside
    the current set.
-5. **Mobile session expires (~daily)** — mobile tools then return an auth error; refresh
-   with `refresh_mobile_session.sh` (or `mobile_session_import` by hand). Distinct
-   account/token from the web session. If the *refresh* token has gone too, the
-   app stops auto-logging-in and parks on "Session expired. Please log in
-   again." — the refresh script now presses through that itself via
-   `mobile_login.py`. Note a token in the capture is **not** proof of a live
-   session: in that state the app replays the stale one and every call answers
+5. **Mobile session expires (every 3h)** — the mobile tools now renew themselves
+   over HTTP and retry, so this should be invisible. If something does surface an
+   auth error, `mobile_session_renew` (or `refresh_mobile_session.sh`, which
+   tries HTTP first) fixes it in seconds. Distinct account/token from the web
+   session. Only if the OAuth material is missing or the credentials changed does
+   the BlueStacks/mitmproxy bootstrap come back into play — and if the app is then
+   parked on "Session expired. Please log in again.", the script presses through
+   it via `mobile_login.py`. In *that* state note a token in the capture is **not**
+   proof of a live session: the app replays the stale one and every call answers
    `invalid_grant` / errorCode 11, so validate rather than grep.
