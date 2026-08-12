@@ -193,6 +193,12 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   retried); **the SHM caps active listings at 10** (`MAX_ACTIVE_LISTINGS`; the 11th
   put_up → errorCode 170011 "Auction limit reached"). `shm_sell_batch` reads the
   current listing count and lists only up to the free slots.
+- **SHM arbitrage always lists at the max price.** `bin_price` = the aircraft's
+  `binThreshold` (the game's own buy-now ceiling, **per livery** — Spirit 747SP
+  $1.209B, Il-96-300 Tokyo Sports Event $8B), `price` = `maxAuctionSellPrice`
+  (raw value) so a one-bid auction can't close under cost. Never
+  `minAuctionSellPrice` — on a 747SP it's $88M against a $160M mint. Full table
+  in `tools/mobile-capture/market_usage.md`.
 - **Model ids are shared across surfaces:** the mobile `aircraftListId` and the web
   purchase box's `aircraft[id]` are the same id space (spot-checked on 27 models via
   the auction feed, no mismatches), so one table serves both —

@@ -1360,7 +1360,13 @@ def shm_fleet(name_contains: str = "", skin_id: Optional[int] = None,
 
 @mcp.tool()
 def shm_aircraft(aircraft_id: int) -> dict:
-    """Full profile of one owned mobile aircraft (model, raw price, hub, seats)."""
+    """Full profile of one owned mobile aircraft (model, raw price, hub, seats).
+
+    Read `binThreshold` here before selling — it is the **max buy-it-now the
+    game accepts**, and it is per-livery (a Spirit 747SP caps at $1.209B, an
+    Il-96-300 Tokyo Sports Event at $8B). `maxAuctionSellPrice` is the separate
+    cap on the *starting bid* (= the model's raw value).
+    """
     return _mobile_call(lambda cl: {"ok": True, **(cl.aircraft(aircraft_id) or {})})
 
 
@@ -1372,6 +1378,12 @@ def shm_sell(aircraft_id: int, bin_price: int, price: Optional[int] = None,
     bin_price = buy-it-now (the sell target); price = starting bid (defaults to
     bin_price); duration in hours. Safety default: dry_run=True (a listing is a
     real market action). The SHM allows at most 10 active listings at once.
+
+    **Arbitrage rule: always sell at the max price.** For an arbitrage plane
+    (the 747SP flip especially) set bin_price to the aircraft's `binThreshold`
+    from `shm_aircraft` — the game's own ceiling — never a hand-picked lower
+    number. Set `price` (the starting bid) to `maxAuctionSellPrice`, which is
+    the model's raw value, so a one-bid auction can never close below cost.
     """
     price = price if price is not None else bin_price
     if dry_run:
@@ -1399,6 +1411,10 @@ def shm_sell_batch(bin_price: int, ids: Optional[List[int]] = None,
     OR a fleet filter (name_contains / skin_id). Caps the run at the free listing
     slots (10 − current active listings), stops on the auction limit, retries the
     put_up rate-limit (204). Safety default: dry_run=True.
+
+    One bin_price covers the whole batch, so only batch aircraft that share a
+    livery — `binThreshold` is per-livery. Same arbitrage rule as `shm_sell`:
+    bin_price = that livery's `binThreshold`, price = `maxAuctionSellPrice`.
     """
     price = price if price is not None else bin_price
     from mobile_api import MAX_ACTIVE_LISTINGS, AMAuctionLimit, AMRateLimited, AMError

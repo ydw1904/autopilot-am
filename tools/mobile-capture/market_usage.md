@@ -61,14 +61,49 @@ Freshly-bought planes are auto-named `SHOP-<model>`, so after minting 747SPs:
 # see what 747SPs currently fetch in your star pool
 python3 main.py market prices -c 747SP --pool-only
 
-# list all your minted 747SPs at a target buy-now price (dry-run first)
-python3 main.py market sell-batch -n 747 --bin 95000000 --dry-run
-python3 main.py market sell-batch -n 747 --bin 95000000 --yes
+# list all your minted 747SPs at the max buy-now price (dry-run first).
+# --bin = the aircraft's binThreshold; see "Pricing rule" below — do not
+# invent a lower number.
+python3 main.py market sell-batch -n 747 --bin 1209000000 --price 177000000 --dry-run
+python3 main.py market sell-batch -n 747 --bin 1209000000 --price 177000000 --yes
 ```
 
 `put_up` params: `price` (starting bid, defaults to `--bin`), `binPrice`
 (buy-it-now), `duration` (hours, default 11), `aircraftId`. Response returns the
 new auction id and `alertThreshold` = the game's fair-value line.
+
+### Pricing rule: arbitrage always lists at the max price
+
+Never hand-pick a buy-now number for an arbitrage plane. `shm_aircraft` returns
+three distinct caps, and the flip uses two of them:
+
+| Field | Meaning | Use |
+|---|---|---|
+| `binThreshold` | **max buy-it-now the game accepts.** Per *livery*, not per model | → `bin_price` |
+| `maxAuctionSellPrice` | max **starting bid** = the model's raw value | → `price` |
+| `minAuctionSellPrice` | min starting bid — often **below** what you paid | ⚠️ never use |
+| `sellPrice` | instant scrap-to-the-game price | not a market price |
+
+Starting at `maxAuctionSellPrice` matters: a listing can be won at its opening
+bid, and `minAuctionSellPrice` on a 747SP is $88M against a $160M mint cost — a
+$72M loss per plane if a single bidder takes it. Opening at the $177M raw value
+makes the downside a small profit and the upside the full BIN.
+
+`binThreshold` being per-livery is what the market's price tiers actually are:
+the Spirit 747SP caps at **$1.209B**, while an Il-96-300 "Tokyo Sports Event
+2021" caps at **$8B** — that's why those sit on the market at exactly
+8,000,000,000. Read the threshold off the aircraft; don't assume a tier.
+
+Note `alertThreshold` in the put_up response is a *different, higher* number
+(3.717B on a Spirit 747SP listed at its 1.209B cap) — it's the fair-value line,
+not a ceiling you can price to. Confirmed 2026-08-06: a BIN exactly at
+`binThreshold` is accepted.
+
+```bash
+# the whole rule, in MCP terms
+shm_aircraft(<id>)                      # read binThreshold + maxAuctionSellPrice
+shm_sell_batch(ids=[…], bin_price=<binThreshold>, price=<maxAuctionSellPrice>)
+```
 
 ## The 747SP arbitrage (confirmed economics)
 
@@ -82,9 +117,12 @@ Minting a 747SP (model **151**, Manufacturer skin **2801396**, `isClassic`):
   planes by explicit id, not a name scan.
 
 ```bash
-# sell a just-minted batch by the ids from the buy response
+# sell a just-minted batch by the ids from the buy response.
+# --price = maxAuctionSellPrice (raw value, so a one-bid close still profits),
+# --bin   = binThreshold. NOT --price 88000000: that's minAuctionSellPrice,
+#           which is below the ~$160M mint cost.
 python3 main.py market sell-batch --ids "188272456,188272457,…" \
-        --price 88000000 --bin 900000000 --dry-run
+        --price 177000000 --bin 1209000000 --dry-run
 ```
 
 Buy/mint endpoint (captured, for reference — buy side is planned on the web
