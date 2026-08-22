@@ -266,6 +266,11 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   limited-time event booster. Artwork paths come from `bfa/aircraft/skin`, the
   client's boot manifest, which is **not** an ownership list: it omits liveries the
   player owns and includes the current event's.
+- **`skin_gallery.py`** — renders the cached artwork as an HTML contact sheet, so
+  the BLOBs are actually inspectable. `--out DIR` writes the PNGs beside an
+  index.html that links them (cheap: a 500-livery page is 0.2MB); `--embed FILE`
+  inlines them as data URIs for one portable file (~1.35x the PNG bytes). Filters
+  (`--booster/--rarity/--owned/--missing/--name`) compose.
 - **Still not covered — booster purchase and Bob.** The free Economy pack is
   purchase option **id 1** (`freeWithAds`, 8h cooldown; the account's `bypassAds`
   runs to 2026-09-04), but `booster/ads/purchase` rejects
@@ -323,14 +328,14 @@ treasury gets it less `dollarTax` (10%). Cap observed 2026-08-04: **$200M/day**.
 | Table | Purpose |
 |-------|---------|
 | `aircraft` | specs: model, category, speed_kmh, range_km, max_pax, max_tonnage, gross_price |
-| `routes` | per-hub routes: hub_iata, dest_iata, distance_km, dest_category, {eco,bus,fir,cargo}_demand, audit_price_*, line_id, gross_price |
+| `routes` | per-hub routes: hub_iata, dest_iata, distance_km, dest_category, stars, {eco,bus,fir,cargo}_demand, gross_price, is_owned, line_id |
 | `hubs` | hub airports: hub_id, iata, name, country_code, category, price |
 | `player_hubs` | the player's owned hubs (drives "for each owned hub" scrapers) |
 | `circuits` / `circuit_routes` | saved circuits and their routes |
 | `fleet` | scraped aircraft inventory (from `warehouse_sync`) |
 | `routes_demand_snapshot` | pre-overwrite demand snapshots (from `scrape_internal_audits`) |
 | `mobile_models` / `mobile_skins` | mobile model specs + skin/livery ids (creator, Playrion status) |
-| `mobile_aircraft` / `mobile_market` | mobile account fleet + SHM auction price-history log |
+| `mobile_aircraft` | mobile account fleet (SHM auction reads are live-only; nothing is logged) |
 | `mobile_boosters` / `mobile_booster_cards` | booster windows/prices/pity + published drop tables (from `booster_sync`) |
 | `mobile_skin_images` | livery PNG bytes (from `booster_sync --images`) |
 | `mobile_skin_overview` | VIEW: livery + owned-aircraft count + best drop rate + artwork cached |
