@@ -446,6 +446,51 @@ class AMClient:
             self.store.commit()
         return skins
 
+    def skin_catalog(self) -> list:
+        """The client's boot-time livery manifest: [{id, picturePath}, ...].
+
+        NOT an ownership list — it omits some liveries the player owns and
+        includes the current event's. Its value is that it carries a CDN
+        picturePath for every id in it, which is what the artwork fetch needs.
+        """
+        skins = self._request("GET", "bfa/aircraft/skin").get("aircraftSkinList", [])
+        if self.store:
+            for s in skins:
+                pic = (s.get("picturePath") or {})
+                self.store.upsert_skin(
+                    s.get("id"), picture_path=(pic.get("big")
+                                               or pic.get("medium") or "").split("?")[0] or None)
+            self.store.commit()
+        return skins
+
+    # ── boosters ────────────────────────────────────────────────────────
+    def boosters(self) -> list:
+        """Active booster packs (id, name, window, pity gauge, prices)."""
+        body = self._request("GET", "booster")
+        out = body.get("boosters", [])
+        if self.store:
+            for b in out:
+                self.store.upsert_booster(b)
+            self.store.commit()
+        return out
+
+    def booster_droprate(self, booster_id: int) -> dict:
+        """The published drop table for one booster.
+
+        Found by capturing the app on the booster contents screen — it is not
+        reachable by guessing (`booster/rates`, `booster/probabilities` and the
+        other obvious spellings all answer errorCode 99). Rates are published
+        per RARITY GROUP, not per card; each card carries a full `skin` object
+        ({id, name, picturePath}), which is the only source of livery names for
+        skins the player does not own.
+        """
+        body = self._request("GET", "booster/droprate",
+                             params={"boosterId": int(booster_id)})
+        if self.store:
+            self.store.record_droprate(int(booster_id), body)
+            self.store.commit()
+        return body
+
     # ── writes ──────────────────────────────────────────────────────────
     def put_up(self, aircraft_id: int, price: int, bin_price: int,
                duration: int = 11) -> dict:
@@ -552,3 +597,43 @@ def fmt_money(n: Any) -> str:
         if abs(n) >= div:
             return f"${n / div:.2f}{unit}"
     return f"${n:.0f}"
+
+# Livery artwork lives on the game's CDN, not the API. www.airlines-manager.com
+# 301s to CloudFront; no auth, no token, so this needs a plain client rather
+# than AMClient's authenticated one.
+SKIN_IMAGE_SIZES = ("medium", "big", "superBig")
+
+
+def skin_image_client() -> httpx.Client:
+    """A keep-alive client for the CDN. Hundreds of liveries means hundreds of
+    requests; one connection beats a TLS handshake per PNG."""
+    return httpx.Client(timeout=30, trust_env=False, follow_redirects=True,
+                        headers={"User-Agent": USER_AGENT})
+
+
+def fetch_skin_png(picture_path: str, size: str = "big",
+                   base_url: str = DEFAULT_BASE,
+                   client: Optional[httpx.Client] = None) -> tuple:
+    """Download one livery PNG. Returns (bytes, final_url).
+
+    `picture_path` is any of the sizes the API hands back; the size segment is
+    swapped for the one requested. Pass `client` (see skin_image_client) to
+    reuse a connection across a batch.
+    """
+    if size not in SKIN_IMAGE_SIZES:
+        raise ValueError(f"size must be one of {SKIN_IMAGE_SIZES}")
+    path = picture_path.split("?")[0]
+    for s in SKIN_IMAGE_SIZES:
+        path = path.replace(f"/skins/{s}/", f"/skins/{size}/")
+    owned = client is None
+    c = client or skin_image_client()
+    try:
+        r = c.get(base_url.rstrip("/") + path)
+        r.raise_for_status()
+        data = r.content
+    finally:
+        if owned:
+            c.close()
+    if not data.startswith(b"\x89PNG"):
+        raise AMError(f"{path}: not a PNG (got {data[:16]!r})")
+    return data, str(r.url)

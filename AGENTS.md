@@ -1,7 +1,11 @@
 # AGENTS.md — Guide for AI Agents Working on This Codebase
 
 For what the project *is* and how to drive it via the MCP server, see `README.md`.
-This file is for an AI agent (Claude Code, etc.) editing the code.
+
+**This is the single source of truth for every AI coding agent working in this repo**
+— Claude Code, OpenCode, Codex, Cursor, Gemini CLI, or anything else. `CLAUDE.md` and
+`GEMINI.md` are one-line pointers back here; do not duplicate guidance into them. If
+you learn something durable about this codebase, edit *this* file.
 
 ## Project Overview
 
@@ -89,6 +93,7 @@ airlines-manager/
     ├── mobile_store.py             ← reference store for mobile ids (mobile_* tables)
     ├── mobile_reconfigurator.py    ← aircraft_reconfigurator over the mobile API
     ├── mobile_login.py             ← press OK/Login over adb when the session dies
+    ├── booster_sync.py             ← booster drop tables + livery names/artwork → DB
     │
     ├── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
     └── gui/                        ← NiceGUI pages (planner, hub, library, mass,
@@ -243,11 +248,29 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   Caveat: all three circuits were seat-only, so `assign_hub` is capture-verified
   but has **not** yet been posted by this client — run `--limit 1` first on the
   next circuit that needs a hub move.
-- **Not covered yet — boosters and Bob.** `booster` and `booster/history` read
-  fine, and the free Economy pack is purchase option **id 1** (`freeWithAds`, 8h
-  cooldown; the account's `bypassAds` runs to 2026-09-04). But `booster/ads/purchase`
-  rejects `purchaseId`/`id`/`boosterPurchaseId`/`offerId` with errorCode 10205, so
-  the body shape still needs a capture. Bob is the maintenance mini-game
+- **`booster_sync.py`** — booster **reads** are covered: `booster`,
+  `booster/history` and `booster/droprate` (the last found by capturing the app on
+  the booster-contents screen; `booster/rates` and friends do not exist). It fills
+  `mobile_boosters`, `mobile_booster_cards` and `mobile_skin_images`. The reason to
+  run it goes beyond boosters: `booster/droprate` is the **only** endpoint returning
+  a real livery *name* for a skin the player doesn't own, so it backfills
+  `mobile_skins.name` for hundreds of rows the fleet/auction reads saw as a bare id.
+  Note the module disables INFO logging on purpose — httpx logs full request URLs
+  and the mobile API passes `access_token` in the query string.
+  **Rates are published per rarity GROUP, not per card**, so the table stores the
+  group rate plus `group_size` and per-card odds stay derivable. First full sync:
+  4 boosters, 847 cards, 204 livery names, 500 PNGs at `big` (9.8MB, 0 failures).
+  Worth knowing before spending travel cards: the standing Economy/First Class/
+  Aircraft boosters drop **only manufacturer liveries** at every rarity (2
+  exceptions at r1) — all 33 special liveries in the 2026-08 pool come from the
+  limited-time event booster. Artwork paths come from `bfa/aircraft/skin`, the
+  client's boot manifest, which is **not** an ownership list: it omits liveries the
+  player owns and includes the current event's.
+- **Still not covered — booster purchase and Bob.** The free Economy pack is
+  purchase option **id 1** (`freeWithAds`, 8h cooldown; the account's `bypassAds`
+  runs to 2026-09-04), but `booster/ads/purchase` rejects
+  `purchaseId`/`id`/`boosterPurchaseId`/`offerId` with errorCode 10205, so the body
+  shape still needs a capture. Bob is the maintenance mini-game
   (`maintenance/bob/2` → errorCode 99 as a bare GET); it is a *skill* game with
   a score submission, so automating it means posting fabricated scores — a
   different risk class from claiming a free reward. Capture both before building.
@@ -270,6 +293,14 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   proxy, and `bluestacks_mitm_runbook.md` covers the manual steps (root toggle /
   APK-repackage route). `market_usage.md` records the SHM economics and the
   daily-reward gotchas. **Captures are gitignored — they hold live tokens.**
+  Two guards around the exposure the emulator creates: BlueStacks binds adb to
+  `*:5555` with no setting to change it, so `capture_window.sh` runs a capture
+  inside a bounded window and kills BlueStacks from an EXIT trap (port closes on
+  success, failure, Ctrl-C and timeout alike), and `am-lockdown.pf.conf` blocks
+  inbound 5555/8080 on every non-loopback interface. `refresh_mobile_session.sh`
+  refuses to bind mitmdump to `0.0.0.0` when the host's own address is publicly
+  routable (`AM_ALLOW_PUBLIC_PROXY=1` overrides) — that would be an open proxy on
+  the internet.
 
 ### Fleet / data-sync scripts
 `aircraft_numberer`, `aircraft_reconfigurator`, `circuit_renamer`, `mass_renamer`,
@@ -300,6 +331,9 @@ treasury gets it less `dollarTax` (10%). Cap observed 2026-08-04: **$200M/day**.
 | `routes_demand_snapshot` | pre-overwrite demand snapshots (from `scrape_internal_audits`) |
 | `mobile_models` / `mobile_skins` | mobile model specs + skin/livery ids (creator, Playrion status) |
 | `mobile_aircraft` / `mobile_market` | mobile account fleet + SHM auction price-history log |
+| `mobile_boosters` / `mobile_booster_cards` | booster windows/prices/pity + published drop tables (from `booster_sync`) |
+| `mobile_skin_images` | livery PNG bytes (from `booster_sync --images`) |
+| `mobile_skin_overview` | VIEW: livery + owned-aircraft count + best drop rate + artwork cached |
 
 Aircraft **aliases** (e.g. `B742` → `747-200B`) live in the `ALIASES` dict in
 `circuit_planner.py` (mirrored in `aircraft_buyer.py`).
@@ -321,9 +355,13 @@ Aircraft **aliases** (e.g. `B742` → `747-200B`) live in the `ALIASES` dict in
 
 ## Verification
 
-No automated tests — verify manually.
+Pure logic is covered by pytest; everything that touches CDP or the live game is
+verified by hand.
 
 ```bash
+# Test suite: offline, no Chrome, ~1s. 148 passed, 1 xfailed as of 2026-08-22.
+.venv/bin/python -m pytest code/tests/ -q
+
 # Planner smoke test (no game connection needed)
 python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2 --phase1-only
 python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2   # full Phase 1+2
@@ -362,7 +400,9 @@ absent).
 
 ## Known Issues
 
-1. **No automated test suite** — verification is manual.
+1. **Test coverage is partial** — `code/tests/` covers the pricing/flight-time
+   formulas, the schedule builder, `db.py`, the mobile session and `mobile_login`.
+   Everything behind CDP or the live mobile API is still verified manually.
 2. **`ALIASES` is duplicated** in `circuit_planner.py` and `aircraft_buyer.py` — keep
    them in sync when adding aircraft.
 3. **Native dylib is not committed** (`*.dylib`/`*.so` are gitignored) — rebuild with

@@ -96,12 +96,22 @@ probe() {  # $1 = address to reach the host on
   kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
   grep -q "saved" <<<"$out"
 }
+is_public() {  # $1 = IPv4 address; true when globally routable
+  python3 -c "import ipaddress,sys; sys.exit(0 if ipaddress.ip_address('$1').is_global else 1)" 2>/dev/null
+}
 if probe 10.0.2.2 127.0.0.1; then
   PROXY_HOST="10.0.2.2"; BIND_HOST="127.0.0.1"
   log "using 10.0.2.2 (slirp NAT -> host loopback), proxy bound to localhost"
-elif [ -n "$LAN_IP" ] && probe "$LAN_IP" 0.0.0.0; then
+elif [ -n "$LAN_IP" ] && ! is_public "$LAN_IP" && probe "$LAN_IP" 0.0.0.0; then
   PROXY_HOST="$LAN_IP"; BIND_HOST="0.0.0.0"
-  log "using LAN IP $LAN_IP (WARNING: proxy is exposed on the network)"
+  log "using LAN IP $LAN_IP (WARNING: proxy is exposed on the local network)"
+elif [ -n "$LAN_IP" ] && is_public "$LAN_IP"; then
+  echo "10.0.2.2 did not work, and $LAN_IP is PUBLICLY ROUTABLE — refusing to"
+  echo "bind mitmdump to 0.0.0.0 there (that is an open proxy on the internet)."
+  echo "Fix the slirp route, or set AM_ALLOW_PUBLIC_PROXY=1 to override."
+  [ "${AM_ALLOW_PUBLIC_PROXY:-0}" = "1" ] || exit 1
+  PROXY_HOST="$LAN_IP"; BIND_HOST="0.0.0.0"
+  log "OVERRIDE: open proxy on public address $LAN_IP"
 else
   echo "No reachable proxy address. Check macOS firewall / Local Network permission."
   exit 1
