@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  background-color: #F5F2EC;
+  color: #4E4B43;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'tnum' 1;
+}
+
+/* Custom modern scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CFC9BA;
+  border-radius: 9999px;
+  border: 2px solid #F5F2EC;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8B877C;
+}
+
+/* Rarity card accents — soft tinted lift instead of neon glow */
+.rarity-glow-4 {
+  box-shadow: 0 8px 24px -8px rgba(255, 173, 0, 0.35);
+  border-color: rgba(230, 167, 0, 0.55) !important;
+}
+
+.rarity-glow-3 {
+  box-shadow: 0 8px 24px -8px rgba(124, 92, 191, 0.28);
+  border-color: rgba(124, 92, 191, 0.45) !important;
+}
+
+.rarity-glow-2 {
+  box-shadow: 0 8px 24px -8px rgba(29, 111, 184, 0.25);
+  border-color: rgba(29, 111, 184, 0.40) !important;
+}
+
+.rarity-glow-1 {
+  box-shadow: 0 8px 24px -8px rgba(30, 126, 70, 0.22);
+  border-color: rgba(30, 126, 70, 0.38) !important;
+}
