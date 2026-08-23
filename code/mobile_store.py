@@ -57,18 +57,6 @@ CREATE TABLE IF NOT EXISTS mobile_aircraft (
     first_seen  TEXT DEFAULT (datetime('now')),
     last_seen   TEXT DEFAULT (datetime('now'))
 );
-CREATE TABLE IF NOT EXISTS mobile_market (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    auction_id    INTEGER,
-    model_id      INTEGER,
-    skin_id       INTEGER,
-    current_price INTEGER,
-    bin_price     INTEGER,
-    min_stars     INTEGER,
-    max_stars     INTEGER,
-    time_left     INTEGER,
-    observed_at   TEXT DEFAULT (datetime('now'))
-);
 CREATE TABLE IF NOT EXISTS mobile_boosters (
     booster_id  INTEGER PRIMARY KEY,
     name        TEXT,
@@ -120,14 +108,27 @@ CREATE INDEX IF NOT EXISTS ix_mobile_booster_cards_skin
     ON mobile_booster_cards(skin_id);
 CREATE INDEX IF NOT EXISTS ix_mobile_booster_cards_rarity
     ON mobile_booster_cards(rarity, drop_rate);
--- One row per known livery: what it is, whether you fly it, how it drops, and
--- whether the artwork is cached. `best_card_rate` is the per-card chance in
--- the most generous booster offering it (group rate / cards in that group).
-CREATE VIEW IF NOT EXISTS mobile_skin_overview AS
+CREATE INDEX IF NOT EXISTS ix_mobile_aircraft_skin ON mobile_aircraft(skin_id);
+"""
+
+
+# One row per known livery: what it is, whether you fly it, how it drops, where
+# it is sold, and whether the artwork is cached. `best_card_rate` is the
+# per-card chance in the most generous booster offering it. Kept out of _SCHEMA
+# because CREATE VIEW IF NOT EXISTS leaves a stale definition alone — this one
+# is dropped and rebuilt on every open, so its columns can grow.
+_OVERVIEW_VIEW = """
+DROP VIEW IF EXISTS mobile_skin_overview;
+CREATE VIEW mobile_skin_overview AS
 SELECT s.skin_id,
        s.name,
+       s.source,
+       s.creator,
        s.rarity,
        s.model_id,
+       s.price_amcoins,
+       s.sold,
+       s.owned,
        (SELECT COUNT(*) FROM mobile_aircraft a
          WHERE a.skin_id = s.skin_id)                       AS owned_aircraft,
        (SELECT MAX(c.drop_rate / NULLIF(c.group_size, 0))
@@ -140,9 +141,14 @@ SELECT s.skin_id,
        (SELECT COUNT(*) FROM mobile_skin_images i
          WHERE i.skin_id = s.skin_id)                       AS images
   FROM mobile_skins s;
-CREATE INDEX IF NOT EXISTS ix_mobile_aircraft_skin ON mobile_aircraft(skin_id);
-CREATE INDEX IF NOT EXISTS ix_mobile_market_skin ON mobile_market(skin_id, observed_at);
+CREATE INDEX IF NOT EXISTS ix_mobile_skins_source ON mobile_skins(source);
 """
+
+
+# `mobile_skins.source` values by `aircraft.skin.type`. The vocabulary is
+# defined in mobile_api (SKIN_TYPE_* / SKIN_SOURCE_*); it is spelled out here
+# rather than imported so the store layer stays free of the HTTP client.
+_SKIN_SOURCE_BY_TYPE = {0: "manufacturer", 1: "playrion", 2: "market"}
 
 
 # Columns added to mobile_skins after it shipped. CREATE TABLE IF NOT EXISTS
@@ -150,6 +156,14 @@ CREATE INDEX IF NOT EXISTS ix_mobile_market_skin ON mobile_market(skin_id, obser
 _SKIN_COLUMNS = [
     ("picture_path", "TEXT"),   # CDN path, e.g. /common/images/.../foo.png
     ("rarity", "INTEGER"),      # highest rarity seen for this livery in a booster
+    # Where the livery comes from, one of mobile_api.SKIN_SOURCE_*: the model's
+    # own paint, an official Playrion livery, or a player-designed one sold on
+    # the livery market. The duty free reports it per shop bucket, the SHM per
+    # listing (`aircraft.skin.type`); 'manufacturer' is never downgraded.
+    ("source", "TEXT"),
+    ("price_amcoins", "INTEGER"),  # duty free asking price in AM coins
+    ("sold", "INTEGER"),           # copies sold game-wide (duty free counter)
+    ("owned", "INTEGER"),          # 1 once the duty free reports it purchased
 ]
 
 
@@ -169,6 +183,11 @@ class MobileStore:
         for name, sql_type in _SKIN_COLUMNS:
             if name not in cols:
                 self._exec(f"ALTER TABLE mobile_skins ADD COLUMN {name} {sql_type}", ())
+        # after the ALTERs, so the view can select the columns they just added
+        try:
+            self.conn.executescript(_OVERVIEW_VIEW)
+        except sqlite3.Error:
+            pass
 
     def commit(self):
         try:
@@ -205,16 +224,21 @@ class MobileStore:
               seats.get("total")))
 
     def upsert_skin(self, skin_id, model_id=None, name=None, livery_type=None,
-                    creator=None, status=None, picture_path=None, rarity=None):
+                    creator=None, status=None, picture_path=None, rarity=None,
+                    source=None, price_amcoins=None, sold=None, owned=None):
         if skin_id is None:
             return
         # rarity takes the MAX seen: the same livery can appear in several
         # boosters, and the highest tier it is offered at is the useful one.
+        # `source` is the one field a later read may not downgrade: the SHM
+        # reports a manufacturer paint as such, while the duty free lists the
+        # same livery in its Playrion bucket, and the SHM answer is the finer
+        # one. Price / sold / owned are live counters, so newest wins.
         self._exec("""
             INSERT INTO mobile_skins
               (skin_id,model_id,name,livery_type,creator,status,
-               picture_path,rarity,last_seen)
-            VALUES (?,?,?,?,?,?,?,?,datetime('now'))
+               picture_path,rarity,source,price_amcoins,sold,owned,last_seen)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
             ON CONFLICT(skin_id) DO UPDATE SET
               model_id=COALESCE(excluded.model_id, mobile_skins.model_id),
               name=COALESCE(excluded.name, mobile_skins.name),
@@ -224,9 +248,16 @@ class MobileStore:
               picture_path=COALESCE(excluded.picture_path, mobile_skins.picture_path),
               rarity=NULLIF(MAX(COALESCE(excluded.rarity, -1),
                                 COALESCE(mobile_skins.rarity, -1)), -1),
+              source=CASE WHEN mobile_skins.source = 'manufacturer'
+                          THEN 'manufacturer'
+                          ELSE COALESCE(excluded.source, mobile_skins.source) END,
+              price_amcoins=COALESCE(excluded.price_amcoins,
+                                     mobile_skins.price_amcoins),
+              sold=COALESCE(excluded.sold, mobile_skins.sold),
+              owned=COALESCE(excluded.owned, mobile_skins.owned),
               last_seen=datetime('now')
         """, (skin_id, model_id, name, livery_type, creator, status,
-              picture_path, rarity))
+              picture_path, rarity, source, price_amcoins, sold, owned))
 
     def observe_fleet_item(self, it: dict):
         if it.get("id") is None:
@@ -274,9 +305,12 @@ class MobileStore:
         ac = a.get("aircraft") or {}
         skin = ac.get("skin") or {}
         model_id = ac.get("aircraftListId")
-        pool = a.get("sellerPool") or {}
+        # `skin.type` is the SHM's own answer to "Playrion or player-made?"
+        # (mobile_api.SKIN_TYPE_*); it is finer than the duty free's buckets
+        # because it also calls out a plain manufacturer paint.
         self.upsert_skin(skin.get("id"), model_id=model_id, name=skin.get("name"),
-                         livery_type=skin.get("type"))
+                         livery_type=skin.get("type"),
+                         source=_SKIN_SOURCE_BY_TYPE.get(skin.get("type")))
         if model_id is not None and ac.get("rawPrice"):
             self._exec("""
                 INSERT INTO mobile_models (model_id, raw_price, is_classic, last_seen)
@@ -286,14 +320,6 @@ class MobileStore:
                   is_classic=COALESCE(excluded.is_classic, mobile_models.is_classic),
                   last_seen=datetime('now')
             """, (model_id, ac.get("rawPrice"), 1 if ac.get("isClassic") else 0))
-        self._exec("""
-            INSERT INTO mobile_market
-              (auction_id,model_id,skin_id,current_price,bin_price,min_stars,
-               max_stars,time_left)
-            VALUES (?,?,?,?,?,?,?,?)
-        """, (a.get("id"), model_id, skin.get("id"), a.get("currentPrice"),
-              a.get("binPrice"), pool.get("minStars"), pool.get("maxStars"),
-              a.get("timeLeft")))
 
     # ── boosters ────────────────────────────────────────────────────────
     def upsert_booster(self, b: dict):
@@ -396,7 +422,7 @@ class MobileStore:
         c = self.conn.cursor()
         out = {}
         for t in ("mobile_models", "mobile_skins", "mobile_aircraft",
-                  "mobile_market", "mobile_boosters", "mobile_booster_cards",
+                  "mobile_boosters", "mobile_booster_cards",
                   "mobile_skin_images"):
             try:
                 out[t] = c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]

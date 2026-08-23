@@ -30,6 +30,13 @@ EXTRA_CIRCUIT_COLUMNS = [
     ("route_investment", "REAL"),  # SUM of routes.gross_price for circuit's routes
 ]
 
+# The livery: `skin_img` is the picture filename the planning payload carries for
+# every aircraft, `skin_id` the numeric id it resolves to via `mobile_skins`.
+EXTRA_FLEET_COLUMNS = [
+    ("skin_id", "INTEGER"),
+    ("skin_img", "TEXT"),
+]
+
 def _migrate(conn):
     # Tolerate a fresh/empty DB: the base tables are created by other scripts,
     # so skip column migrations for any table that doesn't exist yet.
@@ -62,6 +69,11 @@ def _migrate(conn):
         "name TEXT, model TEXT, utilization REAL, "
         "hub_iata TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     )
+    fleet_cols = {r[1] for r in conn.execute("PRAGMA table_info(fleet)").fetchall()}
+    for name, sql_type in EXTRA_FLEET_COLUMNS:
+        if name not in fleet_cols:
+            conn.execute(f"ALTER TABLE fleet ADD COLUMN {name} {sql_type}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fleet_skin ON fleet(skin_id)")
 
     if "routes" not in tables:
         conn.commit()
@@ -578,19 +590,78 @@ def load_saved_circuit(name: str) -> dict | None:
     }
 
 
+def resolve_skin_ids(aircraft_list: list[dict]) -> tuple[int, int]:
+    """Fill each dict's `skin_id` from the `skin_img` filename it was scraped with.
+
+    The planning payload identifies an aircraft's livery by picture only, so the
+    numeric id comes from `mobile_skins` — matched on the filename, since the
+    two differ just in the size directory (`skins/small/` vs `skins/big/`).
+    A handful of basenames are shared by two skins (one artwork file reused
+    across models, e.g. `b777-300.png` for both the 777-300 and the 777-300ER);
+    for those the id recorded by the mobile fleet sync for that exact aircraft
+    wins, then the candidate whose skin name is that model's ("777-300ER -
+    (Manufacturer livery)"). Anything still ambiguous is left unset rather than
+    guessed. Aircraft with no `skin_img` fall back to the mobile sync too.
+
+    Returns (resolved, unresolved).
+    """
+    db = get_db()
+    tables = {r[0] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+    by_img: dict[str, list[tuple[int, str]]] = {}
+    if "mobile_skins" in tables:
+        for skin_id, path, skin_name in db.execute(
+            "SELECT skin_id, picture_path, name FROM mobile_skins "
+            "WHERE picture_path IS NOT NULL"
+        ).fetchall():
+            # skin names read "<model> - <livery>"; keep the model half
+            model = (skin_name or "").split(" - ")[0].strip().lower()
+            by_img.setdefault(path.rsplit("/", 1)[-1], []).append((skin_id, model))
+
+    from_mobile: dict[int, int] = {}
+    if "mobile_aircraft" in tables:
+        from_mobile = {r[0]: r[1] for r in db.execute(
+            "SELECT aircraft_id, skin_id FROM mobile_aircraft "
+            "WHERE skin_id IS NOT NULL").fetchall()}
+
+    resolved = 0
+    for ac in aircraft_list:
+        candidates = by_img.get(ac.get("skin_img") or "", [])
+        ids = [sid for sid, _ in candidates]
+        hint = from_mobile.get(ac.get("id"))
+        model = (ac.get("model") or "").strip().lower()
+        by_model = [sid for sid, m in candidates if m and m == model]
+        if len(candidates) == 1:
+            ac["skin_id"] = ids[0]
+        elif hint is not None and (not ids or hint in ids):
+            ac["skin_id"] = hint
+        elif len(by_model) == 1:
+            ac["skin_id"] = by_model[0]
+        else:
+            ac["skin_id"] = None
+        resolved += ac["skin_id"] is not None
+    return resolved, len(aircraft_list) - resolved
+
+
 def upsert_fleet(aircraft_list: list[dict]):
     """Update or insert fleet data from a list of dicts:
-    [{id, name, model, util, hub}, ...]
+    [{id, name, model, util, hub, skin_id?, skin_img?}, ...]
     """
     db = get_db()
     db.executemany(
-        "INSERT INTO fleet (aircraft_id, name, model, utilization, hub_iata, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+        "INSERT INTO fleet (aircraft_id, name, model, utilization, hub_iata, "
+        "skin_id, skin_img, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
         "ON CONFLICT(aircraft_id) DO UPDATE SET "
         "name=excluded.name, model=excluded.model, "
         "utilization=excluded.utilization, hub_iata=excluded.hub_iata, "
+        # a sync that could not identify the livery leaves the last known one
+        "skin_id=COALESCE(excluded.skin_id, fleet.skin_id), "
+        "skin_img=COALESCE(excluded.skin_img, fleet.skin_img), "
         "updated_at=CURRENT_TIMESTAMP",
-        [(ac["id"], ac["name"], ac["model"], ac["util"], ac["hub"])
+        [(ac["id"], ac["name"], ac["model"], ac["util"], ac["hub"],
+          ac.get("skin_id"), ac.get("skin_img") or None)
          for ac in aircraft_list],
     )
     db.commit()
@@ -601,7 +672,7 @@ def get_stored_aircraft(min_util=0, max_util=0, hubs=None, models=None, name_que
     db = get_db()
     sql = (
         "SELECT f.aircraft_id, f.name, f.model, f.utilization, f.hub_iata, f.updated_at, "
-        "a.icao_code AS icao_code "
+        "f.skin_id, f.skin_img, a.icao_code AS icao_code "
         "FROM fleet f LEFT JOIN aircraft a ON a.model = f.model "
         "WHERE f.utilization >= ? AND f.utilization <= ?"
     )
@@ -630,3 +701,282 @@ def get_stored_aircraft(min_util=0, max_util=0, hubs=None, models=None, name_que
     sql += " ORDER BY f.model, f.name"
     rows = db.execute(sql, args).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_fleet_aircraft(
+    hubs=None,
+    models=None,
+    min_util=None,
+    max_util=None,
+    name_query=None,
+    model_query=None,
+    skin_filter=None,
+    skin_id=None,
+    sort_by="name",
+    limit=None,
+    offset=None,
+):
+    """Return fully joined aircraft records from fleet, aircraft specs, mobile_skins, and mobile_aircraft."""
+    db = get_db()
+    sql = """
+        SELECT f.aircraft_id, f.name, f.model, f.utilization, f.hub_iata, f.updated_at,
+               f.skin_id, f.skin_img,
+               a.category, a.speed_kmh, a.range_km, a.max_pax, a.max_tonnage, a.gross_price, a.icao_code,
+               s.name AS skin_name, s.rarity AS skin_rarity, s.picture_path AS skin_picture_path,
+               m.seats_eco, m.seats_bus, m.seats_first, m.payload_t, m.wear
+        FROM fleet f
+        LEFT JOIN aircraft a ON a.model = f.model
+        LEFT JOIN mobile_skins s ON s.skin_id = f.skin_id
+        LEFT JOIN mobile_aircraft m ON m.aircraft_id = f.aircraft_id
+        WHERE 1=1
+    """
+    args = []
+
+    if hubs:
+        if isinstance(hubs, str):
+            hubs = [hubs]
+        hubs = [h.upper().strip() for h in hubs if h and h.strip()]
+        if hubs:
+            sql += f" AND f.hub_iata IN ({','.join('?'*len(hubs))})"
+            args.extend(hubs)
+
+    if models:
+        if isinstance(models, str):
+            models = [models]
+        models = [m.strip() for m in models if m and m.strip()]
+        if models:
+            sql += f" AND f.model IN ({','.join('?'*len(models))})"
+            args.extend(models)
+
+    if min_util is not None:
+        sql += " AND f.utilization >= ?"
+        args.append(float(min_util))
+
+    if max_util is not None:
+        sql += " AND f.utilization <= ?"
+        args.append(float(max_util))
+
+    if name_query:
+        q = name_query.strip().lower()
+        if q:
+            sql += " AND LOWER(f.name) LIKE ?"
+            args.append(f"%{q}%")
+
+    if model_query:
+        q = model_query.strip().lower()
+        if q:
+            sql += " AND (LOWER(f.model) LIKE ? OR LOWER(COALESCE(a.icao_code, '')) LIKE ?)"
+            args.extend([f"%{q}%", f"%{q}%"])
+
+    if skin_id is not None:
+        sql += " AND f.skin_id = ?"
+        args.append(int(skin_id))
+    elif skin_filter == "special":
+        sql += """ AND f.skin_id IS NOT NULL AND NOT (
+            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
+            OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
+        )"""
+    elif skin_filter == "manufacturer":
+        sql += """ AND (
+            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
+            OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
+            OR f.skin_id IS NULL
+        )"""
+
+    if sort_by == "util_asc":
+        sql += " ORDER BY f.utilization ASC, f.name ASC"
+    elif sort_by == "util_desc":
+        sql += " ORDER BY f.utilization DESC, f.name ASC"
+    elif sort_by == "hub":
+        sql += " ORDER BY f.hub_iata ASC, f.model ASC, f.name ASC"
+    elif sort_by == "model":
+        sql += " ORDER BY f.model ASC, f.name ASC"
+    elif sort_by == "wear_desc":
+        sql += " ORDER BY COALESCE(m.wear, 0) DESC, f.name ASC"
+    else:
+        sql += " ORDER BY f.name ASC"
+
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+        if offset is not None:
+            sql += f" OFFSET {int(offset)}"
+
+    rows = db.execute(sql, args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_fleet_summary_stats() -> dict:
+    """Return aggregated fleet statistics for overview KPIs."""
+    db = get_db()
+    total_row = db.execute(
+        "SELECT COUNT(*) as total, "
+        "SUM(CASE WHEN utilization = 0 THEN 1 ELSE 0 END) as idle, "
+        "SUM(CASE WHEN utilization > 0 THEN 1 ELSE 0 END) as active, "
+        "AVG(utilization) as avg_util FROM fleet"
+    ).fetchone()
+
+    total = total_row["total"] or 0
+    idle = total_row["idle"] or 0
+    active = total_row["active"] or 0
+    avg_util = round(total_row["avg_util"] or 0.0, 1)
+
+    hub_rows = db.execute(
+        "SELECT hub_iata, COUNT(*) as count, "
+        "SUM(CASE WHEN utilization = 0 THEN 1 ELSE 0 END) as idle "
+        "FROM fleet GROUP BY hub_iata ORDER BY count DESC"
+    ).fetchall()
+    hubs = [dict(r) for r in hub_rows]
+
+    model_rows = db.execute(
+        "SELECT model, COUNT(*) as count, "
+        "SUM(CASE WHEN utilization = 0 THEN 1 ELSE 0 END) as idle "
+        "FROM fleet GROUP BY model ORDER BY count DESC"
+    ).fetchall()
+    models = [dict(r) for r in model_rows]
+
+    special_skin_row = db.execute("""
+        SELECT COUNT(*) as cnt FROM fleet f
+        JOIN mobile_skins s ON s.skin_id = f.skin_id
+        WHERE NOT (
+            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
+            OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
+        )
+    """).fetchone()
+    special_skin_count = special_skin_row["cnt"] if special_skin_row else 0
+
+    return {
+        "total": total,
+        "idle": idle,
+        "active": active,
+        "avg_utilization": avg_util,
+        "hubs": hubs,
+        "models": models,
+        "special_skin_count": special_skin_count,
+    }
+
+
+def get_livery_collection(
+    include_manufacturer: bool = False,
+    status_filter: str | None = None,
+    rarity: int | None = None,
+    model_query: str | None = None,
+    search_query: str | None = None,
+) -> list[dict]:
+    """Return all special/custom liveries (excluding manufacturer liveries by default),
+    indicating ownership and listing owned aircraft names."""
+    db = get_db()
+    sql = """
+        SELECT s.skin_id, s.name, s.rarity, s.model_id, s.picture_path,
+               (SELECT GROUP_CONCAT(DISTINCT b.name)
+                  FROM mobile_booster_cards c
+                  JOIN mobile_boosters b ON b.booster_id = c.booster_id
+                 WHERE c.skin_id = s.skin_id) AS boosters,
+               (SELECT COUNT(*) FROM fleet f WHERE f.skin_id = s.skin_id) AS fleet_count,
+               (SELECT COUNT(*) FROM mobile_aircraft m WHERE m.skin_id = s.skin_id) AS mobile_count,
+               (SELECT COUNT(*) FROM mobile_skin_images i WHERE i.skin_id = s.skin_id) AS has_img
+        FROM mobile_skins s
+        WHERE 1=1
+    """
+    args = []
+
+    if not include_manufacturer:
+        sql += """ AND NOT (
+            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
+        )"""
+
+    if rarity is not None:
+        sql += " AND s.rarity = ?"
+        args.append(int(rarity))
+
+    if model_query:
+        q = model_query.strip().lower()
+        if q:
+            sql += " AND (LOWER(s.name) LIKE ? OR LOWER(COALESCE(s.picture_path, '')) LIKE ?)"
+            args.extend([f"%{q}%", f"%{q}%"])
+
+    if search_query:
+        q = search_query.strip().lower()
+        if q:
+            sql += " AND (LOWER(s.name) LIKE ? OR LOWER(COALESCE(boosters, '')) LIKE ?)"
+            args.extend([f"%{q}%", f"%{q}%"])
+
+    sql += " ORDER BY (fleet_count + mobile_count) DESC, COALESCE(s.rarity, -1) DESC, s.name ASC"
+    rows = db.execute(sql, args).fetchall()
+
+    # Pre-fetch all aircraft names by skin_id to avoid N+1 queries
+    ac_map: dict[int, list[dict]] = {}
+    ac_rows = db.execute(
+        "SELECT aircraft_id, name, model, hub_iata, utilization, skin_id "
+        "FROM fleet WHERE skin_id IS NOT NULL ORDER BY name ASC"
+    ).fetchall()
+    for ac in ac_rows:
+        sid = ac["skin_id"]
+        if sid not in ac_map:
+            ac_map[sid] = []
+        ac_map[sid].append({
+            "aircraft_id": ac["aircraft_id"],
+            "name": ac["name"],
+            "model": ac["model"],
+            "hub": ac["hub_iata"],
+            "utilization": ac["utilization"],
+        })
+
+    # Also check mobile_aircraft if any plane is missing from fleet
+    mob_rows = db.execute(
+        "SELECT aircraft_id, name, skin_id "
+        "FROM mobile_aircraft WHERE skin_id IS NOT NULL ORDER BY name ASC"
+    ).fetchall()
+    for m in mob_rows:
+        sid = m["skin_id"]
+        if sid not in ac_map or not ac_map[sid]:
+            if sid not in ac_map:
+                ac_map[sid] = []
+            ac_map[sid].append({
+                "aircraft_id": m["aircraft_id"],
+                "name": m["name"] or f"Aircraft #{m['aircraft_id']}",
+                "model": "",
+                "hub": "",
+                "utilization": 0,
+            })
+
+    results = []
+    for r in rows:
+        item = dict(r)
+        sid = item["skin_id"]
+        planes = ac_map.get(sid, [])
+        item["aircraft"] = planes
+        item["aircraft_names"] = [p["name"] for p in planes if p["name"]]
+        item["owned_count"] = len(planes)
+        item["is_owned"] = len(planes) > 0
+
+        # Apply status filter if requested
+        if status_filter == "owned" and not item["is_owned"]:
+            continue
+        if status_filter == "unowned" and item["is_owned"]:
+            continue
+
+        results.append(item)
+
+    return results
+
+
+def get_skin_image_bytes(skin_id: int, size: str = "big") -> bytes | None:
+    """Fetch raw PNG bytes from mobile_skin_images for a given skin_id."""
+    db = get_db()
+    row = db.execute(
+        "SELECT png FROM mobile_skin_images WHERE skin_id = ? AND size = ? LIMIT 1",
+        (int(skin_id), size),
+    ).fetchone()
+    if row and row["png"]:
+        return bytes(row["png"])
+    # Fallback to any size available
+    row = db.execute(
+        "SELECT png FROM mobile_skin_images WHERE skin_id = ? LIMIT 1",
+        (int(skin_id),),
+    ).fetchone()
+    return bytes(row["png"]) if row and row["png"] else None
+

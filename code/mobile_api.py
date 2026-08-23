@@ -48,6 +48,47 @@ APP_VERSION = 40008
 # The 11th put_up is rejected with errorCode 170011 "Auction limit reached".
 MAX_ACTIVE_LISTINGS = 10
 
+# auction_list never returns more than this many auctions and takes no paging
+# parameter, so the only way to see a specific slice of a bigger market is a
+# server-side filter. The filter names below are the ones the client itself
+# builds (recovered from the APK's il2cpp metadata, which holds them as the
+# format strings "filterAircraftListId={0}", "filterAircraftSkinListType={0}",
+# "filterAuctionStatus={0}", "filterPoolOnly="). `sort` only understands
+# timeMinus / timePlus — every other value silently falls back to timeMinus.
+AUCTION_PAGE_LIMIT = 100
+
+# `aircraft.skin.type` on a listing, and `mobile_skins.livery_type`.
+SKIN_TYPE_MANUFACTURER = 0   # the model's default paint
+SKIN_TYPE_PLAYRION = 1       # official/event liveries — the limited-time ones
+SKIN_TYPE_ARTIST = 2         # player-designed liveries
+
+# `mobile_skins.source`: who a livery comes from, in the vocabulary the DB
+# stores. The SHM says it per listing (skin type above), the duty free per shop
+# bucket (`from=playrion` / `from=market`, and `fromMarket` on each entry).
+SKIN_SOURCE_MANUFACTURER = "manufacturer"
+SKIN_SOURCE_PLAYRION = "playrion"
+SKIN_SOURCE_MARKET = "market"
+
+_SKIN_SOURCE_BY_TYPE = {
+    SKIN_TYPE_MANUFACTURER: SKIN_SOURCE_MANUFACTURER,
+    SKIN_TYPE_PLAYRION: SKIN_SOURCE_PLAYRION,
+    SKIN_TYPE_ARTIST: SKIN_SOURCE_MARKET,
+}
+
+# The duty free's own buckets, as `from=` takes them. "purchased" is the app's
+# default view and answers with the whole catalog, owned entries flagged.
+SKIN_SHOP_SOURCES = ("all", "playrion", "market", "purchased")
+
+
+def skin_source_from_type(skin_type) -> Optional[str]:
+    """Map an `aircraft.skin.type` to a `mobile_skins.source` value."""
+    if skin_type is None:
+        return None
+    try:
+        return _SKIN_SOURCE_BY_TYPE.get(int(skin_type))
+    except (TypeError, ValueError):
+        return None
+
 
 class AMError(RuntimeError):
     """Any API-level failure (bad status field, HTTP error)."""
@@ -410,16 +451,59 @@ class AMClient:
         return profile
 
     def auctions(self, sort: str = "timeMinus",
-                 pool_only: bool = False) -> list:
-        body = self._request("GET", "auction/aircraft/auction_list",
-                             params={"sort": sort,
-                                     "filterPoolOnly": str(pool_only).lower()})
+                 pool_only: bool = False,
+                 model_id: Optional[int] = None,
+                 skin_type: Optional[int] = None) -> list:
+        """Live SHM listings. `sort="timePlus"` puts the NEWEST first.
+
+        The endpoint answers with at most `AUCTION_PAGE_LIMIT` auctions out of a
+        market that runs to four figures, and takes no page/offset parameter —
+        so an unfiltered read is a window on the market, never the market. The
+        two filters below are applied server-side and are the way out of that:
+        when a filtered read comes back under the limit it is the COMPLETE set
+        for that filter (verified — both sorts return identical id sets), and a
+        read that comes back exactly at the limit is still truncated.
+
+        `model_id` filters on the aircraft model (`aircraft.aircraftListId`),
+        `skin_type` on the livery class (`SKIN_TYPE_*`).
+        """
+        params = {"sort": sort, "filterPoolOnly": str(pool_only).lower()}
+        if model_id is not None:
+            params["filterAircraftListId"] = int(model_id)
+        if skin_type is not None:
+            params["filterAircraftSkinListType"] = int(skin_type)
+        body = self._request("GET", "auction/aircraft/auction_list", params=params)
         auctions = body.get("auctions", [])
         if self.store:
             for a in auctions:
                 self.store.observe_auction(a)
             self.store.commit()
         return auctions
+
+    def auction_rules(self) -> dict:
+        """The server's own auction limits, off the app's boot notification call.
+
+        Carries what any spending automation has to respect: `maxBidByDay`,
+        `maxSpentInBidSince`, `purchaseFeePercent`, `countMaxAuction`, the
+        star-pool table and the three `defaultThreshold*` price tiers. Not
+        exposed anywhere on the auction endpoints themselves.
+        """
+        params = {"mobileOS": "android"}
+        if self.s.device_id:
+            params["deviceId"] = self.s.device_id
+        return self._request("GET", "loading/notification",
+                             params=params).get("auctionRules", {})
+
+    def my_bidding(self) -> dict:
+        """The player's own bidding side: {"auctions": [...], "summary": {...}}.
+
+        `summary` is the server's running tally (`countOfBidding` /
+        `sumOfBidding` for the day, `sumOfWeekBidding` for the week), which is
+        what `maxBidByDay` and `maxSpentInBidSince` are measured against.
+        """
+        body = self._request("GET", "auction/aircraft/airline_bidding_list")
+        return {"auctions": body.get("auctions", []),
+                "summary": body.get("airlineAuctions") or {}}
 
     def auction(self, auction_id: int) -> dict:
         return self._request("GET", f"auction/aircraft/auction/{auction_id}"
@@ -434,7 +518,13 @@ class AMClient:
         return aa.get("countAuction")
 
     def model_skins(self, model_id: int) -> list:
-        """All liveries for a model (id, name, creator, Playrion status)."""
+        """The duty free filtered to one model (id, name, creator, price).
+
+        Same entry shape as `shop_skins`, so it records where each livery is
+        sold too. It is the narrow read: it covers what the shop sells for that
+        model and nothing else, so event and challenge liveries — which are
+        awarded, never sold — do not appear here at all.
+        """
         skins = self._request("GET", f"shop/skin/{model_id}/getSkins"
                               ).get("skins", [])
         if self.store:
@@ -442,9 +532,65 @@ class AMClient:
                 self.store.upsert_skin(
                     s.get("id"), model_id=s.get("aircraftListId"),
                     name=s.get("name"), livery_type=s.get("type"),
-                    creator=s.get("creator"), status=s.get("status"))
+                    creator=s.get("creator"), status=s.get("status"),
+                    picture_path=((s.get("picture") or {}).get("big")
+                                  or "").split("?")[0] or None,
+                    source=(SKIN_SOURCE_MARKET if s.get("fromMarket")
+                            else SKIN_SOURCE_PLAYRION),
+                    price_amcoins=s.get("price"), sold=s.get("sold"),
+                    owned=1 if s.get("purchased") else 0)
             self.store.commit()
         return skins
+
+    def shop_skins_page(self, page: int = 1, source: str = "all") -> dict:
+        """One page of the duty free's livery catalogue.
+
+        The paging cursor is a PATH segment (`shop/skin/getSkins/2`) — every
+        query-string spelling of it (`page`, `pageNumber`, `offset`, …) is
+        accepted and silently ignored, so a query-paged loop reads page 1
+        forever. `source` selects the shop bucket:
+
+          playrion   official liveries (event, challenge, seasonal)
+          market     player-designed liveries other airlines put up for sale
+          all        both, which is what the app opens on
+          purchased  the same catalogue with the player's own flagged
+
+        Each entry carries the name, the model it fits, the AM coin price, the
+        creator and a `purchased` flag, so this is both the widest source of
+        livery NAMES and the only one that says where a livery is sold.
+        """
+        return self._request("GET", f"shop/skin/getSkins/{int(page)}",
+                             params={"from": source})
+
+    def shop_skins(self, source: str = "all",
+                   max_pages: Optional[int] = None) -> Iterator[dict]:
+        """Yield every livery in a duty free bucket, paging through."""
+        page = 1
+        while True:
+            body = self.shop_skins_page(page, source)
+            skins = body.get("skins", [])
+            paging = body.get("paging") or {}
+            last = paging.get("pageCount") or 1
+            for sk in skins:
+                if self.store:
+                    self.store.upsert_skin(
+                        sk.get("id"), model_id=sk.get("aircraftListId"),
+                        name=sk.get("name"), creator=sk.get("creator") or None,
+                        status=sk.get("status"),
+                        picture_path=((sk.get("picture") or {}).get("big")
+                                      or "").split("?")[0] or None,
+                        source=(SKIN_SOURCE_MARKET if sk.get("fromMarket")
+                                else SKIN_SOURCE_PLAYRION),
+                        price_amcoins=sk.get("price"), sold=sk.get("sold"),
+                        owned=1 if sk.get("purchased") else 0)
+                yield sk
+            if self.store:
+                self.store.commit()
+            if not skins or page >= last:
+                break
+            if max_pages is not None and page >= max_pages:
+                break
+            page += 1
 
     def skin_catalog(self) -> list:
         """The client's boot-time livery manifest: [{id, picturePath}, ...].
@@ -492,6 +638,45 @@ class AMClient:
         return body
 
     # ── writes ──────────────────────────────────────────────────────────
+    def buy_multiple(self, *, model_id: int, hub_id: int, quantity: int,
+                     name: str, skin_id: int, eco: int, bus: int,
+                     first: int, payload: int) -> dict:
+        """Mint new aircraft from the shop (mobile endpoint).
+
+        Captured body shape:
+            purchaseAssistance=false
+            aircrafts=[{"aircraftId":151,"hubId":<hub>,"quantity":N,
+                        "name":"…","aircraftSkinId":2801396,"seatsEco":136,
+                        "seatsBus":74,"seatsFirst":31,"payload":12}]
+
+        With the model license owned the AM-coin cost is waived (money only).
+        Response `events[].objectid` carries the new aircraft ids. New planes
+        have a 30-min delivery but are sellable by id immediately.
+        """
+        aircrafts = [{"aircraftId": int(model_id),
+                      "hubId": int(hub_id),
+                      "quantity": int(quantity),
+                      "name": name,
+                      "aircraftSkinId": int(skin_id),
+                      "seatsEco": int(eco),
+                      "seatsBus": int(bus),
+                      "seatsFirst": int(first),
+                      "payload": int(payload)}]
+        body = self._request("POST", "aircraft/buymultiple",
+                             data={"purchaseAssistance": "false",
+                                   "aircrafts": json.dumps(aircrafts)})
+        return body
+
+    @staticmethod
+    def bought_aircraft_ids(buy_response: dict) -> list:
+        """Extract the new aircraft ids from a buy_multiple response."""
+        ids = []
+        for ev in buy_response.get("events", []):
+            oid = ev.get("objectid")
+            if oid is not None:
+                ids.append(int(oid))
+        return ids
+
     def put_up(self, aircraft_id: int, price: int, bin_price: int,
                duration: int = 11) -> dict:
         """List an owned aircraft on the second-hand market (auction).
@@ -597,6 +782,7 @@ def fmt_money(n: Any) -> str:
         if abs(n) >= div:
             return f"${n / div:.2f}{unit}"
     return f"${n:.0f}"
+
 
 # Livery artwork lives on the game's CDN, not the API. www.airlines-manager.com
 # 301s to CloudFront; no auth, no token, so this needs a plain client rather
