@@ -38,7 +38,7 @@ def build(container, on_circuits_ready):
 
     def set_status(msg: str, running: bool = False):
         refs['status_lbl'].set_text(msg)
-        refs['status_lbl'].style(f'color:{"#f5a623" if running else "var(--text-dim)"};')
+        refs['status_lbl'].style(f'color:{"#9E7600" if running else "var(--text-dim)"};')
         refs['spinner'].set_visibility(running)
 
     async def run_planner():
@@ -242,17 +242,17 @@ def build(container, on_circuits_ready):
                     with ui.element('div').style('display:flex; flex-direction:column; gap:4px;'):
                         ui.label(label).style(
                             'font-size:10px; color:var(--text-dim); '
-                            'font-family:DM Mono,monospace; letter-spacing:0.5px;'
+                            'font-family:JetBrains Mono,monospace; letter-spacing:0.5px;'
                         )
                         inp = ui.input(value=default).props('dense dark outlined').style(
-                            'font-family:DM Mono,monospace; font-size:12px;'
+                            'font-family:JetBrains Mono,monospace; font-size:12px;'
                         )
                         refs[fid] = inp
 
             with ui.element('div').style('margin-top:10px; display:flex; align-items:center; gap:12px;'):
                 ui.label('OPTIMIZE FOR').style(
                     'font-size:10px; color:var(--text-dim); '
-                    'font-family:DM Mono,monospace; letter-spacing:0.5px;'
+                    'font-family:JetBrains Mono,monospace; letter-spacing:0.5px;'
                 )
                 refs['mode'] = ui.select(
                     {'revenue': 'Max Revenue', 'roi': 'Best ROI / Payback'},
@@ -278,7 +278,7 @@ def build(container, on_circuits_ready):
         t.props('dense virtual-scroll')
         t.add_slot('body-cell-weekly', r'''
             <q-td :props="props" style="text-align:right;">
-                <span style="color:#22c55e; font-weight:600;">{{ props.row.weekly }}</span>
+                <span style="color:#1E7E46; font-weight:600;">{{ props.row.weekly }}</span>
             </q-td>
         ''')
         refs['table'] = t

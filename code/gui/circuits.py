@@ -73,7 +73,7 @@ def build(container, get_circuits):
             with refs['tabs_row']:
                 if not circuits:
                     ui.label('Run the planner to generate circuits').style(
-                        'color:var(--text-dim2); font-size:12px; font-family:DM Mono,monospace;'
+                        'color:var(--text-dim2); font-size:12px; font-family:JetBrains Mono,monospace;'
                     )
                 else:
                     for i, c in enumerate(circuits):
@@ -148,7 +148,7 @@ def build(container, get_circuits):
         refs['tabs_row'] = tabs_row
         with tabs_row:
             ui.label('Run the planner to generate circuits').style(
-                'color:var(--text-dim2); font-size:12px; font-family:DM Mono,monospace;'
+                'color:var(--text-dim2); font-size:12px; font-family:JetBrains Mono,monospace;'
             )
 
         # 2-column layout: table left, stats right
@@ -166,13 +166,13 @@ def build(container, get_circuits):
                 'width:220px; flex-shrink:0; display:flex; flex-direction:column; gap:12px; overflow-y:auto;'
             ):
                 refs['stats_name'] = ui.label('—').style(
-                    'color:#22d3ee; font-weight:700; font-family:DM Mono,monospace; font-size:13px;'
+                    'color:#1D6FB8; font-weight:700; font-family:JetBrains Mono,monospace; font-size:13px;'
                 )
                 refs['stats_ac'] = ui.label('—').style(
-                    'font-size:11px; color:var(--text-dim); font-family:DM Mono,monospace;'
+                    'font-size:11px; color:var(--text-dim); font-family:JetBrains Mono,monospace;'
                 )
                 refs['stats_hub'] = ui.label('—').style(
-                    'font-size:10px; color:var(--text-dim2); font-family:DM Mono,monospace;'
+                    'font-size:10px; color:var(--text-dim2); font-family:JetBrains Mono,monospace;'
                 )
 
                 ui.element('div').style('border-top:1px solid var(--border); margin:4px 0;')
@@ -182,11 +182,11 @@ def build(container, get_circuits):
                         ui.label(label).classes('am-metric-label')
                         refs[ref_key] = ui.label('—').classes('am-metric-value').style(f'color:{color};')
 
-                stats_metric('stats_daily',  'DAILY REV',  '#22c55e')
-                stats_metric('stats_weekly', 'WEEKLY REV', '#22c55e')
+                stats_metric('stats_daily',  'DAILY REV',  '#1E7E46')
+                stats_metric('stats_weekly', 'WEEKLY REV', '#1E7E46')
                 stats_metric('stats_planes', 'AIRCRAFT')
-                stats_metric('stats_invest', 'INVESTMENT', '#f5a623')
-                stats_metric('stats_pb',     'PAYBACK',    '#f5a623')
+                stats_metric('stats_invest', 'INVESTMENT', '#9E7600')
+                stats_metric('stats_pb',     'PAYBACK',    '#9E7600')
                 stats_metric('stats_cfg',    'CONFIG')
 
         # Status bar

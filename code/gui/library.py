@@ -224,7 +224,7 @@ def build(container):
         log_add('library', msg)
         if 'status_lbl' in refs:
             refs['status_lbl'].set_text(msg)
-            refs['status_lbl'].style(f'color:{"#f5a623" if running else "var(--text-dim)"};')
+            refs['status_lbl'].style(f'color:{"#9E7600" if running else "var(--text-dim)"};')
         if 'spinner' in refs:
             refs['spinner'].set_visibility(running)
 
@@ -460,17 +460,17 @@ def build(container):
             ):
                 with ui.element('div').style('display:flex; align-items:center; gap:10px; flex-wrap:wrap;'):
                     ui.label(name).style(
-                        'color:#22d3ee; font-weight:700; font-family:DM Mono,monospace;'
+                        'color:#1D6FB8; font-weight:700; font-family:JetBrains Mono,monospace;'
                     )
                     ui.label(
                         f'{c.get("hub","?")} · {c.get("ac", {}).get("alias","?")} · '
                         f'{len(c.get("routes",[]))} routes · {c.get("waves",0)} waves'
-                    ).style('color:var(--text-dim); font-size:11px; font-family:DM Mono,monospace;')
+                    ).style('color:var(--text-dim); font-size:11px; font-family:JetBrains Mono,monospace;')
                     cfg = c.get('cfg')
                     if cfg:
                         ui.label(
                             f'e{cfg["eco"]} b{cfg["bus"]} f{cfg["fir"]} c{cfg["cargo"]}'
-                        ).style('color:#a855f7; font-size:11px; font-family:DM Mono,monospace;')
+                        ).style('color:#7C5CBF; font-size:11px; font-family:JetBrains Mono,monospace;')
                 with ui.element('div').style('display:flex; align-items:center; gap:8px;'):
                     ui.button('🔄 Live',
                               on_click=lambda n=name: asyncio.ensure_future(_refresh_live(n))) \
@@ -487,11 +487,11 @@ def build(container):
                         ui.label(label).classes('am-metric-label')
                         ui.label(value).classes('am-metric-value').style(f'color:{color};')
 
-                metric('Weekly (plan)', _fmt_money(c.get('weekly_rev') or 0),   '#22c55e')
-                metric('Cur Wk Rev',    _fmt_money(cur_weekly) if live else '—', '#22d3ee')
-                metric('Flights/W',     str(flights_per_week) if flights_per_week else '—', '#a855f7')
-                metric('Routes Inv',    _fmt_money(c.get('route_investment') or 0), '#f5a623')
-                metric('AC Inv',        _fmt_money(c.get('investment') or 0),       '#f5a623')
+                metric('Weekly (plan)', _fmt_money(c.get('weekly_rev') or 0),   '#1E7E46')
+                metric('Cur Wk Rev',    _fmt_money(cur_weekly) if live else '—', '#1D6FB8')
+                metric('Flights/W',     str(flights_per_week) if flights_per_week else '—', '#7C5CBF')
+                metric('Routes Inv',    _fmt_money(c.get('route_investment') or 0), '#9E7600')
+                metric('AC Inv',        _fmt_money(c.get('investment') or 0),       '#9E7600')
 
             cols, rows = _detail_rows(c, live=live, flights_per_week=flights_per_week)
             t = ui.table(columns=cols, rows=rows, row_key='iata') \
@@ -577,7 +577,7 @@ def build(container):
                 ui.label('Manage saved circuits — workflow tracking').classes('am-section-sub')
             with ui.element('div').classes('am-section-actions'):
                 refs['header_count'] = ui.label('').style(
-                    'font-size:11px; color:var(--text-dim); font-family:DM Mono,monospace;'
+                    'font-size:11px; color:var(--text-dim); font-family:JetBrains Mono,monospace;'
                 )
 
         # Filters
@@ -668,16 +668,16 @@ def build(container):
         with ui.element('div').style('display:flex; gap:10px; margin-bottom:12px; flex-shrink:0; flex-wrap:wrap;'):
             with ui.element('div').classes('am-stat'):
                 ui.label('EARNED WEEKLY').classes('am-stat-label')
-                refs['stat_earned'] = ui.label('—').classes('am-stat-value').style('color:#22c55e;')
+                refs['stat_earned'] = ui.label('—').classes('am-stat-value').style('color:#1E7E46;')
             with ui.element('div').classes('am-stat'):
                 ui.label('PLANNED WEEKLY').classes('am-stat-label')
                 refs['stat_planned_rev'] = ui.label('—').classes('am-stat-value').style('color:var(--text-dim);')
             with ui.element('div').classes('am-stat'):
                 ui.label('SPENT').classes('am-stat-label')
-                refs['stat_spent'] = ui.label('—').classes('am-stat-value').style('color:#f5a623;')
+                refs['stat_spent'] = ui.label('—').classes('am-stat-value').style('color:#9E7600;')
             with ui.element('div').classes('am-stat'):
                 ui.label('OUTSTANDING').classes('am-stat-label')
-                refs['stat_outstanding'] = ui.label('—').classes('am-stat-value').style('color:#22d3ee;')
+                refs['stat_outstanding'] = ui.label('—').classes('am-stat-value').style('color:#1D6FB8;')
 
         # Main table with status badge slot
         t = ui.table(columns=COLS, rows=[], row_key='name', selection='multiple') \
@@ -692,27 +692,27 @@ def build(container):
         ''')
         t.add_slot('body-cell-weekly', r'''
             <q-td :props="props" style="text-align:right;">
-                <span style="color:#22c55e; font-weight:600;">{{ props.row.weekly }}</span>
+                <span style="color:#1E7E46; font-weight:600;">{{ props.row.weekly }}</span>
             </q-td>
         ''')
         t.add_slot('body-cell-total', r'''
             <q-td :props="props" style="text-align:right;">
-                <span style="color:#f5a623;">{{ props.row.total }}</span>
+                <span style="color:#9E7600;">{{ props.row.total }}</span>
             </q-td>
         ''')
         t.add_slot('body-cell-name', r'''
             <q-td :props="props">
-                <span style="color:#e2e8f0; font-weight:600;">{{ props.row.name }}</span>
+                <span style="color:#0A1E3C; font-weight:600;">{{ props.row.name }}</span>
             </q-td>
         ''')
         t.add_slot('body-cell-payback', r'''
             <q-td :props="props" style="text-align:right;">
-                <span style="color:#94a3b8;">{{ props.row.payback }}</span>
+                <span style="color:#4E4B43;">{{ props.row.payback }}</span>
             </q-td>
         ''')
         t.add_slot('body-cell-ac', r'''
             <q-td :props="props">
-                <span style="color:#22d3ee;">{{ props.row.ac }}</span>
+                <span style="color:#1D6FB8;">{{ props.row.ac }}</span>
             </q-td>
         ''')
         refs['table'] = t

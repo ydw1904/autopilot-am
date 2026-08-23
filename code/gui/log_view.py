@@ -7,19 +7,19 @@ from nicegui import ui
 from gui.logbuf import get_all, clear as clear_log
 
 _LEVEL_COLOR = {
-    'info':  '#94a3b8',
-    'ok':    '#22c55e',
-    'warn':  '#f5a623',
-    'error': '#ef4444',
+    'info':  '#4E4B43',
+    'ok':    '#1E7E46',
+    'warn':  '#9E7600',
+    'error': '#C8102E',
 }
 _SRC_COLOR = {
-    'library': '#22d3ee',
-    'planner': '#a855f7',
-    'scraper': '#f59e0b',
-    'chrome':  '#22c55e',
-    'app':     '#475569',
-    'numberer':'#22d3ee',
-    'scheduler':'#22d3ee',
+    'library': '#1D6FB8',
+    'planner': '#7C5CBF',
+    'scraper': '#B07C00',
+    'chrome':  '#1E7E46',
+    'app':     '#8B877C',
+    'numberer':'#1D6FB8',
+    'scheduler':'#1D6FB8',
 }
 
 
@@ -49,8 +49,8 @@ def build(container):
             refs['log_container'].clear()
             with refs['log_container']:
                 for e in reversed(visible):
-                    src_color = _SRC_COLOR.get(e['src'], '#475569')
-                    lvl_color = _LEVEL_COLOR.get(e['lvl'], '#94a3b8')
+                    src_color = _SRC_COLOR.get(e['src'], '#8B877C')
+                    lvl_color = _LEVEL_COLOR.get(e['lvl'], '#4E4B43')
                     with ui.element('div').classes('am-log-entry'):
                         ui.label(e['t']).classes('am-log-t')
                         ui.label(e['src']).classes('am-log-src').style(

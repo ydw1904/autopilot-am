@@ -15,13 +15,13 @@ def build(container):
     def set_status(msg: str, running: bool = False):
         if 'status_lbl' in refs:
             refs['status_lbl'].set_text(msg)
-            refs['status_lbl'].style(f'color:{"#f5a623" if running else "var(--text-dim)"};')
+            refs['status_lbl'].style(f'color:{"#9E7600" if running else "var(--text-dim)"};')
         if 'spinner' in refs:
             refs['spinner'].set_visibility(running)
 
     def update_progress(done: int, total: int):
         pct = (done / total * 100) if total else 0
-        refs['prog_fill'].style(f'width:{pct:.1f}%; height:100%; border-radius:3px; background:linear-gradient(90deg,#22d3ee,#22c55e); transition:width 0.3s;')
+        refs['prog_fill'].style(f'width:{pct:.1f}%; height:100%; border-radius:3px; background:linear-gradient(90deg,#05164D,#FFAD00); transition:width 0.3s;')
         refs['prog_label'].set_text(f'{done}/{total} countries ({pct:.0f}%)')
         refs['prog_wrap'].set_visibility(True)
 
@@ -213,11 +213,11 @@ def build(container):
                     with ui.element('div').style('display:flex; flex-direction:column; gap:4px;'):
                         ui.label(label).style(
                             'font-size:10px; color:var(--text-dim); '
-                            'font-family:DM Mono,monospace; letter-spacing:0.5px;'
+                            'font-family:JetBrains Mono,monospace; letter-spacing:0.5px;'
                         )
                         inp = ui.input(value=default, placeholder=placeholder) \
                                 .props('dense dark outlined').style(
-                            'font-family:DM Mono,monospace; font-size:12px;'
+                            'font-family:JetBrains Mono,monospace; font-size:12px;'
                         )
                         refs[ref_key] = inp
 
@@ -227,7 +227,7 @@ def build(container):
                 with ui.element('div').style('display:flex; flex-direction:column; gap:4px;'):
                     ui.label('BACKEND').style(
                         'font-size:10px; color:var(--text-dim); '
-                        'font-family:DM Mono,monospace; letter-spacing:0.5px;'
+                        'font-family:JetBrains Mono,monospace; letter-spacing:0.5px;'
                     )
                     refs['backend'] = ui.select(
                         {'cdp': 'cdp (CDP websocket)', 'openclaw': 'openclaw (CLI)'},
@@ -247,15 +247,15 @@ def build(container):
         with prog_wrap:
             with ui.element('div').style('display:flex; justify-content:space-between; margin-bottom:4px;'):
                 ui.label('PROGRESS').style(
-                    'font-size:10px; color:var(--text-dim); font-family:DM Mono,monospace;'
+                    'font-size:10px; color:var(--text-dim); font-family:JetBrains Mono,monospace;'
                 )
                 refs['prog_label'] = ui.label('0/0 countries (0%)').style(
-                    'font-size:10px; color:#22d3ee; font-family:DM Mono,monospace;'
+                    'font-size:10px; color:#1D6FB8; font-family:JetBrains Mono,monospace;'
                 )
             with ui.element('div').classes('am-progress-track'):
                 refs['prog_fill'] = ui.element('div').style(
                     'width:0%; height:100%; border-radius:3px; '
-                    'background:linear-gradient(90deg,#22d3ee,#22c55e); transition:width 0.3s;'
+                    'background:linear-gradient(90deg,#05164D,#FFAD00); transition:width 0.3s;'
                 )
 
         # Results table

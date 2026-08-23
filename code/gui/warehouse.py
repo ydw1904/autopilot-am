@@ -18,7 +18,7 @@ def build(container):
         log_add('warehouse', msg)
         if 'status_lbl' in refs:
             refs['status_lbl'].set_text(msg)
-            refs['status_lbl'].style(f'color:{"#f5a623" if running else "var(--text-dim)"};')
+            refs['status_lbl'].style(f'color:{"#9E7600" if running else "var(--text-dim)"};')
         if 'spinner' in refs:
             refs['spinner'].set_visibility(running)
 
