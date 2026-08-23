@@ -478,12 +478,6 @@ body, html {
     transform: scale(1.04);
 }
 
-/* ── Rarity badges ── */
-.am-rarity-r4 { background: rgba(255,173,0,0.16) !important; color: #8A6400 !important; border-color: rgba(255,173,0,0.45) !important; font-weight: 700 !important; }
-.am-rarity-r3 { background: rgba(124,92,191,0.12) !important; color: #6B4FB3 !important; border-color: rgba(124,92,191,0.32) !important; font-weight: 600 !important; }
-.am-rarity-r2 { background: rgba(29,111,184,0.10) !important; color: #1D6FB8 !important; border-color: rgba(29,111,184,0.30) !important; }
-.am-rarity-r1 { background: rgba(30,126,70,0.10) !important; color: #1E7E46 !important; border-color: rgba(30,126,70,0.30) !important; }
-.am-rarity-r0 { background: rgba(139,135,124,0.12) !important; color: #8B877C !important; border-color: rgba(139,135,124,0.30) !important; }
 
 /* ── Ownership Badges ── */
 .am-badge-owned {

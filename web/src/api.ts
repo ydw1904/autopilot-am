@@ -46,7 +46,6 @@ export async function fetchFleet(params: FleetParams = {}): Promise<FleetAircraf
 
 export interface LiveryParams {
   status_filter?: "owned" | "unowned" | "all";
-  rarity?: number | null;
   model_query?: string;
   search_query?: string;
 }
@@ -55,9 +54,6 @@ export async function fetchLiveries(params: LiveryParams = {}): Promise<LiveryIt
   const q = new URLSearchParams();
   if (params.status_filter && params.status_filter !== "all") {
     q.set("status_filter", params.status_filter);
-  }
-  if (params.rarity !== undefined && params.rarity !== null) {
-    q.set("rarity", params.rarity.toString());
   }
   if (params.model_query) q.set("model_query", params.model_query);
   if (params.search_query) q.set("search_query", params.search_query);

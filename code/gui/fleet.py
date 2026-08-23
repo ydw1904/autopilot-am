@@ -136,7 +136,6 @@ def build(container, on_navigate_livery: Optional[Callable[[int], None]] = None)
                 util = ac.get("utilization") or 0.0
                 skin_id = ac.get("skin_id")
                 skin_name = ac.get("skin_name")
-                skin_rarity = ac.get("skin_rarity")
                 is_special_skin = skin_name and "Manufacturer" not in skin_name
 
                 # Card styling
@@ -224,8 +223,7 @@ def build(container, on_navigate_livery: Optional[Callable[[int], None]] = None)
 
                         # Livery badge
                         if is_special_skin:
-                            rarity_cls = f"am-rarity-r{skin_rarity}" if skin_rarity is not None else "am-tag-cyan"
-                            ui.label(skin_name.split(" - ")[-1][:18]).classes(f"am-tag {rarity_cls}")
+                            ui.label(skin_name.split(" - ")[-1][:18]).classes("am-tag am-tag-cyan")
                         elif skin_name:
                             ui.label("Mfg Livery").classes("am-tag am-tag-slate")
 

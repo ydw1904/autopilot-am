@@ -317,20 +317,20 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
   `mobile_skins.name` for hundreds of rows the fleet/auction reads saw as a bare id.
   Note the module disables INFO logging on purpose — httpx logs full request URLs
   and the mobile API passes `access_token` in the query string.
-  **Rates are published per rarity GROUP, not per card**, so the table stores the
+  **Rates are published per group, not per card**, so the table stores the
   group rate plus `group_size` and per-card odds stay derivable. First full sync:
   4 boosters, 847 cards, 204 livery names, 500 PNGs at `big` (9.8MB, 0 failures).
   Worth knowing before spending travel cards: the standing Economy/First Class/
-  Aircraft boosters drop **only manufacturer liveries** at every rarity (2
-  exceptions at r1) — all 33 special liveries in the 2026-08 pool come from the
-  limited-time event booster. Artwork paths come from `bfa/aircraft/skin`, the
+  Aircraft boosters drop **only manufacturer liveries** -- all 33 special liveries
+  in the 2026-08 pool come from the limited-time event booster. Artwork paths
+  come from `bfa/aircraft/skin`, the
   client's boot manifest, which is **not** an ownership list: it omits liveries the
   player owns and includes the current event's.
 - **`skin_gallery.py`** — renders the cached artwork as an HTML contact sheet, so
   the BLOBs are actually inspectable. `--out DIR` writes the PNGs beside an
   index.html that links them (cheap: a 500-livery page is 0.2MB); `--embed FILE`
   inlines them as data URIs for one portable file (~1.35x the PNG bytes). Filters
-  (`--booster/--rarity/--owned/--missing/--name`) compose.
+  (`--booster/--owned/--missing/--name`) compose.
 - **`skin_name_sync.py`** — fills in livery **names** and where each livery comes
   from (`mobile_skins.source`: `manufacturer` / `playrion` / `market`). Three
   passes, `--web` / `--dutyfree` / `--shm`, all three by default; they cover

@@ -15,7 +15,6 @@ from gui.logbuf import add as log_add
 def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
     state = {
         "status_filter": "all",  # 'all', 'owned', 'unowned'
-        "rarity_filter": None,
         "rows": [],
     }
     refs = {}
@@ -28,29 +27,24 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
     async def reload():
         status = state["status_filter"]
         stat_arg = None if status == "all" else status
-        rarity = state["rarity_filter"]
         mquery = refs["inp_model"].value if "inp_model" in refs else ""
         sq = refs["inp_search"].value if "inp_search" in refs else ""
-        sort_by = refs["sel_sort"].value if "sel_sort" in refs else "rarity"
+        sort_by = refs["sel_sort"].value if "sel_sort" in refs else "owned_desc"
 
         raw_rows = await run.io_bound(
             get_livery_collection,
-            include_manufacturer=False,  # Strictly exclude manufacturer liveries
+            include_manufacturer=False,
             status_filter=stat_arg,
-            rarity=rarity,
             model_query=mquery,
             search_query=sq,
         )
 
-        # Apply sorting in memory
         if sort_by == "owned_desc":
-            raw_rows.sort(key=lambda x: (x["owned_count"], x.get("rarity") or -1, x["name"]), reverse=True)
+            raw_rows.sort(key=lambda x: (x["owned_count"], x["name"]), reverse=True)
         elif sort_by == "owned_asc":
-            raw_rows.sort(key=lambda x: (x["owned_count"], -(x.get("rarity") or -1), x["name"]))
-        elif sort_by == "name":
+            raw_rows.sort(key=lambda x: (x["owned_count"], x["name"]))
+        else:  # name
             raw_rows.sort(key=lambda x: x["name"] or "")
-        else:  # rarity
-            raw_rows.sort(key=lambda x: (x.get("rarity") or -1, x["owned_count"], x["name"]), reverse=True)
 
         state["rows"] = raw_rows
 
@@ -60,11 +54,6 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
         owned_coll = sum(1 for r in all_coll if r["is_owned"])
         unowned_coll = total_coll - owned_coll
         pct = round((owned_coll / total_coll * 100.0) if total_coll > 0 else 0, 1)
-
-        r4_cnt = sum(1 for r in all_coll if r.get("rarity") == 4)
-        r3_cnt = sum(1 for r in all_coll if r.get("rarity") == 3)
-        r2_cnt = sum(1 for r in all_coll if r.get("rarity") == 2)
-        r1_cnt = sum(1 for r in all_coll if r.get("rarity") == 1)
 
         if "kpi_total" in refs:
             refs["kpi_total"].set_text(str(total_coll))
@@ -122,7 +111,6 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
             for item in rows:
                 sid = item["skin_id"]
                 name = item.get("name") or f"Skin #{sid}"
-                rarity = item.get("rarity")
                 owned_cnt = item.get("owned_count", 0)
                 is_owned = item.get("is_owned", False)
                 planes = item.get("aircraft", [])
@@ -144,15 +132,6 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
                     # Image Box
                     with ui.element("div").classes("am-livery-img-wrap"):
                         ui.image(f"/api/skin_image/{sid}").style("max-width:96%; max-height:96%; object-fit:contain;")
-
-                        # Top-left Rarity Badge
-                        with ui.element("div").style("position:absolute; top:8px; left:8px;"):
-                            if rarity is not None:
-                                stars = "★" * rarity if rarity > 0 else "Common"
-                                rarity_cls = f"am-rarity-r{rarity}"
-                                ui.label(f"R{rarity} {stars}").classes(f"am-tag {rarity_cls}")
-                            else:
-                                ui.label("Event").classes("am-tag am-tag-cyan")
 
                         # Top-right Ownership Badge
                         with ui.element("div").style("position:absolute; top:8px; right:8px;"):
@@ -236,25 +215,10 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
                 pill.classes(remove="active")
         asyncio.ensure_future(reload())
 
-    def _set_rarity_filter(rarity: Optional[int]):
-        state["rarity_filter"] = rarity
-        for rval, pill in refs.get("rarity_pills", {}).items():
-            if rval == rarity:
-                pill.classes(add="active", remove="")
-            else:
-                pill.classes(remove="active")
-        asyncio.ensure_future(reload())
-
     def _clear_filters():
         state["status_filter"] = "all"
-        state["rarity_filter"] = None
         for sname, pill in refs.get("status_pills", {}).items():
             if sname == "all":
-                pill.classes(add="active", remove="")
-            else:
-                pill.classes(remove="active")
-        for rval, pill in refs.get("rarity_pills", {}).items():
-            if rval is None:
                 pill.classes(add="active", remove="")
             else:
                 pill.classes(remove="active")
@@ -309,9 +273,8 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
         with ui.element("div").classes("am-panel").style(
             "margin-bottom:16px; display:flex; flex-direction:column; gap:12px;"
         ):
-            # Row 1: Status & Rarity Pills
+            # Row 1: Status Pills
             with ui.element("div").style("display:flex; gap:16px; align-items:center; flex-wrap:wrap;"):
-                # Status Pills
                 with ui.element("div").style("display:flex; gap:6px; align-items:center;"):
                     ui.label("STATUS:").style("font-size:10px; font-weight:700; color:var(--text-dim); font-family:JetBrains Mono,monospace;")
                     refs["status_pills"] = {}
@@ -332,23 +295,6 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
                         ui.label("Missing / Catalog ✕")
                     p_unown.on("click", lambda: _set_status_filter("unowned"))
                     refs["status_pills"]["unowned"] = p_unown
-
-                # Rarity Pills
-                with ui.element("div").style("display:flex; gap:6px; align-items:center;"):
-                    ui.label("RARITY:").style("font-size:10px; font-weight:700; color:var(--text-dim); font-family:JetBrains Mono,monospace; margin-left:8px;")
-                    refs["rarity_pills"] = {}
-                    r_all = ui.element("button").classes("am-pill active")
-                    with r_all:
-                        ui.label("All")
-                    r_all.on("click", lambda: _set_rarity_filter(None))
-                    refs["rarity_pills"][None] = r_all
-
-                    for rval, rlabel in [(4, "R4 ★★★★"), (3, "R3 ★★★"), (2, "R2 ★★"), (1, "R1 ★")]:
-                        pill = ui.element("button").classes("am-pill")
-                        with pill:
-                            ui.label(rlabel)
-                        pill.on("click", lambda _r=rval: _set_rarity_filter(_r))
-                        refs["rarity_pills"][rval] = pill
 
             # Row 2: Search inputs and Sorting
             with ui.element("div").style("display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap;"):
@@ -372,14 +318,13 @@ def build(container, on_view_in_fleet: Optional[Callable[[int], None]] = None):
                 with ui.element("div").style("display:flex; flex-direction:column; gap:3px; width:160px;"):
                     ui.label("SORT ORDER").classes("am-metric-label")
                     sort_opts = {
-                        "rarity": "Rarity (High-Low)",
                         "owned_desc": "Owned (Most Planes)",
                         "owned_asc": "Owned (Least Planes)",
                         "name": "Name (A-Z)",
                     }
                     refs["sel_sort"] = ui.select(
                         sort_opts,
-                        value="rarity",
+                        value="owned_desc",
                         on_change=lambda: asyncio.ensure_future(reload()),
                     ).props("dense dark outlined")
 

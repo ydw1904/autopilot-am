@@ -1,13 +1,11 @@
 import React, { useState, useEffect, useMemo } from "react";
 import {
   Palette,
-  Sparkles,
   Search,
   CheckCircle2,
   XCircle,
   Plane,
   ArrowRight,
-  Filter,
   RefreshCw,
   Gift,
   Award,
@@ -26,10 +24,9 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<"all" | "owned" | "unowned">("all");
-  const [rarityFilter, setRarityFilter] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [modelQuery, setModelQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"rarity" | "owned_desc" | "owned_asc" | "name">("rarity");
+  const [sortBy, setSortBy] = useState<"owned_desc" | "owned_asc" | "name">("owned_desc");
 
   // Modal for aircraft list
   const [modalData, setModalData] = useState<{
@@ -49,21 +46,17 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
     try {
       const data = await fetchLiveries({
         status_filter: statusFilter,
-        rarity: rarityFilter,
         model_query: modelQuery.trim() || undefined,
         search_query: searchQuery.trim() || undefined,
       });
 
-      // Sort
       const sorted = [...data];
       if (sortBy === "owned_desc") {
-        sorted.sort((a, b) => b.owned_count - a.owned_count || (b.rarity || 0) - (a.rarity || 0));
+        sorted.sort((a, b) => b.owned_count - a.owned_count || a.name.localeCompare(b.name));
       } else if (sortBy === "owned_asc") {
-        sorted.sort((a, b) => a.owned_count - b.owned_count || (b.rarity || 0) - (a.rarity || 0));
-      } else if (sortBy === "name") {
-        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        sorted.sort((a, b) => a.owned_count - b.owned_count || a.name.localeCompare(b.name));
       } else {
-        sorted.sort((a, b) => (b.rarity || 0) - (a.rarity || 0) || b.owned_count - a.owned_count);
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
       }
 
       setLiveries(sorted);
@@ -76,7 +69,7 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
 
   useEffect(() => {
     loadData();
-  }, [statusFilter, rarityFilter, searchQuery, modelQuery, sortBy]);
+  }, [statusFilter, searchQuery, modelQuery, sortBy]);
 
   // Overall collection stats
   const totalCount = liveries.length;
@@ -91,42 +84,6 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
       skinId: item.skin_id,
       planes: item.aircraft,
     });
-  };
-
-  const getRarityBadge = (rarity: number | null) => {
-    if (rarity === 4) {
-      return (
-        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#FFAD00]/15 border border-[#E8A800]/30 text-[#9E7600] flex items-center gap-1 shadow-sm shadow-[#FFAD00]/20">
-          <Sparkles className="w-2.5 h-2.5" /> R4 Legendary
-        </span>
-      );
-    }
-    if (rarity === 3) {
-      return (
-        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#7C5CBF]/15 border border-[#7C5CBF]/30 text-[#7C5CBF]">
-          R3 Epic
-        </span>
-      );
-    }
-    if (rarity === 2) {
-      return (
-        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#05164D]/15 border border-[#05164D]/30 text-[#1D6FB8]">
-          R2 Rare
-        </span>
-      );
-    }
-    if (rarity === 1) {
-      return (
-        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#1E7E46]/15 border border-[#1E7E46]/30 text-[#1E7E46]">
-          R1 Common
-        </span>
-      );
-    }
-    return (
-      <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#F1EEE6] border border-[#CFC9BA] text-[#8B877C]">
-        Special Event
-      </span>
-    );
   };
 
   return (
@@ -197,7 +154,7 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
 
         {/* Filter Toolbar */}
         <div className="bg-[#FFFFFF]/60 backdrop-blur border border-[#E5E1D6]/80 rounded-xl p-3 space-y-3">
-          {/* Row 1: Status & Rarity Pills */}
+          {/* Row 1: Status Pills */}
           <div className="flex flex-wrap items-center gap-3 justify-between">
             {/* Status */}
             <div className="flex items-center gap-1.5">
@@ -233,39 +190,6 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
                 <XCircle className="w-3 h-3" /> Missing / Unowned
               </button>
             </div>
-
-            {/* Rarity */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-mono font-bold text-[#8B877C] uppercase mr-1">Rarity:</span>
-              <button
-                onClick={() => setRarityFilter(null)}
-                className={`px-2.5 py-1 rounded-full text-xs font-mono transition ${
-                  rarityFilter === null
-                    ? "bg-[#05164D]/20 text-[#1D6FB8] border border-[#05164D]/40 font-bold"
-                    : "bg-[#F8F6F1] border border-[#E5E1D6] text-[#8B877C] hover:text-[#0A1E3C]"
-                }`}
-              >
-                All
-              </button>
-              {[
-                { r: 4, label: "R4 ★★★★", color: "text-[#9E7600]" },
-                { r: 3, label: "R3 ★★★", color: "text-[#7C5CBF]" },
-                { r: 2, label: "R2 ★★", color: "text-[#1D6FB8]" },
-                { r: 1, label: "R1 ★", color: "text-[#1E7E46]" },
-              ].map(({ r, label, color }) => (
-                <button
-                  key={r}
-                  onClick={() => setRarityFilter(r)}
-                  className={`px-2.5 py-1 rounded-full text-xs font-mono transition ${
-                    rarityFilter === r
-                      ? "bg-[#05164D] border border-[#05164D] text-white font-bold"
-                      : `bg-[#F8F6F1] border border-[#E5E1D6] ${color} hover:bg-[#F1EEE6]`
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
           </div>
 
           {/* Row 2: Search and Sort */}
@@ -294,7 +218,6 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
               onChange={(e) => setSortBy(e.target.value as any)}
               className="px-3 py-1.5 bg-white/80 border border-[#E5E1D6] rounded-lg text-xs text-[#0A1E3C] font-mono focus:outline-none focus:border-[#05164D]"
             >
-              <option value="rarity">Sort: Rarity (High to Low)</option>
               <option value="owned_desc">Sort: Most Owned Planes</option>
               <option value="owned_asc">Sort: Least Owned Planes</option>
               <option value="name">Sort: Name (A-Z)</option>
@@ -303,7 +226,6 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
             <button
               onClick={() => {
                 setStatusFilter("all");
-                setRarityFilter(null);
                 setSearchQuery("");
                 setModelQuery("");
               }}
@@ -330,19 +252,10 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 pb-12">
             {liveries.map((item) => {
-              const rarityGlow =
-                item.rarity === 4
-                  ? "rarity-glow-4 border-[#E8A800]/40"
-                  : item.rarity === 3
-                  ? "rarity-glow-3 border-[#7C5CBF]/40"
-                  : item.rarity === 2
-                  ? "rarity-glow-2 border-[#05164D]/40"
-                  : "border-[#E5E1D6]/80";
-
               return (
                 <div
                   key={item.skin_id}
-                  className={`bg-[#FFFFFF]/90 backdrop-blur rounded-xl border p-4 flex flex-col justify-between gap-3.5 transition-all duration-200 hover:-translate-y-1 hover:shadow-xl ${rarityGlow}`}
+                  className="bg-[#FFFFFF]/90 backdrop-blur rounded-xl border border-[#E5E1D6]/80 p-4 flex flex-col justify-between gap-3.5 transition-all duration-200 hover:-translate-y-1 hover:shadow-xl"
                 >
                   {/* Image Box */}
                   <div className="relative w-full h-32 rounded-lg bg-white border border-[#E5E1D6]/80 flex items-center justify-center overflow-hidden p-2">
@@ -352,9 +265,6 @@ export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFlee
                       className="max-w-full max-h-full object-contain filter drop-shadow-md transition-transform duration-200 group-hover:scale-105"
                       loading="lazy"
                     />
-
-                    {/* Top Left Rarity */}
-                    <div className="absolute top-2 left-2">{getRarityBadge(item.rarity)}</div>
 
                     {/* Top Right Ownership Badge */}
                     <div className="absolute top-2 right-2">

@@ -10,7 +10,7 @@ Two output modes:
 Filters compose, so you can look at just the part you care about:
   code/skin_gallery.py --out /tmp/liveries
   code/skin_gallery.py --booster "South America" --embed /tmp/sa.html
-  code/skin_gallery.py --missing --rarity 4 --out /tmp/wanted
+  code/skin_gallery.py --missing --out /tmp/wanted
   code/skin_gallery.py --name sharky --embed /tmp/sharky.html
 """
 
@@ -26,7 +26,7 @@ import sys
 import db as _db
 
 QUERY = """
-SELECT o.skin_id, o.name, o.rarity, o.owned_aircraft, o.best_card_rate,
+SELECT o.skin_id, o.name, o.owned_aircraft, o.best_card_rate,
        o.boosters, i.png, i.byte_len
   FROM mobile_skin_overview o
   JOIN mobile_skin_images i ON i.skin_id = o.skin_id AND i.size = ?
@@ -39,9 +39,6 @@ def rows(conn, args):
     if args.booster:
         sql += " AND o.boosters LIKE ?"
         params.append(f"%{args.booster}%")
-    if args.rarity is not None:
-        sql += " AND o.rarity = ?"
-        params.append(args.rarity)
     if args.owned:
         sql += " AND o.owned_aircraft > 0"
     if args.missing:
@@ -50,8 +47,7 @@ def rows(conn, args):
         sql += " AND o.name LIKE ?"
         params.append(f"%{args.name}%")
     # rarest and least-owned first: that is the collector's reading order
-    sql += (" ORDER BY COALESCE(o.rarity,-1) DESC, o.owned_aircraft ASC,"
-            " o.name IS NULL, o.name")
+    sql += " ORDER BY o.owned_aircraft ASC, o.name IS NULL, o.name"
     if args.limit:
         sql += f" LIMIT {int(args.limit)}"
     return conn.execute(sql, params).fetchall()
@@ -93,11 +89,9 @@ q.addEventListener('input',()=>{const v=q.value.toLowerCase();
 
 
 def card_html(r, src):
-    skin_id, name, rarity, owned, rate, boosters, _, blen = r
+    skin_id, name, owned, rate, boosters, _, blen = r
     nm = html.escape(name or f"(unnamed skin {skin_id})")
     bits = [f"id {skin_id}"]
-    if rarity is not None:
-        bits.append(f'<span class="{"r4" if rarity == 4 else ""}">r{rarity}</span>')
     bits.append(f'<span class="own">{owned} in fleet</span>' if owned
                 else '<span class="none">not owned</span>')
     if rate:
@@ -119,7 +113,6 @@ def main() -> int:
     ap.add_argument("--embed", help="single self-contained .html")
     ap.add_argument("--size", default="big", choices=("medium", "big", "superBig"))
     ap.add_argument("--booster", help="only liveries dropped by this booster")
-    ap.add_argument("--rarity", type=int)
     ap.add_argument("--owned", action="store_true", help="only ones you fly")
     ap.add_argument("--missing", action="store_true", help="only ones you don't")
     ap.add_argument("--name", help="substring match on the livery name")

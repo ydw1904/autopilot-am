@@ -1368,15 +1368,14 @@ def shm_watch_add(skin_id: int, max_price: Optional[int] = None,
 
 @mcp.tool()
 def shm_watch_add_booster(booster_id: int, max_price: Optional[int] = None,
-                          min_rarity: Optional[int] = None,
                           include_manufacturer: bool = False) -> dict:
     """Watch every livery in a booster's drop table (the limited-time ones).
 
-    Reads the cached drop table, so run booster_sync.py first. `min_rarity`
-    trims it to the rarer cards; manufacturer paints are excluded by default.
+    Reads the cached drop table, so run booster_sync.py first.
+    Manufacturer paints are excluded by default.
     """
     sw, conn = _watch_db()
-    skins = sw.booster_skins(conn, booster_id, min_rarity, include_manufacturer)
+    skins = sw.booster_skins(conn, booster_id, include_manufacturer=include_manufacturer)
     if not skins:
         return {"ok": False, "error": f"no cached cards for booster {booster_id}",
                 "hint": "run code/booster_sync.py to pull the drop table first"}

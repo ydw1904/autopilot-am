@@ -124,7 +124,6 @@ SELECT s.skin_id,
        s.name,
        s.source,
        s.creator,
-       s.rarity,
        s.model_id,
        s.price_amcoins,
        s.sold,
@@ -155,7 +154,7 @@ _SKIN_SOURCE_BY_TYPE = {0: "manufacturer", 1: "playrion", 2: "market"}
 # leaves an existing table alone, so these need an explicit ALTER.
 _SKIN_COLUMNS = [
     ("picture_path", "TEXT"),   # CDN path, e.g. /common/images/.../foo.png
-    ("rarity", "INTEGER"),      # highest rarity seen for this livery in a booster
+    ("rarity", "INTEGER"),      # legacy, populated by API but unused in UI
     # Where the livery comes from, one of mobile_api.SKIN_SOURCE_*: the model's
     # own paint, an official Playrion livery, or a player-designed one sold on
     # the livery market. The duty free reports it per shop bucket, the SHM per
@@ -228,8 +227,6 @@ class MobileStore:
                     source=None, price_amcoins=None, sold=None, owned=None):
         if skin_id is None:
             return
-        # rarity takes the MAX seen: the same livery can appear in several
-        # boosters, and the highest tier it is offered at is the useful one.
         # `source` is the one field a later read may not downgrade: the SHM
         # reports a manufacturer paint as such, while the duty free lists the
         # same livery in its Playrion bucket, and the SHM answer is the finer

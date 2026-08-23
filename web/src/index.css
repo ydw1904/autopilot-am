@@ -36,23 +36,3 @@ body {
   background: #8B877C;
 }
 
-/* Rarity card accents — soft tinted lift instead of neon glow */
-.rarity-glow-4 {
-  box-shadow: 0 8px 24px -8px rgba(255, 173, 0, 0.35);
-  border-color: rgba(230, 167, 0, 0.55) !important;
-}
-
-.rarity-glow-3 {
-  box-shadow: 0 8px 24px -8px rgba(124, 92, 191, 0.28);
-  border-color: rgba(124, 92, 191, 0.45) !important;
-}
-
-.rarity-glow-2 {
-  box-shadow: 0 8px 24px -8px rgba(29, 111, 184, 0.25);
-  border-color: rgba(29, 111, 184, 0.40) !important;
-}
-
-.rarity-glow-1 {
-  box-shadow: 0 8px 24px -8px rgba(30, 126, 70, 0.22);
-  border-color: rgba(30, 126, 70, 0.38) !important;
-}

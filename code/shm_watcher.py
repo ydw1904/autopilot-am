@@ -210,7 +210,7 @@ def active_watches(conn) -> list[Watch]:
                   r["want"], r["bought"]) for r in rows]
 
 
-def booster_skins(conn, booster_id: int, rarity: Optional[int] = None,
+def booster_skins(conn, booster_id: int,
                   include_manufacturer: bool = False) -> list[tuple[int, str]]:
     """(skin_id, label) for the liveries in a booster's drop table."""
     sql = """SELECT c.skin_id, COALESCE(s.name, c.label, '') AS name
@@ -218,9 +218,6 @@ def booster_skins(conn, booster_id: int, rarity: Optional[int] = None,
                LEFT JOIN mobile_skins s ON s.skin_id = c.skin_id
               WHERE c.booster_id=? AND c.skin_id IS NOT NULL"""
     args: list[Any] = [booster_id]
-    if rarity is not None:
-        sql += " AND c.rarity >= ?"
-        args.append(rarity)
     out = []
     for r in conn.execute(sql, args).fetchall():
         name = r["name"] or ""
@@ -578,7 +575,7 @@ def cmd_add(args) -> int:
 
 def cmd_add_booster(args) -> int:
     conn = open_db()
-    skins = booster_skins(conn, args.booster_id, args.min_rarity,
+    skins = booster_skins(conn, args.booster_id,
                           args.include_manufacturer)
     if not skins:
         print(f"no cards for booster {args.booster_id} — run booster_sync.py first",
@@ -709,8 +706,6 @@ def main() -> int:
     b.add_argument("booster_id", type=int)
     b.add_argument("--max", type=parse_money)
     b.add_argument("--want", type=int, default=1)
-    b.add_argument("--min-rarity", type=int, default=None,
-                   help="only cards at this rarity or above")
     b.add_argument("--include-manufacturer", action="store_true",
                    help="also watch the plain manufacturer paints")
     b.set_defaults(func=cmd_add_booster)

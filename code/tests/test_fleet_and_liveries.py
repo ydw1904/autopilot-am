@@ -46,10 +46,10 @@ def fleet_conn(tmp_path, monkeypatch):
 
     # Insert sample skins into mobile_skins
     c.execute("""
-        INSERT INTO mobile_skins (skin_id, model_id, name, picture_path, rarity)
-        VALUES (2, 2, 'A330-300 - (Manufacturer livery)', '/common/images/Aircrafts/skins/big/a330-300.png', 3),
-               (4638064, 30, '737-400 - Challenge Turkish Airways', '/common/images/Aircrafts/skins/big/737-400-challenge-turkish-airways.png', 4),
-               (4621811, 24, 'A321XLR - Challenge Project Blossom', '/common/images/Aircrafts/skins/big/a321xlr-challenge-project-blossom.png', 4);
+        INSERT INTO mobile_skins (skin_id, model_id, name, picture_path)
+        VALUES (2, 2, 'A330-300 - (Manufacturer livery)', '/common/images/Aircrafts/skins/big/a330-300.png'),
+               (4638064, 30, '737-400 - Challenge Turkish Airways', '/common/images/Aircrafts/skins/big/737-400-challenge-turkish-airways.png'),
+               (4621811, 24, 'A321XLR - Challenge Project Blossom', '/common/images/Aircrafts/skins/big/a321xlr-challenge-project-blossom.png');
     """)
 
     # Insert dummy image blob for skin 4638064

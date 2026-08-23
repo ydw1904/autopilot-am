@@ -15,7 +15,6 @@ export interface FleetAircraft {
   gross_price?: number;
   icao_code?: string;
   skin_name?: string | null;
-  skin_rarity?: number | null;
   skin_picture_path?: string | null;
   seats_eco?: number | null;
   seats_bus?: number | null;
@@ -35,7 +34,6 @@ export interface LiveryPlane {
 export interface LiveryItem {
   skin_id: number;
   name: string;
-  rarity: number | null;
   model_id: number | null;
   picture_path: string | null;
   boosters: string | null;

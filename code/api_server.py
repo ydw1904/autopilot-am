@@ -101,7 +101,6 @@ def list_fleet(
 @app.get("/api/liveries")
 def list_liveries(
     status_filter: Optional[str] = Query(None, description="'owned', 'unowned', or None"),
-    rarity: Optional[int] = Query(None),
     model_query: Optional[str] = Query(None),
     search_query: Optional[str] = Query(None),
 ):
@@ -109,7 +108,6 @@ def list_liveries(
     return get_livery_collection(
         include_manufacturer=False,
         status_filter=status_filter,
-        rarity=rarity,
         model_query=model_query,
         search_query=search_query,
     )

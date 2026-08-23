@@ -722,7 +722,7 @@ def get_fleet_aircraft(
         SELECT f.aircraft_id, f.name, f.model, f.utilization, f.hub_iata, f.updated_at,
                f.skin_id, f.skin_img,
                a.category, a.speed_kmh, a.range_km, a.max_pax, a.max_tonnage, a.gross_price, a.icao_code,
-               s.name AS skin_name, s.rarity AS skin_rarity, s.picture_path AS skin_picture_path,
+               s.name AS skin_name, s.picture_path AS skin_picture_path,
                m.seats_eco, m.seats_bus, m.seats_first, m.payload_t, m.wear
         FROM fleet f
         LEFT JOIN aircraft a ON a.model = f.model
@@ -861,7 +861,6 @@ def get_fleet_summary_stats() -> dict:
 def get_livery_collection(
     include_manufacturer: bool = False,
     status_filter: str | None = None,
-    rarity: int | None = None,
     model_query: str | None = None,
     search_query: str | None = None,
 ) -> list[dict]:
@@ -869,7 +868,7 @@ def get_livery_collection(
     indicating ownership and listing owned aircraft names."""
     db = get_db()
     sql = """
-        SELECT s.skin_id, s.name, s.rarity, s.model_id, s.picture_path,
+        SELECT s.skin_id, s.name, s.model_id, s.picture_path,
                (SELECT GROUP_CONCAT(DISTINCT b.name)
                   FROM mobile_booster_cards c
                   JOIN mobile_boosters b ON b.booster_id = c.booster_id
@@ -888,10 +887,6 @@ def get_livery_collection(
             OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
         )"""
 
-    if rarity is not None:
-        sql += " AND s.rarity = ?"
-        args.append(int(rarity))
-
     if model_query:
         q = model_query.strip().lower()
         if q:
@@ -904,7 +899,7 @@ def get_livery_collection(
             sql += " AND (LOWER(s.name) LIKE ? OR LOWER(COALESCE(boosters, '')) LIKE ?)"
             args.extend([f"%{q}%", f"%{q}%"])
 
-    sql += " ORDER BY (fleet_count + mobile_count) DESC, COALESCE(s.rarity, -1) DESC, s.name ASC"
+    sql += " ORDER BY (fleet_count + mobile_count) DESC, s.name ASC"
     rows = db.execute(sql, args).fetchall()
 
     # Pre-fetch all aircraft names by skin_id to avoid N+1 queries
