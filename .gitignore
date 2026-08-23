@@ -47,6 +47,13 @@ CHANGELOG.md
 DESIGN.md
 tickets/
 
+# Node / frontend build output (web/ is built with bun)
+node_modules/
+web/dist/
+
+# Local scratch space (probes, captures, one-off scripts)
+scratchpad/
+
 # Decompiled game APK (429M, local reference only)
 apk/
 
