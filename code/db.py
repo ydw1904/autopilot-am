@@ -1,5 +1,7 @@
 """Shared SQLite layer for the Airlines Manager tools (circuits, routes, fleet)."""
 
+import datetime
+import hashlib
 import sqlite3
 import os
 import threading
@@ -703,6 +705,34 @@ def get_stored_aircraft(min_util=0, max_util=0, hubs=None, models=None, name_que
     return [dict(r) for r in rows]
 
 
+# Haul classes follow the game's own split of the aircraft shop, which
+# aircraft_buyer.CATEGORY_TO_HAUL already encodes: cat 1-3 short, 4-6 medium,
+# 7-10 long. Cargo cuts across all three (a.type = 'Cargo'), so it is a peer
+# tab rather than a fourth haul. Models missing from the `aircraft` table get
+# NULL and stay visible only under "all".
+HAUL_CASE_SQL = """
+    CASE
+        WHEN a.category BETWEEN 1 AND 3  THEN 'short'
+        WHEN a.category BETWEEN 4 AND 6  THEN 'medium'
+        WHEN a.category BETWEEN 7 AND 10 THEN 'long'
+    END
+"""
+
+IS_CARGO_SQL = "(CASE WHEN a.type = 'Cargo' THEN 1 ELSE 0 END)"
+
+
+def haul_filter_sql(haul):
+    """SQL fragment for a haul tab. Returns '' for 'all'/None (no filtering)."""
+    h = (haul or "all").strip().lower()
+    if h in ("", "all"):
+        return ""
+    if h == "cargo":
+        return f" AND {IS_CARGO_SQL} = 1"
+    if h in ("short", "medium", "long"):
+        return f" AND {HAUL_CASE_SQL.strip()} = '{h}'"
+    return ""
+
+
 def get_fleet_aircraft(
     hubs=None,
     models=None,
@@ -712,6 +742,7 @@ def get_fleet_aircraft(
     model_query=None,
     skin_filter=None,
     skin_id=None,
+    haul=None,
     sort_by="name",
     limit=None,
     offset=None,
@@ -722,6 +753,9 @@ def get_fleet_aircraft(
         SELECT f.aircraft_id, f.name, f.model, f.utilization, f.hub_iata, f.updated_at,
                f.skin_id, f.skin_img,
                a.category, a.speed_kmh, a.range_km, a.max_pax, a.max_tonnage, a.gross_price, a.icao_code,
+               a.type AS ac_type,
+               """ + HAUL_CASE_SQL + """ AS haul,
+               """ + IS_CARGO_SQL + """ AS is_cargo,
                s.name AS skin_name, s.picture_path AS skin_picture_path,
                m.seats_eco, m.seats_bus, m.seats_first, m.payload_t, m.wear
         FROM fleet f
@@ -768,6 +802,8 @@ def get_fleet_aircraft(
             sql += " AND (LOWER(f.model) LIKE ? OR LOWER(COALESCE(a.icao_code, '')) LIKE ?)"
             args.extend([f"%{q}%", f"%{q}%"])
 
+    sql += haul_filter_sql(haul)
+
     if skin_id is not None:
         sql += " AND f.skin_id = ?"
         args.append(int(skin_id))
@@ -807,6 +843,46 @@ def get_fleet_aircraft(
     return [dict(r) for r in rows]
 
 
+# The `hubs` catalog carries country_code, but only for hubs the game still
+# lists for sale — most owned hubs are missing from it, so this fills the gaps.
+# Codes are ISO 3166-1 alpha-2; the UI turns them into flags, so no emoji here.
+HUB_COUNTRY_FALLBACK = {
+    "AKU": "cn", "CDG": "fr", "CGK": "id", "CPT": "za", "DME": "ru",
+    "FRA": "de", "GIG": "br", "GRU": "br", "GYD": "az", "HKG": "hk",
+    "HND": "jp", "JNB": "za", "JRO": "tz", "LAX": "us", "LHR": "gb",
+    "MPM": "mz", "ORY": "fr", "PBM": "sr", "PEK": "cn", "PER": "au",
+    "RVN": "fi", "SYD": "au", "ZRH": "ch",
+    # Common hubs not owned yet, so a new hub usually still gets a flag.
+    "AMS": "nl", "ARN": "se", "ATH": "gr", "BKK": "th", "BOM": "in",
+    "BRU": "be", "CAI": "eg", "CPH": "dk", "DEL": "in", "DUB": "ie",
+    "DXB": "ae", "EZE": "ar", "FCO": "it", "HEL": "fi", "ICN": "kr",
+    "IST": "tr", "JFK": "us", "LIS": "pt", "LOS": "ng", "MAD": "es",
+    "MEX": "mx", "NBO": "ke", "ORD": "us", "OSL": "no", "PRG": "cz",
+    "SIN": "sg", "VIE": "at", "WAW": "pl", "YYZ": "ca",
+}
+
+
+def get_hub_country_code(iata: str) -> str | None:
+    """ISO 3166-1 alpha-2 code for a hub, from the hubs catalog or the fallback."""
+    code = (iata or "").upper().strip()
+    if not code:
+        return None
+    db = get_db()
+    # The hubs catalog is populated by a separate scrape, so a fresh DB may not
+    # have the table at all — fall back rather than blow up.
+    has_table = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hubs' LIMIT 1"
+    ).fetchone()
+    if has_table:
+        row = db.execute(
+            "SELECT country_code FROM hubs WHERE UPPER(iata) = ? AND country_code IS NOT NULL LIMIT 1",
+            (code,),
+        ).fetchone()
+        if row and row["country_code"]:
+            return row["country_code"].lower()
+    return HUB_COUNTRY_FALLBACK.get(code)
+
+
 def get_fleet_summary_stats() -> dict:
     """Return aggregated fleet statistics for overview KPIs."""
     db = get_db()
@@ -828,6 +904,8 @@ def get_fleet_summary_stats() -> dict:
         "FROM fleet GROUP BY hub_iata ORDER BY count DESC"
     ).fetchall()
     hubs = [dict(r) for r in hub_rows]
+    for h in hubs:
+        h["country_code"] = get_hub_country_code(h["hub_iata"])
 
     model_rows = db.execute(
         "SELECT model, COUNT(*) as count, "
@@ -847,6 +925,27 @@ def get_fleet_summary_stats() -> dict:
     """).fetchone()
     special_skin_count = special_skin_row["cnt"] if special_skin_row else 0
 
+    # Counts behind the haul tabs. Cargo overlaps the haul buckets (a cargo
+    # plane still has a category), and "unknown" is fleet models with no row
+    # in the `aircraft` table, so these do not sum to `total`.
+    haul_row = db.execute(f"""
+        SELECT
+            SUM(CASE WHEN {HAUL_CASE_SQL} = 'short'  THEN 1 ELSE 0 END) AS short,
+            SUM(CASE WHEN {HAUL_CASE_SQL} = 'medium' THEN 1 ELSE 0 END) AS medium,
+            SUM(CASE WHEN {HAUL_CASE_SQL} = 'long'   THEN 1 ELSE 0 END) AS long,
+            SUM({IS_CARGO_SQL}) AS cargo,
+            SUM(CASE WHEN {HAUL_CASE_SQL} IS NULL THEN 1 ELSE 0 END) AS unknown
+        FROM fleet f LEFT JOIN aircraft a ON a.model = f.model
+    """).fetchone()
+    hauls = {
+        "all": total,
+        "short": haul_row["short"] or 0,
+        "medium": haul_row["medium"] or 0,
+        "long": haul_row["long"] or 0,
+        "cargo": haul_row["cargo"] or 0,
+        "unknown": haul_row["unknown"] or 0,
+    }
+
     return {
         "total": total,
         "idle": idle,
@@ -855,7 +954,48 @@ def get_fleet_summary_stats() -> dict:
         "hubs": hubs,
         "models": models,
         "special_skin_count": special_skin_count,
+        "hauls": hauls,
     }
+
+
+def get_daily_fleet_liveries(count: int = 3, day: str | None = None) -> list[dict]:
+    """Pick `count` special liveries flown by the fleet, rotating once per day.
+
+    Deterministic for a given day: the order is a hash of "<day>:<skin_id>", so
+    every client that asks on the same date gets the same three, and the set
+    changes at midnight without any stored state. Manufacturer liveries are
+    excluded — they are not a collection item.
+    """
+    db = get_db()
+    day = day or datetime.date.today().isoformat()
+    rows = db.execute("""
+        SELECT s.skin_id, s.name, s.picture_path,
+               COUNT(*) AS fleet_count,
+               (SELECT COUNT(*) FROM mobile_skin_images i WHERE i.skin_id = s.skin_id) AS has_img
+        FROM fleet f
+        JOIN mobile_skins s ON s.skin_id = f.skin_id
+        WHERE NOT (
+            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
+            OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
+        )
+        GROUP BY s.skin_id
+    """).fetchall()
+
+    picks = sorted(
+        (dict(r) for r in rows),
+        key=lambda r: hashlib.sha256(f"{day}:{r['skin_id']}".encode()).hexdigest(),
+    )[:max(0, int(count))]
+
+    for item in picks:
+        plane = db.execute(
+            "SELECT aircraft_id, name, model, hub_iata, utilization "
+            "FROM fleet WHERE skin_id = ? ORDER BY name ASC LIMIT 1",
+            (item["skin_id"],),
+        ).fetchone()
+        item["day"] = day
+        item["sample_aircraft"] = dict(plane) if plane else None
+    return picks
 
 
 def get_livery_collection(

@@ -1,4 +1,4 @@
-import { FleetAircraft, FleetStats, LiveryItem } from "./types";
+import { DailyLivery, FleetAircraft, FleetStats, HaulTab, LiveryItem } from "./types";
 
 const BASE_URL = "";
 
@@ -17,6 +17,7 @@ export interface FleetParams {
   model_query?: string;
   skin_filter?: "special" | "manufacturer" | "all";
   skin_id?: number | null;
+  haul?: HaulTab;
   sort_by?: string;
   limit?: number;
   offset?: number;
@@ -35,6 +36,7 @@ export async function fetchFleet(params: FleetParams = {}): Promise<FleetAircraf
     q.set("skin_filter", params.skin_filter);
   }
   if (params.skin_id) q.set("skin_id", params.skin_id.toString());
+  if (params.haul && params.haul !== "all") q.set("haul", params.haul);
   if (params.sort_by) q.set("sort_by", params.sort_by);
   if (params.limit) q.set("limit", params.limit.toString());
   if (params.offset) q.set("offset", params.offset.toString());
@@ -60,6 +62,12 @@ export async function fetchLiveries(params: LiveryParams = {}): Promise<LiveryIt
 
   const res = await fetch(`${BASE_URL}/api/liveries?${q.toString()}`);
   if (!res.ok) throw new Error("Failed to load liveries");
+  return res.json();
+}
+
+export async function fetchDailyLiveries(count = 3): Promise<DailyLivery[]> {
+  const res = await fetch(`${BASE_URL}/api/liveries/daily?count=${count}`);
+  if (!res.ok) throw new Error("Failed to load liveries of the day");
   return res.json();
 }
 

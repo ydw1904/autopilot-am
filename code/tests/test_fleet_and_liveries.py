@@ -121,3 +121,112 @@ def test_get_skin_image_bytes(fleet_conn):
 
     missing = dbmod.get_skin_image_bytes(999999)
     assert missing is None
+
+
+def test_haul_classification_and_filters(fleet_conn):
+    # A freighter, so the cargo tab has something that is also a haul plane.
+    fleet_conn.execute(
+        "INSERT INTO aircraft (model, category, range_km, max_pax, max_tonnage, type, icao_code) "
+        "VALUES ('747-400F', 8, 8230, 0, 124.0, 'Cargo', 'B744')"
+    )
+    dbmod.upsert_fleet([
+        {"id": 105, "name": "FRA-CARGO-01", "model": "747-400F", "util": 50.0,
+         "hub": "FRA", "skin_id": None, "skin_img": None},
+    ])
+
+    by_name = {p["name"]: p for p in dbmod.get_fleet_aircraft()}
+    assert by_name["FRA-C001-001"]["haul"] == "medium"   # A330-300, cat 6
+    assert by_name["MPM-IDLE-01"]["haul"] == "short"     # 747-200B, cat 3 in fixture
+    assert by_name["FRA-CARGO-01"]["haul"] == "long"     # cat 8
+    assert by_name["FRA-CARGO-01"]["is_cargo"] == 1
+    assert by_name["FRA-C001-001"]["is_cargo"] == 0
+
+    assert len(dbmod.get_fleet_aircraft(haul="all")) == 5
+    assert len(dbmod.get_fleet_aircraft(haul="short")) == 2
+    assert len(dbmod.get_fleet_aircraft(haul="medium")) == 2
+    assert len(dbmod.get_fleet_aircraft(haul="long")) == 1
+    cargo = dbmod.get_fleet_aircraft(haul="cargo")
+    assert [p["name"] for p in cargo] == ["FRA-CARGO-01"]
+
+    # Haul stacks with the other filters rather than replacing them.
+    assert len(dbmod.get_fleet_aircraft(haul="short", hubs=["MPM"])) == 2
+    assert len(dbmod.get_fleet_aircraft(haul="short", hubs=["FRA"])) == 0
+
+    hauls = dbmod.get_fleet_summary_stats()["hauls"]
+    assert hauls == {"all": 5, "short": 2, "medium": 2, "long": 1, "cargo": 1, "unknown": 0}
+
+
+def test_get_fleet_aircraft_unknown_model_has_no_haul(fleet_conn):
+    dbmod.upsert_fleet([
+        {"id": 106, "name": "FRA-MYSTERY-01", "model": "Not-In-Specs", "util": 0.0,
+         "hub": "FRA", "skin_id": None, "skin_img": None},
+    ])
+    mystery = next(p for p in dbmod.get_fleet_aircraft() if p["name"] == "FRA-MYSTERY-01")
+    assert mystery["haul"] is None
+    assert mystery["is_cargo"] == 0
+    # Only reachable from the "all" tab.
+    assert dbmod.get_fleet_summary_stats()["hauls"]["unknown"] == 1
+    for tab in ("short", "medium", "long", "cargo"):
+        assert all(p["name"] != "FRA-MYSTERY-01" for p in dbmod.get_fleet_aircraft(haul=tab))
+
+
+def test_daily_fleet_liveries(fleet_conn):
+    picks = dbmod.get_daily_fleet_liveries(count=3, day="2026-08-23")
+    # Only the Turkish livery is both special and actually flown by the fleet.
+    assert [p["skin_id"] for p in picks] == [4638064]
+    item = picks[0]
+    assert item["fleet_count"] == 2
+    assert item["day"] == "2026-08-23"
+    assert item["sample_aircraft"]["name"] == "MPM-C002-001"
+
+    # Same day in, same order out; the day is the only thing that shuffles it.
+    assert dbmod.get_daily_fleet_liveries(count=3, day="2026-08-23") == picks
+
+
+def test_daily_fleet_liveries_rotate_by_day(fleet_conn):
+    fleet_conn.execute("""
+        INSERT INTO mobile_skins (skin_id, model_id, name, picture_path)
+        VALUES (5000001, 2, 'A330-300 - Retro One', '/skins/big/a330-300-retro-one.png'),
+               (5000002, 2, 'A330-300 - Retro Two', '/skins/big/a330-300-retro-two.png'),
+               (5000003, 2, 'A330-300 - Retro Three', '/skins/big/a330-300-retro-three.png')
+    """)
+    dbmod.upsert_fleet([
+        {"id": 201, "name": "FRA-R1", "model": "A330-300", "util": 10.0, "hub": "FRA",
+         "skin_id": 5000001, "skin_img": "a330-300-retro-one.png"},
+        {"id": 202, "name": "FRA-R2", "model": "A330-300", "util": 10.0, "hub": "FRA",
+         "skin_id": 5000002, "skin_img": "a330-300-retro-two.png"},
+        {"id": 203, "name": "FRA-R3", "model": "A330-300", "util": 10.0, "hub": "FRA",
+         "skin_id": 5000003, "skin_img": "a330-300-retro-three.png"},
+    ])
+
+    days = {d: [p["skin_id"] for p in dbmod.get_daily_fleet_liveries(3, day=d)]
+            for d in ("2026-08-23", "2026-08-24", "2026-08-25")}
+    for picked in days.values():
+        assert len(picked) == 3
+        assert len(set(picked)) == 3
+    assert len({tuple(v) for v in days.values()}) > 1, "the pick should change across days"
+
+
+def test_hub_country_codes(fleet_conn):
+    # No hubs catalog in this fixture DB: the fallback map still answers, and
+    # the missing table must not raise.
+    assert dbmod.get_hub_country_code("FRA") == "de"
+    assert dbmod.get_hub_country_code("mpm") == "mz"
+    assert dbmod.get_hub_country_code("ZZZ") is None
+
+    stats = dbmod.get_fleet_summary_stats()
+    assert {h["hub_iata"]: h["country_code"] for h in stats["hubs"]} == {"FRA": "de", "MPM": "mz"}
+
+
+def test_hub_country_code_prefers_the_hubs_catalog(fleet_conn):
+    fleet_conn.execute(
+        "CREATE TABLE hubs (hub_id INTEGER PRIMARY KEY, iata TEXT, name TEXT, "
+        "country_code TEXT, category INTEGER, categories_accepted TEXT, price INTEGER, airport_tax INTEGER)"
+    )
+    fleet_conn.execute(
+        "INSERT INTO hubs (hub_id, iata, name, country_code) VALUES (1, 'MPM', 'Maputo', 'MZ'), "
+        "(2, 'XXX', 'Somewhere', 'pt')"
+    )
+    assert dbmod.get_hub_country_code("XXX") == "pt"   # catalog-only hub
+    assert dbmod.get_hub_country_code("MPM") == "mz"   # catalog wins, normalized
+    assert dbmod.get_hub_country_code("FRA") == "de"   # not in catalog -> fallback

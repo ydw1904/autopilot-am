@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import (
     get_db,
     get_fleet_aircraft,
+    get_daily_fleet_liveries,
     get_fleet_summary_stats,
     get_livery_collection,
     get_skin_image_bytes,
@@ -75,6 +76,7 @@ def list_fleet(
     model_query: Optional[str] = Query(None),
     skin_filter: Optional[str] = Query(None),
     skin_id: Optional[int] = Query(None),
+    haul: Optional[str] = Query(None, description="short | medium | long | cargo | all"),
     sort_by: Optional[str] = Query("name"),
     limit: Optional[int] = Query(None),
     offset: Optional[int] = Query(None),
@@ -92,6 +94,7 @@ def list_fleet(
         model_query=model_query,
         skin_filter=skin_filter,
         skin_id=skin_id,
+        haul=haul,
         sort_by=sort_by or "name",
         limit=limit,
         offset=offset,
@@ -111,6 +114,12 @@ def list_liveries(
         model_query=model_query,
         search_query=search_query,
     )
+
+
+@app.get("/api/liveries/daily")
+def liveries_of_the_day(count: int = Query(3, ge=1, le=12)):
+    """Return today's rotating pick of special liveries flown by the fleet."""
+    return get_daily_fleet_liveries(count=count)
 
 
 @app.get("/api/skin_image/{skin_id}")

@@ -21,6 +21,29 @@ export interface FleetAircraft {
   seats_first?: number | null;
   payload_t?: number | null;
   wear?: number | null;
+  ac_type?: string | null;
+  haul?: HaulClass | null;
+  is_cargo?: number;
+}
+
+export type HaulClass = "short" | "medium" | "long";
+
+export type HaulTab = HaulClass | "all" | "cargo";
+
+export interface DailyLivery {
+  skin_id: number;
+  name: string;
+  picture_path: string | null;
+  fleet_count: number;
+  has_img: number;
+  day: string;
+  sample_aircraft: {
+    aircraft_id: number;
+    name: string;
+    model: string;
+    hub_iata: string;
+    utilization: number;
+  } | null;
 }
 
 export interface LiveryPlane {
@@ -50,12 +73,22 @@ export interface HubCount {
   hub_iata: string;
   count: number;
   idle: number;
+  country_code?: string | null;
 }
 
 export interface ModelCount {
   model: string;
   count: number;
   idle: number;
+}
+
+export interface HaulCounts {
+  all: number;
+  short: number;
+  medium: number;
+  long: number;
+  cargo: number;
+  unknown: number;
 }
 
 export interface FleetStats {
@@ -66,4 +99,5 @@ export interface FleetStats {
   special_skin_count: number;
   hubs: HubCount[];
   models: ModelCount[];
+  hauls?: HaulCounts;
 }
