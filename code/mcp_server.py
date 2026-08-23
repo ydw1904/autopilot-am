@@ -1306,14 +1306,19 @@ def shm_market(contains: str = "", model_id: Optional[int] = None,
 
     Filter by skin/model name substring (contains) or model id. pool_only limits
     to your star bracket. Read-only — use for arbitrage price discovery.
+
+    The endpoint caps at 100 auctions out of a market in the thousands, so an
+    unfiltered read is a sample. `model_id` is applied SERVER-side and is the
+    only way to get a complete picture: under the cap it returns every live
+    listing of that model. `truncated` says whether the read hit the cap.
     """
     def run(cl):
-        aucs = cl.auctions(pool_only=pool_only)
+        from mobile_api import AUCTION_PAGE_LIMIT
+        aucs = cl.auctions(pool_only=pool_only, model_id=model_id)
+        truncated = len(aucs) >= AUCTION_PAGE_LIMIT
         rows = []
         for a in aucs:
             ac = a["aircraft"]
-            if model_id is not None and ac.get("aircraftListId") != model_id:
-                continue
             if contains and contains.lower() not in ac["skin"]["name"].lower():
                 continue
             rows.append(a)
@@ -1325,12 +1330,108 @@ def shm_market(contains: str = "", model_id: Optional[int] = None,
                      "current": a["currentPrice"], "bin": a["binPrice"],
                      "time_left_s": a["timeLeft"], "bids": a.get("countParticipant", 0)}
                     for a in rows[:limit]]
-        return {"ok": True, "matched": len(rows),
+        return {"ok": True, "matched": len(rows), "truncated": truncated,
                 "current_price": {"min": cur[0], "median": cur[len(cur)//2],
                                   "max": cur[-1]} if cur else None,
                 "bin_price": {"min": bins[0], "median": bins[len(bins)//2],
                               "max": bins[-1]} if bins else None,
                 "listings": listings}
+    return _mobile_call(run)
+
+
+# ── SHM livery watcher ──────────────────────────────────────────────────────
+# Standing orders for specific liveries: shm_watcher.py holds the watchlist and
+# the buy logic, these just expose it. Buying stays off unless dry_run=False.
+def _watch_db():
+    import shm_watcher
+    return shm_watcher, shm_watcher.open_db()
+
+
+@mcp.tool()
+def shm_watch_add(skin_id: int, max_price: Optional[int] = None,
+                  want: int = 1, label: Optional[str] = None) -> dict:
+    """Watch one livery on the second-hand market, to buy on sight.
+
+    `max_price` is the highest buy-now (binPrice) to accept — the number as it
+    shows on the market, before the purchase fee. Without one the watcher will
+    report the livery but refuse to buy it. The aircraft model is resolved from
+    the livery so the watcher can use the cheap server-side filter.
+    """
+    sw, conn = _watch_db()
+    w = sw.add_watch(conn, skin_id, max_price, want, "manual", label)
+    return {"ok": True, "skin_id": w.skin_id, "model_id": w.model_id,
+            "label": w.label, "max_price": w.max_price, "want": w.want,
+            "note": None if w.model_id else
+                    "no model id known for this livery — it can only be caught "
+                    "by the wide sweep, not the per-model filter"}
+
+
+@mcp.tool()
+def shm_watch_add_booster(booster_id: int, max_price: Optional[int] = None,
+                          min_rarity: Optional[int] = None,
+                          include_manufacturer: bool = False) -> dict:
+    """Watch every livery in a booster's drop table (the limited-time ones).
+
+    Reads the cached drop table, so run booster_sync.py first. `min_rarity`
+    trims it to the rarer cards; manufacturer paints are excluded by default.
+    """
+    sw, conn = _watch_db()
+    skins = sw.booster_skins(conn, booster_id, min_rarity, include_manufacturer)
+    if not skins:
+        return {"ok": False, "error": f"no cached cards for booster {booster_id}",
+                "hint": "run code/booster_sync.py to pull the drop table first"}
+    for skin_id, label in skins:
+        sw.add_watch(conn, skin_id, max_price, 1, f"booster:{booster_id}", label)
+    models = {w.model_id for w in sw.active_watches(conn) if w.model_id}
+    return {"ok": True, "added": len(skins), "models": len(models),
+            "requests_per_full_pass": len(models),
+            "liveries": [label for _, label in skins]}
+
+
+@mcp.tool()
+def shm_watch_list() -> dict:
+    """The livery watchlist, with what each one has been seen listed at."""
+    sw, conn = _watch_db()
+    rows = conn.execute("""
+        SELECT w.skin_id, w.model_id, w.label, w.max_price, w.want, w.bought,
+               w.active,
+               (SELECT MIN(s.bin_price) FROM shm_sightings s
+                 WHERE s.skin_id = w.skin_id AND s.bin_price > 0
+                   AND s.is_own = 0) AS cheapest_seen
+          FROM shm_watch w ORDER BY w.active DESC, w.model_id, w.skin_id
+    """).fetchall()
+    n, spend = sw.spent_today(conn)
+    return {"ok": True, "watching": [dict(r) for r in rows],
+            "today": {"buys": n, "spent": spend}}
+
+
+@mcp.tool()
+def shm_watch_remove(skin_id: int) -> dict:
+    """Stop watching a livery."""
+    sw, conn = _watch_db()
+    return {"ok": True, "removed": sw.remove_watch(conn, skin_id)}
+
+
+@mcp.tool()
+def shm_snipe(dry_run: bool = True, per_pass: int = 12,
+              daily_budget: Optional[int] = None, reserve_bids: int = 0,
+              pool_only: bool = False) -> dict:
+    """One watch pass: read the market, buy anything on the watchlist.
+
+    Buys at the listing's own buy-now price, cheapest first, and never places
+    an incremental bid — so it either takes a plane under the cap you set or
+    does nothing. Guarded by the per-livery cap, `daily_budget`, the game's own
+    `maxBidByDay`, and the account balance. Nothing is spent with dry_run.
+
+    `per_pass` models are polled per call (one request each) plus one wide
+    sweep; a longer watchlist rotates least-recently-checked first.
+    """
+    def run(cl):
+        sw, conn = _watch_db()
+        return sw.one_pass(cl, conn, arm=not dry_run, per_pass=per_pass,
+                           sweep=True, pool_only=pool_only,
+                           reserve_bids=reserve_bids, daily_budget=daily_budget,
+                           verbose=False)
     return _mobile_call(run)
 
 
