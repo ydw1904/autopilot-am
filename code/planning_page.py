@@ -127,6 +127,13 @@ def _load_hub_json(cdp, hub_iata=None):
     return data if isinstance(data, dict) else None
 
 
+def _skin_img(picture):
+    """Livery filename from a picture URL, without the CDN cache-buster."""
+    if not picture:
+        return ""
+    return picture.split("?")[0].rsplit("/", 1)[-1]
+
+
 def get_aircraft_at_hub(cdp, hub_iata=None):
     """
     Extract all aircraft at a hub from the planning page.
@@ -134,15 +141,19 @@ def get_aircraft_at_hub(cdp, hub_iata=None):
     Pass ``hub_iata`` to read the hub's data directly (reliable); without it
     the currently UI-selected hub is used, which can be wrong on this page.
 
-    Returns list of dicts: [{id: int, name: str, model: str, util: float}, ...]
-    The `id` is the game's aircraftId (from aircraftId_XXXXXXX).
+    Returns list of dicts:
+    [{id: int, name: str, model: str, util: float, skin_img: str}, ...]
+    The `id` is the game's aircraftId (from aircraftId_XXXXXXX). `skin_img` is
+    the livery's picture filename — the only livery signal this page carries;
+    db.resolve_skin_ids turns it into a numeric skin id.
     """
     payload = _load_hub_json(cdp, hub_iata)
     if payload and isinstance(payload.get("aircraftDataArray"), list):
         return [
             {"id": a["id"], "name": a.get("name") or "",
              "model": a.get("aircraftListName") or "",
-             "util": a.get("utilizationPercentage") or 0}
+             "util": a.get("utilizationPercentage") or 0,
+             "skin_img": _skin_img(a.get("picture"))}
             for a in payload["aircraftDataArray"]
             if isinstance(a, dict) and a.get("id")
         ]
@@ -162,7 +173,10 @@ def get_aircraft_at_hub(cdp, hub_iata=None):
             const utilEl = box.querySelector('.content .listBox1 > b');
             const utilStr = utilEl ? utilEl.textContent.trim().replace('%','') : '0';
             const util = parseFloat(utilStr) || 0;
-            result.push({id, name: raw, model, util});
+            const img = box.querySelector('img[src*="/skins/"]');
+            const src = img ? img.getAttribute('src') || '' : '';
+            const skin_img = src ? src.split('?')[0].split('/').pop() : '';
+            result.push({id, name: raw, model, util, skin_img});
         }
         return result;
     })()""")

@@ -20,7 +20,7 @@ init(autoreset=True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab
-from db import get_db, close_db, upsert_fleet
+from db import get_db, close_db, resolve_skin_ids, upsert_fleet
 from planning_page import navigate_to_planning, select_hub, get_aircraft_at_hub
 
 
@@ -37,6 +37,14 @@ def print_summary(db):
         print(f"  {r['hub_iata']}: {r['cnt']} aircraft ({r['idle']} idle)")
         total += r["cnt"]
     print(f"  {Style.BRIGHT}Total: {total}")
+
+    skins = db.execute(
+        "SELECT COUNT(DISTINCT skin_id) AS liveries, "
+        "SUM(CASE WHEN skin_id IS NULL THEN 1 ELSE 0 END) AS unknown FROM fleet"
+    ).fetchone()
+    if skins and skins["liveries"]:
+        print(f"  {Fore.CYAN}Liveries: {skins['liveries']} distinct "
+              f"({skins['unknown']} aircraft unidentified)")
 
     model_rows = db.execute(
         "SELECT hub_iata, model, COUNT(*) as cnt, "
@@ -98,8 +106,11 @@ def main():
             idle = sum(1 for a in ac_list if a["util"] == 0)
             print(f"  {len(ac_list)} aircraft ({idle} idle)")
 
+        resolved, unresolved = resolve_skin_ids(all_fleet)
         upsert_fleet(all_fleet)
         print(f"\n{Fore.GREEN}Synced {len(all_fleet)} aircraft to DB")
+        note = f" ({unresolved} unidentified)" if unresolved else ""
+        print(f"{Fore.GREEN}Livery ids resolved for {resolved} aircraft{note}")
 
         print_summary(db)
     finally:
