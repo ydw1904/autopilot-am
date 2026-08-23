@@ -65,7 +65,7 @@ airlines-manager/
 ├── AGENTS.md / README.md / MCP_SETUP.md / CHANGELOG.md
 ├── .mcp.json                       ← Claude Code MCP registration
 └── code/
-    ├── mcp_server.py               ← MCP server: 37 tools (25 web/CDP + 12 mobile)
+    ├── mcp_server.py               ← MCP server: 42 tools (25 web/CDP + 17 mobile)
     ├── cdp.py                      ← shared CDP client  ← SHARED LAYER
     ├── db.py                       ← shared SQLite layer ← SHARED LAYER
     ├── circuit_planner.py          ← PRIMARY: Phase 1 + Phase 2 optimization
@@ -94,9 +94,11 @@ airlines-manager/
     ├── mobile_reconfigurator.py    ← aircraft_reconfigurator over the mobile API
     ├── mobile_login.py             ← press OK/Login over adb when the session dies
     ├── booster_sync.py             ← booster drop tables + livery names/artwork → DB
+    ├── skin_name_sync.py           ← livery names + Playrion/market origin → DB
+    ├── shm_watcher.py              ← watch the SHM for named liveries, buy on sight
     │
     ├── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
-    └── gui/                        ← NiceGUI pages (planner, hub, library, mass,
+    └── gui/                        ← NiceGUI pages (fleet, liveries, planner, hub, library, mass,
                                        warehouse, scraper, log) + state/workers/theme
 ```
 
@@ -189,9 +191,10 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   loads/saves `~/.airlines_manager/session.json` (0600 — it holds the token, the
   refresh token and, if bootstrapped from a password grant, the password);
   `import_from_capture()` pulls the newest token plus the OAuth material.
-  `AMClient` methods: `auctions/put_up/bid` (SHM), `fleet/aircraft/model_skins`,
-  `reconfigure/assign_hub` (fleet config), `shop_offers/claim_offer` + `wheel_*`
-  + `slot_*` (daily). No request signing.
+  `AMClient` methods: `auctions/put_up/bid` (SHM), `fleet/aircraft`,
+  `shop_skins/model_skins/skin_catalog` (liveries), `reconfigure/assign_hub`
+  (fleet config), `shop_offers/claim_offer` + `wheel_*` + `slot_*` (daily).
+  No request signing.
 - **Quirks baked in:** fleet paging is **1-based** (page 0 aliases page 1);
   empty POSTs (slot spins, put_up) need a zero-length form body or the server 204s;
   slot spins faster than the ~10s reel cooldown 204 but still burn a game (never
@@ -210,13 +213,70 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   `aircraft_buyer.AIRCRAFT_GAME_IDS`, keyed by canonical `aircraft_aliases` names.
   Re-read it off `/aircraft/buy/new/{haul}` if the game renumbers.
 - **`mobile_store.py`** — best-effort reference store (mobile_* tables in the shared
-  DB) populated as the client reads: model specs, skin/livery ids + Playrion status,
-  the mobile fleet, and a market price-history log.
+  DB) populated as the client reads: model specs, liveries (id, name, `source`,
+  creator, duty free price) and the mobile fleet. `upsert_skin` is COALESCE-based
+  so a thinner read never blanks a richer one; `source` additionally never
+  downgrades `manufacturer`, and the `mobile_skin_overview` view is dropped and
+  rebuilt on open so its columns can grow.
+- **The auction list is a 100-row window on a four-figure market, and there is
+  no paging.** `auction/aircraft/auction_list` caps at `AUCTION_PAGE_LIMIT`
+  (100) out of ~1300 live listings and accepts no page/offset/limit parameter —
+  so an unfiltered read samples ~8% of the market and a livery can list and
+  sell again without ever appearing in it. `sort` understands **only**
+  `timeMinus` (ending soonest) and `timePlus` (newest); any other value
+  silently falls back to `timeMinus`, which is why "newest" and "datePlus"
+  look like they work. The way out is the server-side filters the client
+  itself builds (recovered from the APK's il2cpp metadata as the format
+  strings `filterAircraftListId={0}`, `filterAircraftSkinListType={0}`,
+  `filterAuctionStatus={0}`, `filterPoolOnly=`): **a read filtered to one
+  model returns EVERY live listing of that model** when it comes back under
+  100 — verified, both sorts give identical id sets. A read that returns
+  exactly 100 is still truncated. `AMClient.auctions(model_id=…,
+  skin_type=…)` exposes them; `shm_market` reports `truncated`.
+- **The account's real auction limits are not on the auction endpoints.** They
+  ride on the app's boot call, `loading/notification` → `auctionRules`:
+  `maxBidByDay` (20), `maxSpentInBidSince`, `purchaseFeePercent` (20),
+  `countMaxAuction` (10, the same cap `put_up` enforces), the star-pool table
+  and the three `defaultThreshold*` price tiers ($500M base / $1.209B artist /
+  $8B Playrion). `AMClient.auction_rules()` reads them;
+  `AMClient.my_bidding()` reads today's usage against them. Reads are not
+  metered anywhere in that payload — the metered things are bids and listings.
 - **MCP tools:** `mobile_session_import`, `mobile_balance`, `mobile_catalog`,
   `shm_market`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch`,
+  `shm_watch_add`, `shm_watch_add_booster`, `shm_watch_list`,
+  `shm_watch_remove`, `shm_snipe`,
   `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`,
   `mobile_session_renew`. Mutating ones
   default `dry_run=True`. `mobile_daily_slot` is intentionally slow (~9s/spin).
+
+### `shm_watcher.py` — standing orders for specific liveries
+Watches the second-hand market for named liveries (a booster's limited-time
+set, or hand-picked skin ids) and takes the cheapest one on sight.
+
+- **Coverage comes from the per-model filter, not from polling harder.** A
+  livery belongs to exactly one model, so one filtered request per watched
+  model is complete coverage of that model. A pass costs one request per
+  watched model plus one wide `sort=timePlus` sweep; watchlists wider than
+  `--per-pass` rotate least-recently-checked first, and the sweep still
+  catches anything that lands in the newest 100 out of turn. A full booster
+  (33 liveries, 25 models) is ~26 requests and ~12s.
+- **It only ever buys at the listing's own `binPrice`, never an incremental
+  bid** — so it either takes a plane under a cap set in advance or does
+  nothing. It cannot be drawn into a price war, and a listing with no buy-now
+  is skipped by design.
+- **Guards, in order:** per-livery `max_price` (compared to the raw `binPrice`,
+  the number on the market), the day's `maxBidByDay` headroom (server's
+  `countOfBidding` vs the local ledger, whichever is higher), `--budget` per
+  UTC day, and the live balance. `est_cost` adds `purchaseFeePercent` on top
+  of the BIN for the budget/balance checks — whether that fee is actually
+  charged to the buyer or the seller is **not confirmed**, so those two guards
+  run 20% conservative on purpose. An armed buy with neither a per-livery cap
+  nor a `--budget` is refused rather than run blind against $8B listings.
+- **Nothing spends without `--arm`** (`dry_run=False` on `shm_snipe`). Every
+  decision, dry-run included, lands in `shm_buys`, so a rehearsal is auditable
+  and the daily budget reads its own ledger back.
+- `shm_watcher.py prices` reports what each watched livery has actually been
+  listed at, which is how a `--max` gets picked from data rather than guessed.
 - **`daily_routine.py`** — the freebies, once a day, tasks in random order with a
   `--jitter` start delay. Tasks: `currencies`, `slots`, `donate` (the last one via
   `alliance_donator`, so that task alone needs **Chrome up and logged in** — the
@@ -271,6 +331,43 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   index.html that links them (cheap: a 500-livery page is 0.2MB); `--embed FILE`
   inlines them as data URIs for one portable file (~1.35x the PNG bytes). Filters
   (`--booster/--rarity/--owned/--missing/--name`) compose.
+- **`skin_name_sync.py`** — fills in livery **names** and where each livery comes
+  from (`mobile_skins.source`: `manufacturer` / `playrion` / `market`). Three
+  passes, `--web` / `--dutyfree` / `--shm`, all three by default; they cover
+  different halves of the catalogue and none of them is redundant:
+  - **`--web`** is the only source that names a livery you already fly but nobody
+    sells. Every `/aircraft/show/<id>/reconfigure` page carries a hidden
+    `<input id="aircraftSkinJson">` holding the full carousel for THAT aircraft
+    (`id`, `name`, `price`, `unlocked`, `superBigPicture`), and the livery it is
+    currently wearing is always in it — the page also prints that one in the clear
+    as `#deliverySkinName`. The carousel is **per aircraft, not per model**: one
+    fetch per *model* named 11 of 146 unknown liveries, one fetch per *unnamed
+    livery* named 257 of 257. First full run: 257/257, 0 failures, 2185 carousel
+    entries banked.
+  - **`--dutyfree`** walks `shop/skin/getSkins/{page}?from=…` — the app's livery
+    shop, 3,116 liveries with names, AM-coin prices, creators and an owned flag.
+    Its `from=` bucket IS the Playrion/market split (`playrion` 555, `market`
+    2557, `all` 3116). **Paging is a PATH segment**: `page`, `pageNumber`,
+    `offset` and every other query spelling are accepted and silently ignored, so
+    a query-paged loop reads page 1 forever. The per-model form
+    (`shop/skin/{model_id}/getSkins`, `AMClient.model_skins`) only ever returns
+    what the shop *sells* for that model, which is why it named 7 of 257 owned
+    liveries: challenges and events are awarded, never sold.
+  - **`--shm`** reads `aircraft.skin.type` off live listings (`SKIN_TYPE_*`), the
+    only source that calls out a plain manufacturer paint. Types 0 and 1 come back
+    at the 100-row cap, so the pass falls through to the per-model sweep described
+    above (`--shm-shallow` skips it); 180 models × 2 types, none at the cap.
+  - **Artwork fallback**, applied last to whatever no endpoint spoke for (289
+    retired seasonals: "Christmas 2016", "Halloween 2K18"): a player livery is
+    served from `painterPublic`, an official one from the game's own
+    `Aircrafts/skins`, which only Playrion can write to. The split was clean
+    across all 3,167 liveries the endpoints had already classed, in both
+    directions, so it is inference of last resort, never applied over a stated
+    class. `upsert_skin` likewise never downgrades `manufacturer` to `playrion`.
+  - Result: 3,482 liveries, **all named**, 3,456 with a source (the 26 left have no
+    artwork path and none are on the fleet). Fleet split: 1,769 aircraft on
+    manufacturer paints, 880 on Playrion liveries, 129 on player-market ones.
+
 - **Still not covered — booster purchase and Bob.** The free Economy pack is
   purchase option **id 1** (`freeWithAds`, 8h cooldown; the account's `bypassAds`
   runs to 2026-09-04), but `booster/ads/purchase` rejects
@@ -332,13 +429,17 @@ treasury gets it less `dollarTax` (10%). Cap observed 2026-08-04: **$200M/day**.
 | `hubs` | hub airports: hub_id, iata, name, country_code, category, price |
 | `player_hubs` | the player's owned hubs (drives "for each owned hub" scrapers) |
 | `circuits` / `circuit_routes` | saved circuits and their routes |
-| `fleet` | scraped aircraft inventory (from `warehouse_sync`) |
+| `fleet` | scraped aircraft inventory (from `warehouse_sync`), incl. the livery as `skin_img` (picture filename, the only livery signal the web side carries) and the `skin_id` it resolves to via `mobile_skins` |
 | `routes_demand_snapshot` | pre-overwrite demand snapshots (from `scrape_internal_audits`) |
-| `mobile_models` / `mobile_skins` | mobile model specs + skin/livery ids (creator, Playrion status) |
+| `mobile_models` / `mobile_skins` | mobile model specs + liveries: id, name, `source` (`manufacturer`/`playrion`/`market`), creator, duty free price + sold counter (from `skin_name_sync`) |
 | `mobile_aircraft` | mobile account fleet (SHM auction reads are live-only; nothing is logged) |
 | `mobile_boosters` / `mobile_booster_cards` | booster windows/prices/pity + published drop tables (from `booster_sync`) |
 | `mobile_skin_images` | livery PNG bytes (from `booster_sync --images`) |
-| `mobile_skin_overview` | VIEW: livery + owned-aircraft count + best drop rate + artwork cached |
+| `mobile_skin_overview` | VIEW: livery + source/creator/price + owned-aircraft count + best drop rate + artwork cached. Rebuilt on every `MobileStore()` open, so its columns can grow |
+| `shm_watch` | liveries under standing order: price cap, copies wanted, copies bought |
+| `shm_sightings` | every SHM listing the watcher has seen — the price history a `--max` is picked from |
+| `shm_buys` | every buy the watcher decided on, dry runs included (the daily-budget ledger) |
+| `shm_model_checks` | when each watched model was last polled, so wide watchlists rotate |
 
 Aircraft **aliases** (e.g. `B742` → `747-200B`) live in the `ALIASES` dict in
 `circuit_planner.py` (mirrored in `aircraft_buyer.py`).
@@ -383,8 +484,15 @@ python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2   # full 
 .venv/bin/python -c "import sys; sys.path.insert(0,'code'); import mcp_server; \
   print(mcp_server.get_balance())"
 
+# Livery sync (mobile passes need only the session; --web needs Chrome up)
+.venv/bin/python code/skin_name_sync.py --dry-run
+
 # DB sanity
 sqlite3 db/am_aircraft.db "SELECT COUNT(*) FROM routes WHERE hub_iata='HKG' AND eco_demand>0"
+
+# Livery coverage: every owned livery named, and classed by where it comes from
+sqlite3 db/am_aircraft.db "SELECT s.source, COUNT(f.aircraft_id) FROM fleet f \
+  JOIN mobile_skins s ON s.skin_id=f.skin_id GROUP BY 1"
 ```
 
 Rebuild the native search after editing `native/beam_search.cpp`:

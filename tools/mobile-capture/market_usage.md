@@ -112,9 +112,15 @@ Minting a 747SP (model **151**, Manufacturer skin **2801396**, `isClassic`):
 - With the 747SP **license**, the 20 AM-coins/plane cost is **waived** — you pay
   **money only, ~$160M each** (raw value $177M). Verified: a batch of 20 dropped
   dollars by $3.19B and left AM-coins **unchanged**.
-- New planes have a **30-min delivery**. They're sellable by id immediately, but
-  do **not** all appear in the paged fleet right away — so sell freshly-minted
-  planes by explicit id, not a name scan.
+- New planes have a **30-min delivery** and are **NOT sellable until delivered**:
+  `put_up` during delivery is rejected with `status=0 message=0` (observed
+  2026-08-12; wait ~35 min after minting, then list). Also, fresh planes do
+  **not** all appear in the paged fleet right away — so sell freshly-minted
+  planes by explicit id from the buy response, not a name scan.
+- Mint via mobile: `AMClient.buy_multiple(model_id=151, hub_id=…, quantity=20,
+  name=…, skin_id=…, eco=136, bus=74, first=31, payload=12)` (added 2026-08-12;
+  wraps the captured `POST aircraft/buymultiple`). New ids come back in
+  `events[].objectid` — see `AMClient.bought_aircraft_ids()`.
 
 ```bash
 # sell a just-minted batch by the ids from the buy response.
@@ -125,12 +131,11 @@ python3 main.py market sell-batch --ids "188272456,188272457,…" \
         --price 177000000 --bin 1209000000 --dry-run
 ```
 
-Buy/mint endpoint (captured, for reference — buy side is planned on the web
-version): `POST aircraft/buymultiple`, body
+Buy/mint endpoint (captured): `POST aircraft/buymultiple`, body
 `purchaseAssistance=false&aircrafts=[{"aircraftId":151,"hubId":<hub>,"quantity":N,`
 `"name":"…","aircraftSkinId":2801396,"seatsEco":136,"seatsBus":74,"seatsFirst":31,`
-`"payload":12}]`. Response `events[].objectid` = the new aircraft ids. `AMClient`
-does not expose a mint command yet (buy handled on web).
+`"payload":12}]`. Response `events[].objectid` = the new aircraft ids.
+`AMClient.buy_multiple()` exposes this (mobile, money-only with license).
 
 `market bid <auctionId> <amount>` (sniping) is supported by `AMClient.bid` but
 intentionally not exposed as a spending CLI command yet.
@@ -175,3 +180,14 @@ a daily schedule. Full haul when fresh = +$50M money, +10 coins, +$25M research,
 ## Ban-risk note
 This drives the real game API. Keep `sell-batch --min-delay` reasonable, don't
 run 24/7, and prefer human-scale volumes. Your account, your call.
+
+What the server actually meters is worth knowing, because it isn't reads:
+`loading/notification` → `auctionRules` publishes `maxBidByDay` (20),
+`maxSpentInBidSince`, `countMaxAuction` (10) and `purchaseFeePercent` (20).
+Bids and listings are counted and capped; nothing in that payload meters how
+often the listing endpoint is read. There is also no push channel to poll
+instead — the app's only realtime socket is the Paradox XMPP chat server from
+`chat/credentials`, and its OneSignal pushes are per-account events, so
+watching the market means reading it. `shm_watcher.py` is the low-noise way to
+do that: one filtered request per watched model rather than a repeated sweep
+of everything.
