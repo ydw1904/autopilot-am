@@ -198,19 +198,28 @@ def shm_monitor():
     return get_shm_monitor_snapshot()
 
 
-class ShmWatchArmUpdate(BaseModel):
-    armed: bool
+class ShmWatchUpdate(BaseModel):
+    armed: Optional[bool] = None
+    max_price: Optional[float] = None
 
 
 @app.patch("/api/shm-monitor/watches/{skin_id}")
-def set_shm_watch_arm(skin_id: int, update: ShmWatchArmUpdate):
-    """Arm or disarm one standing order without interrupting observation."""
+def set_shm_watch(skin_id: int, update: ShmWatchUpdate):
+    """Arm/disarm one standing order or reprice its cap, without pausing it."""
     import shm_watcher
 
     conn = shm_watcher.open_db()
-    if not shm_watcher.set_watch_armed(conn, skin_id, update.armed):
+    sent = update.model_fields_set
+    found = True
+    if update.armed is not None:
+        found = shm_watcher.set_watch_armed(conn, skin_id, update.armed)
+    # max_price is nullable on purpose: an explicit null clears the cap, so
+    # only a field the client actually sent counts as a repricing.
+    if "max_price" in sent:
+        found = shm_watcher.set_watch_max_price(conn, skin_id, update.max_price) and found
+    if not found:
         raise HTTPException(status_code=404, detail="SHM watch not found")
-    return {"ok": True, "skin_id": skin_id, "armed": update.armed}
+    return {"ok": True, "skin_id": skin_id}
 
 
 @app.get("/api/fleet")

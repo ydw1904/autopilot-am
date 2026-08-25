@@ -66,12 +66,36 @@ def test_shm_monitor_reports_current_activity(tmp_path, monkeypatch):
             "real_buys_today": 0,
             "dry_runs_today": 1,
         }
-        assert snapshot["watches"][0]["skin_id"] == 10
-        assert snapshot["watches"][0]["is_owned"] is True
-        assert snapshot["watches"][0]["owned_count"] == 1
-        assert snapshot["watches"][0]["cheapest_seen"] == 750000000
+        # Owned liveries sort last even when they are paid-pack targets.
+        assert [w["skin_id"] for w in snapshot["watches"]] == [20, 10]
+        owned = snapshot["watches"][1]
+        assert owned["is_owned"] is True
+        assert owned["owned_count"] == 1
+        assert owned["cheapest_seen"] == 750000000
+        assert owned["last_price_seen"] == 750000000
         assert snapshot["sightings"][0]["auction_id"] == 99
         assert snapshot["model_checks"][0]["checks"] == 4
         assert snapshot["decisions"][0]["dry_run"] == 1
+    finally:
+        dbmod.close_db()
+
+
+def test_shm_watch_price_cap_is_editable(tmp_path, monkeypatch):
+    monkeypatch.setattr(dbmod, "DB", str(tmp_path / "cap.db"))
+    monkeypatch.setattr(dbmod, "_conn", None)
+    try:
+        conn = dbmod.get_db()
+        conn.executescript(shm_watcher.SCHEMA)
+        conn.execute("INSERT INTO shm_watch (skin_id, label) VALUES (10, 'A')")
+        conn.commit()
+
+        assert shm_watcher.set_watch_max_price(conn, 10, 2_000_000_000)
+        assert conn.execute(
+            "SELECT max_price FROM shm_watch WHERE skin_id=10").fetchone()[0] == 2_000_000_000
+        # Clearing the field means "no cap", not a zero cap that buys nothing.
+        assert shm_watcher.set_watch_max_price(conn, 10, None)
+        assert conn.execute(
+            "SELECT max_price FROM shm_watch WHERE skin_id=10").fetchone()[0] is None
+        assert not shm_watcher.set_watch_max_price(conn, 999, 1)
     finally:
         dbmod.close_db()

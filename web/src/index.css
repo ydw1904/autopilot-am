@@ -616,7 +616,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .shm-table td strong, .shm-table td small { display: block; }
 .shm-table td strong { color: var(--text); font-size: 11px; }
 .shm-table td small { margin-top: 3px; color: var(--muted-2); font-size: 9px; }
-.shm-table tr.is-muted { opacity: .48; }
+.shm-cap-input { width: 104px; height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: #0e1116; color: var(--text); font-size: 11px; }
+.shm-cap-input::placeholder { color: #545e6c; }
+.shm-cap-input:disabled { opacity: .5; }
+.shm-controls { margin-bottom: 14px; }
+.shm-controls .fleet-toolbar { grid-template-columns: minmax(240px, 1.3fr) minmax(104px, .5fr) repeat(4, minmax(130px, .7fr)); }
 .shm-watch-name { min-width: 260px; display: flex; align-items: center; gap: 11px; }
 .shm-watch-name > span { width: 72px; height: 42px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 7px; background: radial-gradient(circle at 50% 45%, #252c36, #0e1116 72%); }
 .shm-watch-name img { width: 94%; height: 90%; object-fit: contain; filter: drop-shadow(0 5px 4px rgba(0, 0, 0, .38)); }
