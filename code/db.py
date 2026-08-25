@@ -1204,6 +1204,15 @@ def get_command_center_snapshot(*, browser_connected=False, mobile_configured=Fa
     }
 
 
+# Owned liveries sink to the bottom, paid packs float to the top: the list is
+# a shopping queue, and a skin already in the hangar is the lowest priority.
+ORDER_WATCHES = """
+    CASE WHEN owned_count > 0 THEN 1 ELSE 0 END,
+    CASE WHEN source = 'shop-pack:auto' THEN 0 ELSE 1 END,
+    label
+"""
+
+
 def get_shm_monitor_snapshot() -> dict:
     """Read-only operational snapshot for the SHM watcher web tab."""
     db = get_db()
@@ -1282,12 +1291,14 @@ def get_shm_monitor_snapshot() -> dict:
                    (SELECT MIN(s.bin_price) FROM shm_sightings s
                      WHERE s.skin_id = w.skin_id AND s.bin_price > 0
                        AND s.is_own = 0) AS cheapest_seen,
+                   (SELECT s.bin_price FROM shm_sightings s
+                     WHERE s.skin_id = w.skin_id AND s.is_own = 0
+                     ORDER BY s.last_seen DESC, s.auction_id DESC
+                     LIMIT 1) AS last_price_seen,
                    (SELECT MAX(s.last_seen) FROM shm_sightings s
                      WHERE s.skin_id = w.skin_id) AS last_seen
               FROM shm_watch w
-             ORDER BY w.active DESC,
-                      CASE WHEN w.source = 'shop-pack:auto' THEN 0 ELSE 1 END,
-                      w.label
+             ORDER BY {ORDER_WATCHES}
         """).fetchall()]
         sightings = [dict(row) for row in db.execute("""
             SELECT s.auction_id, s.skin_id, s.model_id,
@@ -1306,12 +1317,14 @@ def get_shm_monitor_snapshot() -> dict:
             WHERE s.is_own = 0
         """).fetchone()[0]
     else:
-        watches = [dict(row) | {"owned_count": 0, "sightings": 0,
-                                "cheapest_seen": None, "last_seen": None}
+        watches = [dict(row) | {"sightings": 0,
+                                "cheapest_seen": None, "last_price_seen": None,
+                                "last_seen": None}
                    for row in db.execute(f"""
                        SELECT skin_id, model_id, label, max_price, want,
-                              bought, active, {"armed" if has_armed else "0 AS armed"}, source
-                         FROM shm_watch ORDER BY active DESC, label
+                              bought, active, {"armed" if has_armed else "0 AS armed"}, source,
+                              0 AS owned_count
+                         FROM shm_watch ORDER BY {ORDER_WATCHES}
                    """).fetchall()]
         sightings = []
         matched_sightings = 0

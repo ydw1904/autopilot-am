@@ -252,6 +252,14 @@ def set_watch_armed(conn, skin_id: int, armed: bool) -> bool:
     return bool(cur.rowcount)
 
 
+def set_watch_max_price(conn, skin_id: int, max_price: float | None) -> bool:
+    """Persist one watch's price cap; None means buy at any listed price."""
+    cur = conn.execute("UPDATE shm_watch SET max_price=? WHERE skin_id=?",
+                       (None if max_price is None else int(max_price), skin_id))
+    conn.commit()
+    return bool(cur.rowcount)
+
+
 def automatic_target_skins(conn) -> list[dict]:
     """Special paid-pack and challenge liveries, including owned catalog rows."""
     tables = {r["name"] for r in conn.execute(

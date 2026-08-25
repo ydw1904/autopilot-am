@@ -207,6 +207,7 @@ export interface ShmWatch {
   is_owned: boolean;
   sightings: number;
   cheapest_seen: number | null;
+  last_price_seen: number | null;
   last_seen: string | null;
 }
 

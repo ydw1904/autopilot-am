@@ -29,13 +29,16 @@ export async function fetchShmMonitor(): Promise<ShmMonitorSnapshot> {
   return res.json();
 }
 
-export async function updateShmWatchArm(skinId: number, armed: boolean): Promise<void> {
+export async function updateShmWatch(
+  skinId: number,
+  patch: { armed?: boolean; max_price?: number | null },
+): Promise<void> {
   const res = await fetch(`${BASE_URL}/api/shm-monitor/watches/${skinId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ armed }),
+    body: JSON.stringify(patch),
   });
-  if (!res.ok) throw new Error("Failed to update SHM watch arming");
+  if (!res.ok) throw new Error("Failed to update SHM watch");
 }
 
 export interface FleetParams {
