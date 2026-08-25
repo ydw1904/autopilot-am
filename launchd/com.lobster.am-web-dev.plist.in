@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lobster.am-web-dev</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@AM_ROOT@/run_dev.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>@AM_ROOT@</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>@AM_USER_HOME@</string>
+        <key>PATH</key>
+        <string>@AM_USER_HOME@/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>@AM_USER_HOME@/.airlines_manager/web-dev.log</string>
+    <key>StandardErrorPath</key>
+    <string>@AM_USER_HOME@/.airlines_manager/web-dev.err.log</string>
+</dict>
+</plist>

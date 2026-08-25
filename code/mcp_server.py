@@ -1353,9 +1353,10 @@ def shm_watch_add(skin_id: int, max_price: Optional[int] = None,
     """Watch one livery on the second-hand market, to buy on sight.
 
     `max_price` is the highest buy-now (binPrice) to accept — the number as it
-    shows on the market, before the purchase fee. Without one the watcher will
-    report the livery but refuse to buy it. The aircraft model is resolved from
-    the livery so the watcher can use the cheap server-side filter.
+    shows on the market. Without one it observes every listing; use the SHM
+    monitor's arm toggle to allow a live buy while the balance stays positive.
+    The aircraft model is resolved from the livery so the watcher can use the
+    cheap server-side filter.
     """
     sw, conn = _watch_db()
     w = sw.add_watch(conn, skin_id, max_price, want, "manual", label)
@@ -1450,8 +1451,7 @@ def shm_fleet(name_contains: str = "", skin_id: Optional[int] = None,
             if skin_id is not None and it.get("as_id") != skin_id:
                 continue
             out.append({"aircraft_id": it["id"], "name": it.get("n"),
-                        "skin_id": it.get("as_id"), "hub_id": it.get("h_id"),
-                        "wear": it.get("w")})
+                        "skin_id": it.get("as_id"), "hub_id": it.get("h_id")})
             if len(out) >= limit:
                 break
         return {"ok": True, "count": len(out), "aircraft": out}

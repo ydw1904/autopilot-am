@@ -1,370 +1,424 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
-  Palette,
-  Search,
-  CheckCircle2,
-  XCircle,
-  Plane,
-  ArrowRight,
-  RefreshCw,
-  Gift,
+  ArrowDownAZ,
+  ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
   Award,
+  CalendarClock,
+  CheckCircle2,
+  Clock,
+  Gift,
+  Package,
+  Palette,
+  Plane,
+  RefreshCcw,
+  Search,
+  ShoppingBag,
+  Sparkles,
+  SlidersHorizontal,
+  Store,
+  Ticket,
+  Trophy,
+  Tv,
+  Wand2,
+  X,
+  XCircle,
 } from "lucide-react";
-import { LiveryItem, LiveryPlane } from "../types";
-import { fetchLiveries } from "../api";
+import { fetchLiveries, triggerSyncLiveries } from "../api";
+import { LiveryItem, LiveryTag, LiveryTagKind } from "../types";
+import { challengeTag, displayLiveryName, splitLiveryName } from "../liveryName";
 import { AircraftListModal } from "./AircraftListModal";
+import { MenuOption, MenuSelect } from "./MenuSelect";
 
 interface LiveryCollectionProps {
-  onViewInFleet: (skinId: number) => void;
+  refreshToken: number;
+  onViewInFleet: (liveryName: string) => void;
+  initialPreset?: string;
+  onPresetCleared: () => void;
 }
 
-export const LiveryCollection: React.FC<LiveryCollectionProps> = ({ onViewInFleet }) => {
+type StatusFilter = "all" | "owned" | "unowned";
+type SortMode = "livery_name" | "name" | "owned_desc" | "owned_asc" | "added_desc" | "added_asc";
+// One chip fits on a single line; anything beyond it collapses into the
+// "+N more" modal so every card in the grid stays exactly the same height.
+const CHIP_LIMIT = 1;
+
+// Every way a livery can be obtained renders as the same chip, so a livery
+// that comes from two places reads as two tags rather than two layouts. The
+// icon and colour carry which source it is; `cls` maps to the palette in
+// index.css.
+const TAG_STYLES: Record<LiveryTagKind, { cls: string; Icon: typeof Trophy }> = {
+  challenge: { cls: "is-challenge", Icon: Trophy },
+  booster: { cls: "is-booster", Icon: Package },
+  shop_gift: { cls: "is-shop-gift", Icon: Gift },
+  shop_ad: { cls: "is-shop-ad", Icon: Tv },
+  shop_tc: { cls: "is-shop-tc", Icon: Ticket },
+  shop_pack: { cls: "is-shop-pack", Icon: ShoppingBag },
+  dutyfree: { cls: "is-dutyfree", Icon: Store },
+  market: { cls: "is-custom", Icon: Wand2 },
+};
+
+// "Livery name" groups liveries by the name half first, then orders the models
+// within each group; "Full name" keeps the raw model-first string. Both use
+// plain A-to-Z (numbers sort before letters), matching the fleet sort menu.
+const SORT_OPTIONS: MenuOption[] = [
+  { value: "livery_name", label: "Livery name", hint: "A to Z, then model", icon: ArrowDownAZ },
+  { value: "name", label: "Full name", hint: "Model first, A to Z", icon: Plane },
+  { value: "owned_desc", label: "Planes in fleet", hint: "Most first", icon: ArrowDownWideNarrow },
+  { value: "owned_asc", label: "Planes in fleet", hint: "Fewest first", icon: ArrowUpNarrowWide },
+  { value: "added_desc", label: "Date added", hint: "Newest scrape first", icon: CalendarClock },
+  { value: "added_asc", label: "Date added", hint: "Oldest scrape first", icon: Clock },
+];
+const DEFAULT_SORT = SORT_OPTIONS[0].value as SortMode;
+
+// A livery counts as "just scraped" for this many days after it first landed in
+// the DB, which is long enough that a sync done a few days ago is still obvious.
+const NEW_WINDOW_DAYS = 7;
+
+// `first_seen` comes from SQLite's datetime('now'): "YYYY-MM-DD HH:MM:SS" in UTC
+// with no zone marker, which browsers would otherwise read as local time.
+function parseAdded(value: string | null | undefined): number {
+  if (!value) return NaN;
+  const stamp = Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
+  return Number.isNaN(stamp) ? NaN : stamp;
+}
+
+// Rows with no timestamp sort to the bottom of "newest first" and the top of
+// "oldest first", rather than landing in the middle as NaN comparisons.
+function addedAt(item: LiveryItem): number {
+  const stamp = parseAdded(item.first_seen);
+  return Number.isNaN(stamp) ? 0 : stamp;
+}
+
+function addedLabel(value: string | null | undefined): string | null {
+  const stamp = parseAdded(value);
+  if (Number.isNaN(stamp)) return null;
+  return new Date(stamp).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+function daysSinceAdded(value: string | null | undefined): number | null {
+  const stamp = parseAdded(value);
+  if (Number.isNaN(stamp)) return null;
+  return Math.floor((Date.now() - stamp) / 86_400_000);
+}
+
+// User-created (market) liveries are hidden by default and the choice persists
+// across sessions, so the collection stays limited to official skins unless
+// the operator opts back in.
+const SHOW_USER_CREATED_KEY = "livery:showUserCreated";
+function loadShowUserCreated(): boolean {
+  try {
+    return window.localStorage.getItem(SHOW_USER_CREATED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function LiveryCollection({ refreshToken, onViewInFleet, initialPreset, onPresetCleared }: LiveryCollectionProps) {
   const [liveries, setLiveries] = useState<LiveryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Filters
-  const [statusFilter, setStatusFilter] = useState<"all" | "owned" | "unowned">("all");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [modelQuery, setModelQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"owned_desc" | "owned_asc" | "name">("owned_desc");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [model, setModel] = useState("");
+  const [debouncedModel, setDebouncedModel] = useState("");
+  const [sort, setSort] = useState<SortMode>(DEFAULT_SORT);
+  const [showUserCreated, setShowUserCreated] = useState<boolean>(loadShowUserCreated);
+  const [modalItem, setModalItem] = useState<LiveryItem | null>(null);
+  const [focusSkinId, setFocusSkinId] = useState<number | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [catalogVersion, setCatalogVersion] = useState(0);
 
-  // Modal for aircraft list
-  const [modalData, setModalData] = useState<{
-    isOpen: boolean;
-    name: string;
-    skinId: number;
-    planes: LiveryPlane[];
-  }>({
-    isOpen: false,
-    name: "",
-    skinId: 0,
-    planes: [],
-  });
-
-  const loadData = async () => {
-    setLoading(true);
+  useEffect(() => {
     try {
-      const data = await fetchLiveries({
-        status_filter: statusFilter,
-        model_query: modelQuery.trim() || undefined,
-        search_query: searchQuery.trim() || undefined,
+      window.localStorage.setItem(SHOW_USER_CREATED_KEY, String(showUserCreated));
+    } catch {
+      /* ignore persistence failures (private mode, etc.) */
+    }
+  }, [showUserCreated]);
+
+  // Arriving from a fleet "Liveries of the day" card: that card is one exact
+  // skin, and a livery name is shared by every model that carries it (there is
+  // a "Glueck Super 100" for several airframes), so the preset pins the skin id
+  // and the collection shows that single card. `livery:<name>` stays supported
+  // for hand-typed links and seeds the search box as before.
+  useEffect(() => {
+    if (initialPreset?.startsWith("skin:")) {
+      const skinId = Number(initialPreset.slice("skin:".length));
+      setFocusSkinId(Number.isFinite(skinId) ? skinId : null);
+    } else if (initialPreset?.startsWith("livery:")) {
+      setFocusSkinId(null);
+      setSearch(initialPreset.slice("livery:".length));
+    } else {
+      setFocusSkinId(null);
+    }
+  }, [initialPreset]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 220);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedModel(model.trim()), 220);
+    return () => window.clearTimeout(timer);
+  }, [model]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetchLiveries({
+      status_filter: status,
+      model_query: debouncedModel || undefined,
+      search_query: debouncedSearch || undefined,
+      // A pinned skin can be a player-designed market livery, which the toggle
+      // hides by default; include those while a focus is active so the card the
+      // fleet page pointed at cannot come back empty.
+      include_user_created: showUserCreated || focusSkinId !== null,
+    }).then((data) => {
+      if (cancelled) return;
+      const sorted = [...data].sort((a, b) => {
+        if (sort === "owned_desc") return b.owned_count - a.owned_count || a.name.localeCompare(b.name);
+        if (sort === "owned_asc") return a.owned_count - b.owned_count || a.name.localeCompare(b.name);
+        if (sort === "added_desc") return addedAt(b) - addedAt(a) || a.name.localeCompare(b.name);
+        if (sort === "added_asc") return addedAt(a) - addedAt(b) || a.name.localeCompare(b.name);
+        if (sort === "livery_name") {
+          const sa = splitLiveryName(a.name);
+          const sb = splitLiveryName(b.name);
+          return sa.livery.localeCompare(sb.livery) || sa.model.localeCompare(sb.model);
+        }
+        return a.name.localeCompare(b.name);
       });
-
-      const sorted = [...data];
-      if (sortBy === "owned_desc") {
-        sorted.sort((a, b) => b.owned_count - a.owned_count || a.name.localeCompare(b.name));
-      } else if (sortBy === "owned_asc") {
-        sorted.sort((a, b) => a.owned_count - b.owned_count || a.name.localeCompare(b.name));
-      } else {
-        sorted.sort((a, b) => a.name.localeCompare(b.name));
-      }
-
       setLiveries(sorted);
-    } catch (err) {
-      console.error("Failed to load liveries", err);
+      if (modalItem && !sorted.some((item) => item.skin_id === modalItem.skin_id)) setModalItem(null);
+    }).catch((reason) => {
+      if (!cancelled) setError(reason instanceof Error ? reason.message : "Failed to load liveries");
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, debouncedSearch, debouncedModel, sort, showUserCreated, focusSkinId, refreshToken, catalogVersion]);
+
+  const total = liveries.length;
+  const owned = useMemo(() => liveries.filter((item) => item.is_owned).length, [liveries]);
+  const missing = total - owned;
+  const completion = total > 0 ? Math.round((owned / total) * 100) : 0;
+
+  // While a skin is pinned the grid is that one card. Any filter the operator
+  // touches means they are done looking at it, so the pin releases and the full
+  // collection comes back rather than filtering inside a single-card list.
+  const focused = focusSkinId === null ? null : liveries.find((item) => item.skin_id === focusSkinId) ?? null;
+  const visibleLiveries = focusSkinId === null ? liveries : liveries.filter((item) => item.skin_id === focusSkinId);
+  const clearFocus = () => { setFocusSkinId(null); if (focusSkinId !== null) onPresetCleared(); };
+
+  const activeFilters = [status !== "all", Boolean(debouncedSearch), Boolean(debouncedModel)].filter(Boolean).length;
+  const clearFilters = () => { clearFocus(); setStatus("all"); setSearch(""); setDebouncedSearch(""); setModel(""); setDebouncedModel(""); setSort(DEFAULT_SORT); };
+  const syncCatalog = async () => {
+    setSyncing(true);
+    setSyncNotice("Reading booster packs, shop offers, and the active challenge. The first artwork sync can take a few minutes.");
+    try {
+      const result = await triggerSyncLiveries();
+      setSyncNotice(result.message);
+      setCatalogVersion((version) => version + 1);
+    } catch (reason) {
+      setSyncNotice(reason instanceof Error ? reason.message : "Livery catalog sync failed");
     } finally {
-      setLoading(false);
+      setSyncing(false);
     }
   };
 
-  useEffect(() => {
-    loadData();
-  }, [statusFilter, searchQuery, modelQuery, sortBy]);
-
-  // Overall collection stats
-  const totalCount = liveries.length;
-  const ownedCount = useMemo(() => liveries.filter((l) => l.is_owned).length, [liveries]);
-  const unownedCount = totalCount - ownedCount;
-  const completionPct = totalCount > 0 ? Math.round((ownedCount / totalCount) * 100) : 0;
-
-  const handleOpenAircraftModal = (item: LiveryItem) => {
-    setModalData({
-      isOpen: true,
-      name: item.name,
-      skinId: item.skin_id,
-      planes: item.aircraft,
-    });
-  };
-
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-[#F5F2EC]">
-      {/* Top Header & Metrics */}
-      <div className="p-6 pb-2 space-y-4 flex-shrink-0">
-        {/* KPI Cards & Completion Bar */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="bg-[#FFFFFF]/80 backdrop-blur border border-[#E5E1D6]/80 rounded-xl p-3.5 flex flex-col justify-between">
-            <span className="text-[10px] font-mono font-semibold text-[#8B877C] uppercase tracking-wider">
-              Special Liveries
-            </span>
-            <div className="flex items-baseline gap-1 mt-1">
-              <span className="text-2xl font-black text-[#0A1E3C] font-mono">{totalCount}</span>
-              <span className="text-[10px] text-[#8B877C] font-mono">in pool</span>
-            </div>
-          </div>
-
-          <div className="bg-[#FFFFFF]/80 backdrop-blur border border-[#E5E1D6]/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-[#1E7E46]/30 transition">
-            <span className="text-[10px] font-mono font-semibold text-[#1E7E46] uppercase tracking-wider flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              Collected / Owned
-            </span>
-            <div className="flex items-baseline gap-1 mt-1">
-              <span className="text-2xl font-black text-[#1E7E46] font-mono">{ownedCount}</span>
-              <span className="text-[10px] text-[#8B877C] font-mono">active</span>
-            </div>
-          </div>
-
-          <div className="bg-[#FFFFFF]/80 backdrop-blur border border-[#E5E1D6]/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-[#E8A800]/30 transition">
-            <span className="text-[10px] font-mono font-semibold text-[#9E7600] uppercase tracking-wider flex items-center gap-1.5">
-              <XCircle className="w-3.5 h-3.5" />
-              Missing / Catalog
-            </span>
-            <div className="flex items-baseline gap-1 mt-1">
-              <span className="text-2xl font-black text-[#9E7600] font-mono">{unownedCount}</span>
-              <span className="text-[10px] text-[#8B877C] font-mono">to unlock</span>
-            </div>
-          </div>
-
-          <div className="bg-[#FFFFFF]/80 backdrop-blur border border-[#E5E1D6]/80 rounded-xl p-3.5 flex flex-col justify-between hover:border-[#05164D]/30 transition">
-            <span className="text-[10px] font-mono font-semibold text-[#1D6FB8] uppercase tracking-wider">
-              Collection Rate
-            </span>
-            <div className="flex items-baseline gap-1 mt-1">
-              <span className="text-2xl font-black text-[#1D6FB8] font-mono">{completionPct}%</span>
-              <span className="text-[10px] text-[#8B877C] font-mono">completed</span>
-            </div>
-          </div>
+    <div className="livery-workspace">
+      <section className="livery-stats" aria-label="Collection summary">
+        <div className="stat-tile">
+          <span><Palette size={13} /> Special liveries</span>
+          <strong>{total}</strong>
+          <small>in the catalog pool</small>
         </div>
-
-        {/* Progress Bar */}
-        <div className="bg-[#FFFFFF]/60 border border-[#E5E1D6]/80 rounded-xl p-3">
-          <div className="flex justify-between items-center text-xs font-mono mb-2">
-            <span className="text-[#4E4B43] font-semibold flex items-center gap-1.5">
-              <Award className="w-3.5 h-3.5 text-[#1D6FB8]" />
-              Special Livery Album Progress
-            </span>
-            <span className="text-[#1D6FB8] font-bold">{ownedCount} of {totalCount} collected ({completionPct}%)</span>
-          </div>
-          <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-[#E5E1D6]">
-            <div
-              className="h-full bg-gradient-to-r from-[#05164D] via-[#1E7E46] to-[#FFAD00] rounded-full transition-all duration-500"
-              style={{ width: `${completionPct}%` }}
-            />
-          </div>
+        <div className="stat-tile tone-green">
+          <span><CheckCircle2 size={13} /> Collected</span>
+          <strong>{owned}</strong>
+          <small>flying somewhere in fleet</small>
         </div>
-
-        {/* Filter Toolbar */}
-        <div className="bg-[#FFFFFF]/60 backdrop-blur border border-[#E5E1D6]/80 rounded-xl p-3 space-y-3">
-          {/* Row 1: Status Pills */}
-          <div className="flex flex-wrap items-center gap-3 justify-between">
-            {/* Status */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-mono font-bold text-[#8B877C] uppercase mr-1">Status:</span>
-              <button
-                onClick={() => setStatusFilter("all")}
-                className={`px-3 py-1 rounded-full text-xs font-mono transition ${
-                  statusFilter === "all"
-                    ? "bg-[#05164D]/20 text-[#1D6FB8] border border-[#05164D]/40 font-bold"
-                    : "bg-[#F8F6F1] border border-[#E5E1D6] text-[#8B877C] hover:text-[#0A1E3C]"
-                }`}
-              >
-                All ({totalCount})
-              </button>
-              <button
-                onClick={() => setStatusFilter("owned")}
-                className={`px-3 py-1 rounded-full text-xs font-mono transition flex items-center gap-1 ${
-                  statusFilter === "owned"
-                    ? "bg-[#1E7E46]/20 text-[#1E7E46] border border-[#1E7E46]/40 font-bold"
-                    : "bg-[#F8F6F1] border border-[#E5E1D6] text-[#8B877C] hover:text-[#1E7E46]"
-                }`}
-              >
-                <CheckCircle2 className="w-3 h-3" /> Owned Only
-              </button>
-              <button
-                onClick={() => setStatusFilter("unowned")}
-                className={`px-3 py-1 rounded-full text-xs font-mono transition flex items-center gap-1 ${
-                  statusFilter === "unowned"
-                    ? "bg-[#FFAD00]/20 text-[#9E7600] border border-[#E8A800]/40 font-bold"
-                    : "bg-[#F8F6F1] border border-[#E5E1D6] text-[#8B877C] hover:text-[#9E7600]"
-                }`}
-              >
-                <XCircle className="w-3 h-3" /> Missing / Unowned
-              </button>
-            </div>
-          </div>
-
-          {/* Row 2: Search and Sort */}
-          <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-[#E5E1D6]/60">
-            <div className="relative flex-1 min-w-[200px] max-w-sm">
-              <Search className="w-3.5 h-3.5 text-[#8B877C] absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search livery or booster event…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 bg-white/80 border border-[#E5E1D6] rounded-lg text-xs text-[#0A1E3C] placeholder-slate-400 font-mono focus:outline-none focus:border-[#05164D]"
-              />
-            </div>
-
-            <input
-              type="text"
-              placeholder="Model (e.g. 737, A380)…"
-              value={modelQuery}
-              onChange={(e) => setModelQuery(e.target.value)}
-              className="w-36 px-3 py-1.5 bg-white/80 border border-[#E5E1D6] rounded-lg text-xs text-[#0A1E3C] placeholder-slate-400 font-mono focus:outline-none focus:border-[#05164D]"
-            />
-
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as any)}
-              className="px-3 py-1.5 bg-white/80 border border-[#E5E1D6] rounded-lg text-xs text-[#0A1E3C] font-mono focus:outline-none focus:border-[#05164D]"
-            >
-              <option value="owned_desc">Sort: Most Owned Planes</option>
-              <option value="owned_asc">Sort: Least Owned Planes</option>
-              <option value="name">Sort: Name (A-Z)</option>
-            </select>
-
-            <button
-              onClick={() => {
-                setStatusFilter("all");
-                setSearchQuery("");
-                setModelQuery("");
-              }}
-              className="px-2.5 py-1.5 text-xs text-[#8B877C] hover:text-[#0A1E3C] font-mono hover:bg-[#F1EEE6] rounded-lg transition ml-auto"
-            >
-              Reset
-            </button>
-          </div>
+        <div className="stat-tile">
+          <span><XCircle size={13} /> Missing</span>
+          <strong>{missing}</strong>
+          <small>not yet unlocked</small>
         </div>
+        <div className="stat-tile tone-cyan">
+          <span><Award size={13} /> Completion</span>
+          <strong>{completion}%</strong>
+          <small>of the album filled</small>
+        </div>
+      </section>
+
+      <section className="flat-section">
+        <div className="progress-section-body">
+          <div className="progress-meta">
+            <span>Special livery album progress</span>
+            <strong>{owned} of {total} collected ({completion}%)</strong>
+          </div>
+          <div className="progress-track"><i style={{ width: `${completion}%` }} /></div>
+        </div>
+      </section>
+
+      <section className="livery-sync-panel" aria-label="Reward catalog sync">
+        <div className="livery-sync-sources" aria-hidden="true">
+          <span className="is-booster"><Package size={15} /></span>
+          <span className="is-shop"><ShoppingBag size={15} /></span>
+          <span className="is-challenge"><Trophy size={15} /></span>
+        </div>
+        <div className="livery-sync-copy">
+          <strong>Refresh reward catalog</strong>
+          <span>Sync booster-pack drops, shop skins, the active challenge, and missing artwork through the mobile connection.</span>
+        </div>
+        <button className="primary-action" onClick={syncCatalog} disabled={syncing}>
+          <RefreshCcw size={15} className={syncing ? "is-spinning" : ""} />
+          {syncing ? "Syncing catalog" : "Sync reward skins"}
+        </button>
+      </section>
+
+      {syncNotice && (
+        <div className="inline-notice" aria-live="polite">
+          <span>{syncNotice}</span>
+          {!syncing && <button onClick={() => setSyncNotice(null)} aria-label="Dismiss notice"><X size={14} /></button>}
+        </div>
+      )}
+
+      {focusSkinId !== null && (
+        <div className="inline-notice is-focus" aria-live="polite">
+          <span>{focused ? <>Showing <b>{displayLiveryName(focused)}</b>, the livery you opened from the fleet page.</> : "That livery is not in the local catalog yet. Sync the reward skins or show the full collection."}</span>
+          <button onClick={clearFocus}>Show all liveries</button>
+        </div>
+      )}
+
+      <div className="livery-toolbar">
+        <div className="segmented-control" role="tablist" aria-label="Ownership status">
+          <button className={`segmented-option${status === "all" ? " is-active" : ""}`} onClick={() => { clearFocus(); setStatus("all"); }}>All</button>
+          <button className={`segmented-option tone-green${status === "owned" ? " is-active" : ""}`} onClick={() => { clearFocus(); setStatus("owned"); }}><CheckCircle2 size={12} /> Owned</button>
+          <button className={`segmented-option tone-amber${status === "unowned" ? " is-active" : ""}`} onClick={() => { clearFocus(); setStatus("unowned"); }}><XCircle size={12} /> Missing</button>
+        </div>
+        <label className="search-control">
+          <Search size={16} />
+          <input value={search} onChange={(event) => { clearFocus(); setSearch(event.target.value); }} placeholder="Search livery or booster event" />
+          {search && <button onClick={() => setSearch("")} aria-label="Clear search"><X size={14} /></button>}
+        </label>
+        <input className="model-input" value={model} onChange={(event) => { clearFocus(); setModel(event.target.value); }} placeholder="Model, e.g. 737 or A380" />
+        <MenuSelect label="Sort by" value={sort} onChange={(next) => setSort(next as SortMode)} options={SORT_OPTIONS} align="right" />
+        <label className="livery-toggle" title="Player-designed market liveries (e.g. LH-A388)">
+          <input type="checkbox" checked={showUserCreated} onChange={(event) => setShowUserCreated(event.target.checked)} />
+          <Wand2 size={13} />
+          <span>User-created</span>
+        </label>
+        {activeFilters > 0 && <button className="reset-button" onClick={clearFilters}>Reset</button>}
       </div>
 
-      {/* Livery Gallery Grid */}
-      <div className="flex-1 overflow-y-auto px-6 py-2">
-        {loading ? (
-          <div className="h-64 flex flex-col items-center justify-center gap-3 text-[#8B877C] font-mono">
-            <RefreshCw className="w-6 h-6 animate-spin text-[#1D6FB8]" />
-            <span>Loading special liveries…</span>
-          </div>
-        ) : liveries.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center gap-2 text-[#8B877C] font-mono">
-            <Palette className="w-8 h-8 opacity-40 text-[#B6B1A4]" />
-            <p className="text-sm">No special liveries match current filters.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 pb-12">
-            {liveries.map((item) => {
+      <div className="livery-grid">
+        {loading ? Array.from({ length: 8 }).map((_, index) => <div className="livery-card-skeleton" key={index} />)
+          : error ? (
+            <div className="livery-empty"><XCircle size={22} /><strong>Couldn't load liveries</strong><span>{error}</span></div>
+          ) : visibleLiveries.length === 0 ? (
+            <div className="livery-empty"><SlidersHorizontal size={22} /><strong>No liveries match</strong><span>Adjust or clear the active filters.</span></div>
+          ) : visibleLiveries.map((item) => (
+            <LiveryCard key={item.skin_id} item={item} onOpenModal={() => setModalItem(item)} onViewInFleet={onViewInFleet} />
+          ))}
+      </div>
+
+      {modalItem && <AircraftListModal item={modalItem} onClose={() => setModalItem(null)} onViewInFleet={onViewInFleet} />}
+    </div>
+  );
+}
+
+// The server tags a livery from the feeds it has synced (boosters, the
+// challenge ladder, shop offers, the duty free). A DB that predates those
+// syncs still knows a challenge livery by its name, so that stays as the
+// fallback — and a market livery is always taggable from `source` alone.
+function liveryTags(item: LiveryItem): LiveryTag[] {
+  const tags = item.tags ?? [];
+  if (tags.length > 0) return tags;
+  const fallback: LiveryTag[] = [];
+  const challenge = challengeTag(item.name);
+  if (challenge) {
+    fallback.push({ kind: "challenge", label: challenge, title: `Awarded by the ${challenge} challenge` });
+  }
+  if (item.is_user_created) {
+    fallback.push({ kind: "market", label: "User-created", title: "Player-designed livery sold on the livery market" });
+  }
+  return fallback;
+}
+
+function LiveryCard({ item, onOpenModal, onViewInFleet }: { item: LiveryItem; onOpenModal: () => void; onViewInFleet: (liveryName: string) => void }) {
+  const visible = item.aircraft.slice(0, CHIP_LIMIT);
+  const overflow = item.aircraft.length - visible.length;
+  const tags = liveryTags(item);
+  const added = addedLabel(item.first_seen);
+  const addedDays = daysSinceAdded(item.first_seen);
+  const isNew = addedDays !== null && addedDays <= NEW_WINDOW_DAYS;
+
+  return (
+    <article className={`livery-card${item.is_owned ? " is-owned" : ""}`}>
+      <div className="livery-image">
+        <img src={`/api/skin_image/${item.skin_id}`} alt={item.name} loading="lazy" />
+        <span className={`livery-badge${item.is_owned ? " is-owned" : " is-missing"}`}>
+          {item.is_owned ? <><CheckCircle2 size={11} /> Owned ({item.owned_count})</> : <><XCircle size={11} /> Not owned</>}
+        </span>
+      </div>
+
+      <div className="livery-head">
+        <h4 title={displayLiveryName(item)}>{displayLiveryName(item)}</h4>
+        {(tags.length > 0 || isNew) && (
+          <div className="livery-tags">
+            {isNew && (
+              <span className="livery-tag is-new" title={`Added to the local DB ${added}`}>
+                <Sparkles size={10} />
+                <span>{addedDays === 0 ? "New today" : `New (${addedDays}d)`}</span>
+              </span>
+            )}
+            {tags.map((tag) => {
+              const { cls, Icon } = TAG_STYLES[tag.kind] ?? TAG_STYLES.market;
               return (
-                <div
-                  key={item.skin_id}
-                  className="bg-[#FFFFFF]/90 backdrop-blur rounded-xl border border-[#E5E1D6]/80 p-4 flex flex-col justify-between gap-3.5 transition-all duration-200 hover:-translate-y-1 hover:shadow-xl"
-                >
-                  {/* Image Box */}
-                  <div className="relative w-full h-32 rounded-lg bg-white border border-[#E5E1D6]/80 flex items-center justify-center overflow-hidden p-2">
-                    <img
-                      src={`/api/skin_image/${item.skin_id}`}
-                      alt={item.name}
-                      className="max-w-full max-h-full object-contain filter drop-shadow-md transition-transform duration-200 group-hover:scale-105"
-                      loading="lazy"
-                    />
-
-                    {/* Top Right Ownership Badge */}
-                    <div className="absolute top-2 right-2">
-                      {item.is_owned ? (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#1E7E46]/20 border border-[#1E7E46]/40 text-[#1E7E46] flex items-center gap-1 shadow-sm">
-                          <CheckCircle2 className="w-3 h-3" /> OWNED ({item.owned_count})
-                        </span>
-                      ) : (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-[#F8F6F1]/80 border border-[#CFC9BA] text-[#8B877C] flex items-center gap-1">
-                          <XCircle className="w-3 h-3" /> NOT OWNED
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Title & Info */}
-                  <div>
-                    <h4 className="text-sm font-bold text-[#0A1E3C] leading-snug line-clamp-2">
-                      {item.name}
-                    </h4>
-                    {item.boosters && (
-                      <p className="text-[10px] font-mono text-[#8B877C] mt-1 flex items-center gap-1 truncate">
-                        <Gift className="w-3 h-3 text-[#1D6FB8]" />
-                        <span>{item.boosters}</span>
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Assigned Aircraft Section */}
-                  <div className="bg-white/80 border border-[#E5E1D6]/70 rounded-lg p-2.5 space-y-1.5 mt-auto">
-                    <div className="flex justify-between items-center text-[10px] font-mono">
-                      <span className="text-[#8B877C] font-bold uppercase">Aircraft in Fleet</span>
-                      <span
-                        className={`font-semibold ${
-                          item.is_owned ? "text-[#1E7E46]" : "text-[#8B877C]"
-                        }`}
-                      >
-                        {item.owned_count} active
-                      </span>
-                    </div>
-
-                    {item.is_owned && item.aircraft.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5 items-center">
-                        {item.aircraft.slice(0, 4).map((p) => (
-                          <span
-                            key={p.aircraft_id}
-                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#F8F6F1] border border-[#E5E1D6] text-[10px] font-mono text-[#0A1E3C]"
-                          >
-                            <Plane className="w-2.5 h-2.5 text-[#1D6FB8]" />
-                            <span className="truncate max-w-[90px]">{p.name}</span>
-                          </span>
-                        ))}
-                        {item.aircraft.length > 4 && (
-                          <button
-                            onClick={() => handleOpenAircraftModal(item)}
-                            className="text-[10px] font-mono text-[#1D6FB8] hover:text-[#1D6FB8] underline font-medium"
-                          >
-                            +{item.aircraft.length - 4} more…
-                          </button>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-[10px] text-[#8B877C] italic">
-                        Not currently flying on any aircraft.
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Card Action */}
-                  <div className="flex items-center justify-between pt-1">
-                    {item.is_owned ? (
-                      <button
-                        onClick={() => onViewInFleet(item.skin_id)}
-                        className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg bg-[#05164D]/10 hover:bg-[#05164D]/20 border border-[#05164D]/30 text-[#1D6FB8] text-xs font-mono font-semibold transition"
-                      >
-                        <span>View in Fleet</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    ) : (
-                      <div className="w-full py-1.5 text-center text-[10px] font-mono text-[#8B877C]">
-                        Available via drops / auction
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <span className={`livery-tag ${cls}`} key={`${tag.kind}-${tag.label}`} title={tag.title}>
+                  <Icon size={10} />
+                  <span>{tag.label}</span>
+                </span>
               );
             })}
           </div>
         )}
+        <p className="livery-added" title="When a scrape first stored this livery locally">
+          <CalendarClock size={11} /><span>Added {added ?? "unknown"}</span>
+        </p>
       </div>
 
-      {/* Aircraft List Modal */}
-      <AircraftListModal
-        isOpen={modalData.isOpen}
-        onClose={() => setModalData((prev) => ({ ...prev, isOpen: false }))}
-        liveryName={modalData.name}
-        skinId={modalData.skinId}
-        planes={modalData.planes}
-        onViewInFleet={onViewInFleet}
-      />
-    </div>
+      <div className="livery-fleet-box">
+        <div className="livery-fleet-head">
+          <span>Aircraft in fleet</span>
+          <strong>{item.owned_count} active</strong>
+        </div>
+        {item.is_owned && item.aircraft.length > 0 ? (
+          <div className="livery-chip-row">
+            {visible.map((plane) => (
+              <span className="livery-aircraft-chip" key={plane.aircraft_id}><Plane size={10} /><span>{plane.name}</span></span>
+            ))}
+            {overflow > 0 && <button className="livery-more-button" onClick={onOpenModal}>+{overflow} more…</button>}
+          </div>
+        ) : (
+          <p className="livery-empty-fleet">Not currently flying on any aircraft.</p>
+        )}
+      </div>
+
+      {item.is_owned ? (
+        <button className="livery-view-button is-block" onClick={() => onViewInFleet(item.name)}>
+          <span>View in Fleet</span>
+        </button>
+      ) : (
+        <p className="livery-locked-note">Available via drops / auction</p>
+      )}
+    </article>
   );
-};
+}

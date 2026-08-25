@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS mobile_aircraft (
     seats_bus   INTEGER,
     seats_first INTEGER,
     payload_t   INTEGER,
-    wear        REAL,
     raw_price   INTEGER,
+    purchased_at TEXT,
     first_seen  TEXT DEFAULT (datetime('now')),
     last_seen   TEXT DEFAULT (datetime('now'))
 );
@@ -103,7 +103,72 @@ CREATE TABLE IF NOT EXISTS mobile_skin_images (
     fetched_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (skin_id, size)
 );
+-- The challenge ladder: one row per challenge, one per reward slot in it.
+-- Same idea as the booster tables — the reward list is the only place a
+-- challenge livery is ever named, since those are awarded and never sold.
+-- `track` separates the free ladder from the paid battle-pass one, which
+-- hand out different rewards at the same objective.
+CREATE TABLE IF NOT EXISTS mobile_challenges (
+    challenge_id   INTEGER PRIMARY KEY,
+    title          TEXT,
+    challenge_type TEXT,
+    start_date     TEXT,
+    end_date       TEXT,
+    grace_end_date TEXT,
+    progress       INTEGER,
+    rank           INTEGER,
+    first_seen     TEXT DEFAULT (datetime('now')),
+    last_seen      TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS mobile_challenge_rewards (
+    challenge_id INTEGER NOT NULL,
+    objective_id INTEGER NOT NULL,
+    track        TEXT NOT NULL,          -- 'free' | 'battlepass'
+    reward_id    INTEGER NOT NULL,
+    goal         INTEGER,                -- what the objective asks for
+    skin_id      INTEGER,
+    model_id     INTEGER,
+    rarity       INTEGER,
+    effect_type  TEXT,
+    label        TEXT,
+    amount       TEXT,
+    claimed_date TEXT,
+    first_seen   TEXT DEFAULT (datetime('now')),
+    last_seen    TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (challenge_id, objective_id, track, reward_id)
+);
+-- The shop ("workshop") feed and what each offer contains. Packs and battle
+-- passes are the other place a livery you cannot buy in the duty free shows
+-- up with a name and a price against it.
+CREATE TABLE IF NOT EXISTS mobile_shop_offers (
+    offer_id   INTEGER PRIMARY KEY,
+    title      TEXT,
+    template   TEXT,
+    cost       REAL,
+    currency   TEXT,
+    start_date TEXT,
+    end_date   TEXT,
+    first_seen TEXT DEFAULT (datetime('now')),
+    last_seen  TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS mobile_shop_offer_items (
+    offer_id    INTEGER NOT NULL,
+    item_order  INTEGER NOT NULL,
+    skin_id     INTEGER,
+    model_id    INTEGER,
+    rarity      INTEGER,
+    effect_type TEXT,
+    label       TEXT,
+    amount      TEXT,
+    first_seen  TEXT DEFAULT (datetime('now')),
+    last_seen   TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (offer_id, item_order)
+);
 CREATE INDEX IF NOT EXISTS ix_mobile_skins_model ON mobile_skins(model_id);
+CREATE INDEX IF NOT EXISTS ix_mobile_challenge_rewards_skin
+    ON mobile_challenge_rewards(skin_id);
+CREATE INDEX IF NOT EXISTS ix_mobile_shop_offer_items_skin
+    ON mobile_shop_offer_items(skin_id);
 CREATE INDEX IF NOT EXISTS ix_mobile_booster_cards_skin
     ON mobile_booster_cards(skin_id);
 CREATE INDEX IF NOT EXISTS ix_mobile_booster_cards_rarity
@@ -137,6 +202,14 @@ SELECT s.skin_id,
           FROM mobile_booster_cards c
           JOIN mobile_boosters b ON b.booster_id = c.booster_id
          WHERE c.skin_id = s.skin_id)                       AS boosters,
+       (SELECT GROUP_CONCAT(DISTINCT ch.title)
+          FROM mobile_challenge_rewards r
+          JOIN mobile_challenges ch ON ch.challenge_id = r.challenge_id
+         WHERE r.skin_id = s.skin_id)                       AS challenges,
+       (SELECT GROUP_CONCAT(DISTINCT o.title)
+          FROM mobile_shop_offer_items i
+          JOIN mobile_shop_offers o ON o.offer_id = i.offer_id
+         WHERE i.skin_id = s.skin_id)                       AS shop_offers,
        (SELECT COUNT(*) FROM mobile_skin_images i
          WHERE i.skin_id = s.skin_id)                       AS images
   FROM mobile_skins s;
@@ -165,6 +238,12 @@ _SKIN_COLUMNS = [
     ("owned", "INTEGER"),          # 1 once the duty free reports it purchased
 ]
 
+_AIRCRAFT_COLUMNS = [
+    # Only the full aircraft profile exposes this. The compact fleet endpoint
+    # deliberately omits it, so it is filled incrementally as profiles are read.
+    ("purchased_at", "TEXT"),
+]
+
 
 class MobileStore:
     def __init__(self, conn: Optional[sqlite3.Connection] = None):
@@ -182,6 +261,14 @@ class MobileStore:
         for name, sql_type in _SKIN_COLUMNS:
             if name not in cols:
                 self._exec(f"ALTER TABLE mobile_skins ADD COLUMN {name} {sql_type}", ())
+        try:
+            aircraft_cols = {r[1] for r in
+                             self.conn.execute("PRAGMA table_info(mobile_aircraft)").fetchall()}
+        except sqlite3.Error:
+            aircraft_cols = set()
+        for name, sql_type in _AIRCRAFT_COLUMNS:
+            if name not in aircraft_cols:
+                self._exec(f"ALTER TABLE mobile_aircraft ADD COLUMN {name} {sql_type}", ())
         # after the ALTERs, so the view can select the columns they just added
         try:
             self.conn.executescript(_OVERVIEW_VIEW)
@@ -261,17 +348,18 @@ class MobileStore:
             return
         self._exec("""
             INSERT INTO mobile_aircraft
-              (aircraft_id,skin_id,name,hub_id,seats_eco,seats_bus,seats_first,
-               payload_t,wear,last_seen)
+              (aircraft_id,skin_id,model_id,name,hub_id,seats_eco,seats_bus,
+               seats_first,payload_t,last_seen)
             VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))
             ON CONFLICT(aircraft_id) DO UPDATE SET
-              skin_id=excluded.skin_id, name=excluded.name, hub_id=excluded.hub_id,
+              skin_id=excluded.skin_id, model_id=excluded.model_id,
+              name=excluded.name, hub_id=excluded.hub_id,
               seats_eco=excluded.seats_eco, seats_bus=excluded.seats_bus,
-              seats_first=excluded.seats_first, wear=excluded.wear,
+              seats_first=excluded.seats_first,
               last_seen=datetime('now')
-        """, (it.get("id"), it.get("as_id"), it.get("n"), it.get("h_id"),
-              it.get("se"), it.get("sb"), it.get("sf"), it.get("sp"),
-              _num(it.get("w"))))
+        """, (it.get("id"), it.get("as_id"), it.get("al_id"), it.get("n"),
+              it.get("h_id"), it.get("se"), it.get("sb"), it.get("sf"),
+              it.get("sp")))
         self.upsert_skin(it.get("as_id"))
 
     def observe_aircraft_profile(self, p: dict):
@@ -284,19 +372,21 @@ class MobileStore:
         self._exec("""
             INSERT INTO mobile_aircraft
               (aircraft_id,model_id,name,hub_id,hub_name,seats_eco,seats_bus,
-               seats_first,payload_t,wear,raw_price,last_seen)
+               seats_first,payload_t,raw_price,purchased_at,last_seen)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
             ON CONFLICT(aircraft_id) DO UPDATE SET
               model_id=COALESCE(excluded.model_id, mobile_aircraft.model_id),
               name=excluded.name, hub_id=excluded.hub_id, hub_name=excluded.hub_name,
               seats_eco=excluded.seats_eco, seats_bus=excluded.seats_bus,
               seats_first=excluded.seats_first, payload_t=excluded.payload_t,
-              wear=excluded.wear, raw_price=excluded.raw_price,
+              raw_price=excluded.raw_price,
+              purchased_at=COALESCE(excluded.purchased_at,
+                                    mobile_aircraft.purchased_at),
               last_seen=datetime('now')
         """, (p.get("id"), model.get("id"), p.get("name"), hub.get("id"),
               hub.get("name"), seats.get("eco"), seats.get("business"),
-              seats.get("first"), p.get("payload"), _num(p.get("wear")),
-              p.get("price")))
+              seats.get("first"), p.get("payload"),
+              p.get("price"), _date(p.get("purchasedAt"))))
 
     def observe_auction(self, a: dict):
         ac = a.get("aircraft") or {}
@@ -386,6 +476,128 @@ class MobileStore:
                   pity.get("gaugeRarity"), booster_id))
         return n
 
+    # ── challenge ───────────────────────────────────────────────────────
+    def record_challenge(self, ch: dict) -> int:
+        """Store one entry from GET challenge/. Returns the reward-row count.
+
+        Like `record_droprate`, the point is as much the livery backfill as the
+        ladder itself: an `aircraft` reward embeds a full `skin` object, and a
+        challenge livery is named nowhere else — it is awarded, never sold.
+        """
+        if not ch or ch.get("id") is None:
+            return 0
+        cid = ch["id"]
+        prog = ch.get("airlineProgress") or {}
+        self._exec("""
+            INSERT INTO mobile_challenges
+              (challenge_id,title,challenge_type,start_date,end_date,
+               grace_end_date,progress,rank,last_seen)
+            VALUES (?,?,?,?,?,?,?,?,datetime('now'))
+            ON CONFLICT(challenge_id) DO UPDATE SET
+              title=excluded.title, challenge_type=excluded.challenge_type,
+              start_date=excluded.start_date, end_date=excluded.end_date,
+              grace_end_date=excluded.grace_end_date,
+              progress=excluded.progress, rank=excluded.rank,
+              last_seen=datetime('now')
+        """, (cid, ch.get("title"), ch.get("challengeType"),
+              _date(ch.get("startDate")), _date(ch.get("endDate")),
+              _date(ch.get("graceEndDate")), prog.get("progress"),
+              prog.get("rank")))
+
+        # The banner planes: the liveries the challenge multiplies, which are
+        # also the ones its top objectives hand out.
+        for a in (ch.get("aircraft") or []):
+            self._record_skin_object(a, name=a.get("name"))
+
+        n = 0
+        for obj in (ch.get("objectives") or []):
+            for track, key, claim_key in (
+                    ("free", "rewards", "claimedDate"),
+                    ("battlepass", "battlePassRewards", "battlePassClaimedDate")):
+                for r in (obj.get(key) or []):
+                    skin = r.get("skin") or {}
+                    self._record_skin_object(skin, name=r.get("label"),
+                                             model_id=r.get("aircraftModelId"),
+                                             rarity=r.get("rarity"))
+                    self._exec("""
+                        INSERT INTO mobile_challenge_rewards
+                          (challenge_id,objective_id,track,reward_id,goal,
+                           skin_id,model_id,rarity,effect_type,label,amount,
+                           claimed_date,last_seen)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                        ON CONFLICT(challenge_id,objective_id,track,reward_id)
+                        DO UPDATE SET
+                          goal=excluded.goal, skin_id=excluded.skin_id,
+                          model_id=excluded.model_id, rarity=excluded.rarity,
+                          effect_type=excluded.effect_type, label=excluded.label,
+                          amount=excluded.amount, claimed_date=excluded.claimed_date,
+                          last_seen=datetime('now')
+                    """, (cid, obj.get("id"), track, r.get("id"),
+                          obj.get("goal"), skin.get("id"),
+                          r.get("aircraftModelId"), r.get("rarity"),
+                          r.get("effectType"), r.get("label"),
+                          r.get("amount"), _date(obj.get(claim_key))))
+                    n += 1
+        return n
+
+    # ── shop ("workshop") offers ────────────────────────────────────────
+    def record_shop_offer(self, o: dict) -> int:
+        """Store one entry from GET shop2023/offers. Returns the item count."""
+        if not o or o.get("id") is None:
+            return 0
+        oid = o["id"]
+        self._exec("""
+            INSERT INTO mobile_shop_offers
+              (offer_id,title,template,cost,currency,start_date,end_date,last_seen)
+            VALUES (?,?,?,?,?,?,?,datetime('now'))
+            ON CONFLICT(offer_id) DO UPDATE SET
+              title=excluded.title, template=excluded.template,
+              cost=excluded.cost, currency=excluded.currency,
+              start_date=excluded.start_date, end_date=excluded.end_date,
+              last_seen=datetime('now')
+        """, (oid, o.get("title"), o.get("template"),
+              _num(o.get("purchaseCost")), o.get("purchaseCurrency"),
+              _date(o.get("startDate")), _date(o.get("endDate"))))
+        n = 0
+        for i, it in enumerate(o.get("content") or []):
+            if not isinstance(it, dict):
+                continue
+            skin = it.get("skin") or {}
+            # Unlike the challenge, a shop item states the livery's own type,
+            # so its class is read off the payload instead of inferred.
+            self._record_skin_object(
+                skin, name=it.get("labelLong") or it.get("label"),
+                model_id=it.get("aircraftModelId"), rarity=it.get("rarity"),
+                source=_SKIN_SOURCE_BY_TYPE.get(skin.get("type")))
+            self._exec("""
+                INSERT INTO mobile_shop_offer_items
+                  (offer_id,item_order,skin_id,model_id,rarity,effect_type,
+                   label,amount,last_seen)
+                VALUES (?,?,?,?,?,?,?,?,datetime('now'))
+                ON CONFLICT(offer_id,item_order) DO UPDATE SET
+                  skin_id=excluded.skin_id, model_id=excluded.model_id,
+                  rarity=excluded.rarity, effect_type=excluded.effect_type,
+                  label=excluded.label, amount=excluded.amount,
+                  last_seen=datetime('now')
+            """, (oid, i, skin.get("id"), it.get("aircraftModelId"),
+                  it.get("rarity"), it.get("effectType"),
+                  it.get("labelLong") or it.get("label"), it.get("amount")))
+            n += 1
+        return n
+
+    def _record_skin_object(self, skin: dict, name=None, model_id=None,
+                            rarity=None, source=None):
+        """Upsert the `{id, name, picturePath}` shape both feeds embed."""
+        if not skin or skin.get("id") is None:
+            return
+        pic = skin.get("picturePath") or {}
+        path = _strip_ver(pic.get("big") or pic.get("medium"))
+        name = skin.get("name") or name
+        self.upsert_skin(skin["id"], model_id=model_id, name=name,
+                         livery_type=skin.get("type"), picture_path=path,
+                         rarity=rarity,
+                         source=source or _infer_source(name, path))
+
     def store_skin_image(self, skin_id: int, size: str, data: bytes,
                          source_url: str = None):
         if skin_id is None or not data:
@@ -420,6 +632,8 @@ class MobileStore:
         out = {}
         for t in ("mobile_models", "mobile_skins", "mobile_aircraft",
                   "mobile_boosters", "mobile_booster_cards",
+                  "mobile_challenges", "mobile_challenge_rewards",
+                  "mobile_shop_offers", "mobile_shop_offer_items",
                   "mobile_skin_images"):
             try:
                 out[t] = c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
@@ -440,6 +654,22 @@ def _date(v):
     if isinstance(v, dict):
         return v.get("date")
     return v
+
+
+def _infer_source(name, path):
+    """The only classification a reward payload proves on its own.
+
+    A `painterPublic` picture is a player-designed livery by construction, and
+    the game names a model's own paint "<model> - (Manufacturer livery)".
+    Everything else is left unset for an endpoint that states it outright (the
+    duty free's buckets, the SHM's `skin.type`) or for `skin_name_sync`'s
+    artwork fallback.
+    """
+    if path and "/painterPublic/" in path:
+        return "market"
+    if name and name.strip().endswith("(Manufacturer livery)"):
+        return "manufacturer"
+    return None
 
 
 def _strip_ver(path):

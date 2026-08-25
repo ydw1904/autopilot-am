@@ -46,10 +46,11 @@ def fleet_conn(tmp_path, monkeypatch):
 
     # Insert sample skins into mobile_skins
     c.execute("""
-        INSERT INTO mobile_skins (skin_id, model_id, name, picture_path)
-        VALUES (2, 2, 'A330-300 - (Manufacturer livery)', '/common/images/Aircrafts/skins/big/a330-300.png'),
-               (4638064, 30, '737-400 - Challenge Turkish Airways', '/common/images/Aircrafts/skins/big/737-400-challenge-turkish-airways.png'),
-               (4621811, 24, 'A321XLR - Challenge Project Blossom', '/common/images/Aircrafts/skins/big/a321xlr-challenge-project-blossom.png');
+        INSERT INTO mobile_skins (skin_id, model_id, name, picture_path, source)
+        VALUES (2, 2, 'A330-300 - (Manufacturer livery)', '/common/images/Aircrafts/skins/big/a330-300.png', 'manufacturer'),
+               (4638064, 30, '737-400 - Challenge Turkish Airways', '/common/images/Aircrafts/skins/big/737-400-challenge-turkish-airways.png', 'playrion'),
+               (4621811, 24, 'A321XLR - Challenge Project Blossom', '/common/images/Aircrafts/skins/big/a321xlr-challenge-project-blossom.png', 'playrion'),
+               (4245917, 19, 'LH-A388', '/common/images/painterPublic/skins/big/p-9358830-1-673deb3894c28.png', 'market');
     """)
 
     # Insert dummy image blob for skin 4638064
@@ -68,6 +69,23 @@ def test_get_fleet_summary_stats(fleet_conn):
     assert stats["active"] == 3
     assert stats["idle"] == 1
     assert stats["special_skin_count"] == 2  # plane 103 and 104 with Turkish Airways skin
+
+
+def test_upsert_fleet_prunes_hubs_not_seen_in_the_new_sync(fleet_conn):
+    # A hub-scoped sync that no longer sees aircraft 103 (sold/scrapped in
+    # game) must drop it, while leaving the untouched FRA hub alone.
+    dbmod.upsert_fleet(
+        [{"id": 104, "name": "MPM-C002-001", "model": "747-200B", "util": 85.0,
+          "hub": "MPM", "skin_id": 4638064, "skin_img": "737-400-challenge-turkish-airways.png"}],
+        prune_hubs=["MPM"],
+    )
+    ids = {p["aircraft_id"] for p in dbmod.get_fleet_aircraft()}
+    assert ids == {101, 102, 104}
+
+    # A full sync across all synced hubs that returns no aircraft at all
+    # clears every one of those hubs rather than leaving stale rows behind.
+    dbmod.upsert_fleet([], prune_hubs=["FRA", "MPM"])
+    assert dbmod.get_fleet_aircraft() == []
 
 
 def test_get_fleet_aircraft_filters(fleet_conn):
@@ -91,6 +109,127 @@ def test_get_fleet_aircraft_filters(fleet_conn):
     assert len(c001_planes) == 2
 
 
+def test_get_fleet_aircraft_page_reports_total_and_searches_across_fields(fleet_conn):
+    page = dbmod.get_fleet_aircraft_page(query="A330", limit=1, offset=0)
+    assert page["total"] == 2
+    assert page["limit"] == 1
+    assert len(page["items"]) == 1
+
+    hub_page = dbmod.get_fleet_aircraft_page(query="MPM", limit=50)
+    assert hub_page["total"] == 2
+    assert {row["hub_iata"] for row in hub_page["items"]} == {"MPM"}
+
+
+def test_aircraft_custom_tags_are_many_to_many_searchable_and_sync_safe(fleet_conn):
+    updated = dbmod.update_aircraft_tags(
+        [101, 103], add=["SHM sale", " Storage "]
+    )
+    assert updated == {
+        101: ["SHM sale", "Storage"],
+        103: ["SHM sale", "Storage"],
+    }
+
+    # A third independent tag and a case-insensitive duplicate both keep the
+    # relationship many-to-many without duplicating a chip.
+    dbmod.update_aircraft_tags([101], add=["Collector", "shm SALE"])
+    plane = next(row for row in dbmod.get_fleet_aircraft()
+                 if row["aircraft_id"] == 101)
+    assert plane["tags"] == ["Collector", "SHM sale", "Storage"]
+
+    assert {row["aircraft_id"] for row in dbmod.get_fleet_aircraft(tag="storage")} == {101, 103}
+    assert dbmod.get_fleet_aircraft_page(query="collector")["total"] == 1
+    assert dbmod.get_aircraft_tag_counts() == [
+        {"tag": "Collector", "count": 1},
+        {"tag": "SHM sale", "count": 2},
+        {"tag": "Storage", "count": 2},
+    ]
+
+    # A normal sync updates game-owned fields without replacing local tags.
+    dbmod.upsert_fleet([
+        {"id": 101, "name": "FRA-C001-001", "model": "A330-300", "util": 90.0,
+         "hub": "FRA", "skin_id": 2, "skin_img": "a330-300.png"},
+    ])
+    synced = next(row for row in dbmod.get_fleet_aircraft()
+                  if row["aircraft_id"] == 101)
+    assert synced["tags"] == ["Collector", "SHM sale", "Storage"]
+
+    dbmod.update_aircraft_tags([101], remove=["storage"])
+    after_remove = next(row for row in dbmod.get_fleet_aircraft()
+                        if row["aircraft_id"] == 101)
+    assert after_remove["tags"] == ["Collector", "SHM sale"]
+
+
+def test_aircraft_tags_are_pruned_when_the_aircraft_leaves_the_synced_fleet(fleet_conn):
+    dbmod.update_aircraft_tags([103], add=["Sell"])
+    dbmod.upsert_fleet(
+        [{"id": 104, "name": "MPM-C002-001", "model": "747-200B", "util": 85.0,
+          "hub": "MPM", "skin_id": 4638064,
+          "skin_img": "737-400-challenge-turkish-airways.png"}],
+        prune_hubs=["MPM"],
+    )
+    assert fleet_conn.execute(
+        "SELECT COUNT(*) FROM aircraft_tags WHERE aircraft_id = 103"
+    ).fetchone()[0] == 0
+
+
+def test_aircraft_profile_purchase_date_is_cached_and_joined_into_fleet(fleet_conn):
+    store = mobile_store.MobileStore(fleet_conn)
+    store.observe_aircraft_profile({
+        "id": 101,
+        "name": "FRA-C001-001",
+        "model": {"id": 14, "name": "A330-300"},
+        "hub": {"id": 9480309, "name": "Frankfurt"},
+        "seats": {"eco": 199, "business": 110, "first": 47},
+        "payload": 27,
+        "price": 238600000,
+        "purchasedAt": {
+            "date": "2026-04-27 14:57:35.000000",
+            "timezone": "UTC",
+        },
+    })
+    store.commit()
+
+    aircraft = next(item for item in dbmod.get_fleet_aircraft()
+                    if item["aircraft_id"] == 101)
+    assert aircraft["purchased_at"] == "2026-04-27 14:57:35.000000"
+
+
+def test_command_center_snapshot_surfaces_work_and_honest_freshness(fleet_conn):
+    fleet_conn.execute(
+        "CREATE TABLE circuits (hub_iata TEXT, status TEXT, weekly_rev REAL)"
+    )
+    fleet_conn.executemany(
+        "INSERT INTO circuits VALUES (?, ?, ?)",
+        [("FRA", "planned", 5000), ("FRA", "completed", 2000)],
+    )
+    fleet_conn.execute(
+        "CREATE TABLE routes (is_owned INTEGER NOT NULL DEFAULT 0)"
+    )
+    fleet_conn.executemany("INSERT INTO routes VALUES (?)", [(1,), (0,), (0,)])
+    fleet_conn.execute(
+        "UPDATE fleet SET updated_at = '2026-08-20 00:00:00' WHERE aircraft_id = 103"
+    )
+    fleet_conn.execute(
+        "UPDATE fleet SET updated_at = '2026-08-23 00:00:00' WHERE aircraft_id != 103"
+    )
+    fleet_conn.commit()
+
+    snapshot = dbmod.get_command_center_snapshot(
+        browser_connected=False, mobile_configured=True
+    )
+    assert snapshot["portfolio"]["planned_weekly_rev"] == 5000
+    assert snapshot["portfolio"]["operating_weekly_rev"] == 2000
+    assert snapshot["data_health"]["stale_aircraft"] == 1
+    assert snapshot["data_health"]["routes"] == 3
+    assert snapshot["data_health"]["owned_routes"] == 1
+    assert snapshot["hubs"][0]["circuits"] == 2
+    assert {alert["id"] for alert in snapshot["alerts"]} >= {"browser", "idle", "planned", "stale"}
+    browser_alert = next(alert for alert in snapshot["alerts"] if alert["id"] == "browser")
+    assert browser_alert["tone"] == "warning"
+    assert "Mobile fleet sync" in browser_alert["detail"]
+    assert snapshot["status"]["mobile_configured"] is True
+
+
 def test_get_livery_collection_excludes_manufacturer(fleet_conn):
     collection = dbmod.get_livery_collection(include_manufacturer=False)
     # Manufacturer skin (skin_id 2) should NOT be in the collection
@@ -112,6 +251,72 @@ def test_get_livery_collection_ownership_and_aircraft_names(fleet_conn):
     assert blossom["is_owned"] is False
     assert blossom["owned_count"] == 0
     assert blossom["aircraft_names"] == []
+
+
+def test_get_livery_collection_user_created_flag_and_filter(fleet_conn):
+    # By default the player-designed market livery is present and flagged.
+    with_market = dbmod.get_livery_collection(include_manufacturer=False)
+    lh = next(s for s in with_market if s["skin_id"] == 4245917)
+    assert lh["is_user_created"] is True
+    official = next(s for s in with_market if s["skin_id"] == 4638064)
+    assert official["is_user_created"] is False
+
+    # Opting out drops market liveries but keeps official ones.
+    without_market = dbmod.get_livery_collection(
+        include_manufacturer=False, include_user_created=False
+    )
+    skin_ids = [s["skin_id"] for s in without_market]
+    assert 4245917 not in skin_ids
+    assert 4638064 in skin_ids
+    assert 4621811 in skin_ids
+
+
+def test_livery_tags_name_each_feed_and_leave_factory_paint_out(fleet_conn):
+    # A livery handed out by two feeds at once (a challenge ladder AND a
+    # travel-card offer) earns a chip for each, while an offer whose aircraft
+    # wears the model's own paint contributes no livery at all — its skin is a
+    # manufacturer one and the album never lists those.
+    store = mobile_store.MobileStore(fleet_conn)
+    store.record_challenge({
+        "id": 900, "title": "Turkish Airways Challenge!",
+        "challengeType": "km.lines",
+        "objectives": [{
+            "id": 1, "goal": 0,
+            "rewards": [{"id": 11, "effectType": "aircraft", "rarity": 4,
+                         "label": "737-400 - Challenge Turkish Airways",
+                         "aircraftModelId": 30,
+                         "skin": {"id": 4638064,
+                                  "name": "737-400 - Challenge Turkish Airways"}}],
+        }],
+    })
+    store.record_shop_offer({
+        "id": 7001, "title": "737-400 - Challenge Turkish Airways",
+        "template": "aircraft", "purchaseCost": 25000, "purchaseCurrency": "tc",
+        "content": [{"effectType": "aircraft",
+                     "label": "737-400 - Challenge Turkish Airways",
+                     "skin": {"id": 4638064, "type": 1}}],
+    })
+    store.record_shop_offer({
+        "id": 7002, "title": "Commander Pack", "template": "pack",
+        "purchaseCost": 9.99, "purchaseCurrency": "realMoney",
+        "content": [{"effectType": "aircraft",
+                     "label": "A330-300 - (Manufacturer livery)",
+                     "skin": {"id": 2, "type": 0}}],
+    })
+    store.commit()
+
+    album = {s["skin_id"]: s for s in dbmod.get_livery_collection()}
+    assert 2 not in album, "a pack's factory paint is not a collectable livery"
+
+    kinds = {t["kind"]: t for t in album[4638064]["tags"]}
+    assert set(kinds) == {"challenge", "shop_tc"}
+    assert kinds["challenge"]["label"] == "Turkish Airways"
+    assert "25,000 travel cards" in kinds["shop_tc"]["title"]
+
+    # The plane-only pack is still recorded — it just tags a livery the album
+    # filters out, so nothing claims that pack sells a paint scheme.
+    manufacturer_tags = dbmod.get_livery_tags()[2]
+    assert [t["kind"] for t in manufacturer_tags] == ["shop_pack"]
 
 
 def test_get_skin_image_bytes(fleet_conn):
@@ -178,9 +383,36 @@ def test_daily_fleet_liveries(fleet_conn):
     assert item["fleet_count"] == 2
     assert item["day"] == "2026-08-23"
     assert item["sample_aircraft"]["name"] == "MPM-C002-001"
+    assert item["hubs"] == [{"hub_iata": "MPM", "count": 2}]
 
     # Same day in, same order out; the day is the only thing that shuffles it.
     assert dbmod.get_daily_fleet_liveries(count=3, day="2026-08-23") == picks
+
+
+def test_daily_fleet_liveries_list_every_hub_flying_the_livery(fleet_conn):
+    # The showcase card names hubs, not the sample aircraft's hub, so a livery
+    # split across bases has to report all of them, busiest first.
+    dbmod.upsert_fleet([
+        {"id": 103, "name": "MPM-IDLE-01", "model": "747-200B", "util": 0.0, "hub": "MPM",
+         "skin_id": 4638064, "skin_img": "737-400-challenge-turkish-airways.png"},
+        {"id": 104, "name": "MPM-C002-001", "model": "747-200B", "util": 85.0, "hub": "MPM",
+         "skin_id": 4638064, "skin_img": "737-400-challenge-turkish-airways.png"},
+        {"id": 105, "name": "GRU-TK-01", "model": "747-200B", "util": 40.0, "hub": "GRU",
+         "skin_id": 4638064, "skin_img": "737-400-challenge-turkish-airways.png"},
+        {"id": 106, "name": "GIG-TK-01", "model": "747-200B", "util": 40.0, "hub": "GIG",
+         "skin_id": 4638064, "skin_img": "737-400-challenge-turkish-airways.png"},
+        {"id": 107, "name": "GIG-TK-02", "model": "747-200B", "util": 40.0, "hub": "GIG",
+         "skin_id": 4638064, "skin_img": "737-400-challenge-turkish-airways.png"},
+    ])
+
+    item = dbmod.get_daily_fleet_liveries(count=3, day="2026-08-23")[0]
+    assert item["fleet_count"] == 5
+    assert item["hubs"] == [
+        {"hub_iata": "GIG", "count": 2},
+        {"hub_iata": "MPM", "count": 2},
+        {"hub_iata": "GRU", "count": 1},
+    ]
+    assert sum(hub["count"] for hub in item["hubs"]) == item["fleet_count"]
 
 
 def test_daily_fleet_liveries_rotate_by_day(fleet_conn):

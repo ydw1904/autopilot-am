@@ -12,6 +12,13 @@ import {
   X,
   RefreshCw,
   Package,
+  ArrowDownAZ,
+  ArrowDownWideNarrow,
+  ArrowUpAZ,
+  ArrowUpNarrowWide,
+  Building2,
+  Gauge,
+  Layers,
 } from "lucide-react";
 import { DailyLivery, FleetAircraft, FleetStats, HaulTab } from "../types";
 import {
@@ -22,6 +29,7 @@ import {
   assignToCircuit,
 } from "../api";
 import { BulkRenameModal } from "./BulkRenameModal";
+import { MenuOption, MenuSelect } from "./MenuSelect";
 import { AssignCircuitModal } from "./AssignCircuitModal";
 
 interface FleetManagementProps {
@@ -41,8 +49,28 @@ const HAUL_TABS: { key: HaulTab; label: string; hint: string }[] = [
   { key: "cargo", label: "Cargo", hint: "freighters" },
 ];
 
-const SELECT_CLASS =
-  "px-3 py-1.5 bg-white/80 border border-[#E5E1D6] rounded-lg text-xs text-[#0A1E3C] font-mono focus:outline-none focus:border-[#05164D] cursor-pointer";
+const UTIL_OPTIONS: MenuOption[] = [
+  { value: "all", label: "All utilization" },
+  { value: "active", label: "Active", hint: "above 0%" },
+  { value: "idle", label: "Idle only", hint: "0%" },
+  { value: "full", label: "Full", hint: "100%" },
+  { value: "partial", label: "Partial", hint: "under 100%" },
+];
+
+const SKIN_OPTIONS: MenuOption[] = [
+  { value: "all", label: "All liveries" },
+  { value: "special", label: "Special liveries only" },
+  { value: "manufacturer", label: "Manufacturer only" },
+];
+
+const SORT_OPTIONS: MenuOption[] = [
+  { value: "name", label: "Name", hint: "A to Z", icon: ArrowDownAZ },
+  { value: "name_desc", label: "Name", hint: "Z to A", icon: ArrowUpAZ },
+  { value: "util_desc", label: "Utilization", hint: "Busiest first", icon: ArrowDownWideNarrow },
+  { value: "util_asc", label: "Utilization", hint: "Idlest first", icon: ArrowUpNarrowWide },
+  { value: "wear_desc", label: "Wear", hint: "Most worn first", icon: ArrowDownWideNarrow },
+  { value: "model", label: "Model", hint: "A to Z", icon: Plane },
+];
 
 const isSpecialLivery = (skinName?: string | null) =>
   !!skinName && !/manufacturer/i.test(skinName);
@@ -177,7 +205,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
 
   const handleSync = async () => {
     setSyncing(true);
-    setStatusMsg("Connecting to game via CDP and syncing fleet…");
+    setStatusMsg("Reading the fleet from the mobile connection…");
     try {
       const hubArg = selectedHub !== "ALL" ? selectedHub : undefined;
       const res = await triggerSyncFleet(hubArg);
@@ -251,6 +279,15 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
     const flag = hubFlags.get(iata);
     return flag ? `${flag} ${iata}` : iata;
   };
+
+  const hubOptions = useMemo<MenuOption[]>(() => [
+    { value: "ALL", label: "All hubs", hint: stats ? `${stats.total} aircraft` : undefined },
+    ...(stats?.hubs || []).map((h) => ({
+      value: h.hub_iata,
+      label: `${flagEmoji(h.country_code)} ${h.hub_iata}`.trim(),
+      hint: `${h.count} aircraft`,
+    })),
+  ], [stats]);
 
   const activeSkinName = useMemo(() => {
     if (!activeSkinId) return null;
@@ -433,57 +470,10 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
           {/* ── Filter toolbar (dropdowns) ──────────────────────────────── */}
           <div className="bg-[#FFFFFF]/60 backdrop-blur border border-[#E5E1D6]/80 rounded-xl p-3 flex flex-wrap gap-2.5 items-center justify-between">
             <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[280px]">
-              {/* Hub */}
-              <select
-                value={selectedHub}
-                onChange={(e) => setSelectedHub(e.target.value)}
-                className={SELECT_CLASS}
-              >
-                <option value="ALL">All hubs{stats ? ` (${stats.total})` : ""}</option>
-                {stats?.hubs.map((h) => (
-                  <option key={h.hub_iata} value={h.hub_iata}>
-                    {flagEmoji(h.country_code)} {h.hub_iata} ({h.count})
-                  </option>
-                ))}
-              </select>
-
-              {/* Utilization */}
-              <select
-                value={utilFilter}
-                onChange={(e) => setUtilFilter(e.target.value)}
-                className={SELECT_CLASS}
-              >
-                <option value="all">All utilization</option>
-                <option value="active">Active (&gt;0%)</option>
-                <option value="idle">Idle only (0%)</option>
-                <option value="full">Full (100%)</option>
-                <option value="partial">Partial (&lt;100%)</option>
-              </select>
-
-              {/* Livery */}
-              <select
-                value={skinFilter}
-                onChange={(e) => setSkinFilter(e.target.value as any)}
-                className={SELECT_CLASS}
-              >
-                <option value="all">All liveries</option>
-                <option value="special">Special liveries only</option>
-                <option value="manufacturer">Manufacturer only</option>
-              </select>
-
-              {/* Sort */}
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
-                className={SELECT_CLASS}
-              >
-                <option value="name">Sort: name</option>
-                <option value="model">Sort: model</option>
-                <option value="hub">Sort: hub</option>
-                <option value="util_desc">Sort: utilization ↓</option>
-                <option value="util_asc">Sort: utilization ↑</option>
-                <option value="wear_desc">Sort: wear ↓</option>
-              </select>
+              <MenuSelect label="Hub" value={selectedHub} onChange={setSelectedHub} options={hubOptions} icon={Building2} />
+              <MenuSelect label="Status" value={utilFilter} onChange={setUtilFilter} options={UTIL_OPTIONS} icon={Gauge} />
+              <MenuSelect label="Livery" value={skinFilter} onChange={(next) => setSkinFilter(next as typeof skinFilter)} options={SKIN_OPTIONS} icon={Layers} />
+              <MenuSelect label="Sort by" value={sortBy} onChange={setSortBy} options={SORT_OPTIONS} />
 
               {/* Name search */}
               <div className="relative min-w-[170px] flex-1 max-w-[240px]">
@@ -712,7 +702,6 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                         <p className="text-[10px] font-mono text-[#8B877C] mt-0.5 truncate">
                           {ac.category ? `Cat ${ac.category}` : "Commercial"}
                           {ac.haul ? ` ${ac.haul}` : ""}
-                          {ac.range_km ? ` · ${ac.range_km.toLocaleString()}km` : ""}
                         </p>
                         {ac.is_cargo ? (
                           <p className="text-[10px] font-mono text-[#8B877C] mt-0.5">
@@ -753,16 +742,11 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                       </div>
                     </div>
 
-                    {/* Footer: livery box (always) + haul box + wear */}
+                    {/* Footer: livery box (always) + haul box */}
                     <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#E5E1D6]/50 text-[10px] font-mono">
                       <span className={`px-1.5 py-0.5 rounded border truncate min-w-0 ${badge.cls}`}>
                         {badge.label}
                       </span>
-                      {typeof ac.wear === "number" && (
-                        <span className="text-[#8B877C] flex-shrink-0">
-                          Wear {ac.wear.toFixed(1)}%
-                        </span>
-                      )}
                     </div>
                   </div>
                 );
@@ -790,7 +774,6 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                       <th className="p-3">Utilization</th>
                       <th className="p-3">Seating</th>
                       <th className="p-3">Livery</th>
-                      <th className="p-3">Wear</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#E5E1D6]/70">
@@ -865,9 +848,6 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                             <span className={`px-2 py-0.5 rounded border ${badge.cls}`}>
                               {badge.label}
                             </span>
-                          </td>
-                          <td className="p-3 text-[#8B877C]">
-                            {typeof ac.wear === "number" ? `${ac.wear.toFixed(1)}%` : "—"}
                           </td>
                         </tr>
                       );

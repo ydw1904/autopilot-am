@@ -11,7 +11,7 @@ can reason in natural language — *"find the best 5 circuits out of HKG, buy th
 routes, schedule the planes, price every seat"* — and the server executes it against
 a live, logged-in game session.
 
-The interesting engineering is not the game. It's the **harness**: 36 typed tools
+The interesting engineering is not the game. It's the **harness**: 42 typed tools
 over a real, hostile web app (CSRF tokens, jQuery handlers, silent server-side
 rejections), with safety boundaries baked in so an autonomous agent can run the
 loop without breaking things.
@@ -68,7 +68,7 @@ code/launch_chrome.sh
 # 3. Verify the server boots and registers its tools
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
   print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"
-# -> 36 tools
+# -> 42 tools
 ```
 
 `.mcp.json` at the repo root already declares the server for Claude Code. Once Chrome
@@ -76,7 +76,31 @@ is up and logged in, an agent can call the tools directly:
 
 > "What's my balance? Plan 3 circuits out of HKG with B742, then dry-run buying the routes."
 
-### The 36 tools
+### Browser app development
+
+Run both development servers from the repository root:
+
+```bash
+./run_dev.sh
+```
+
+Open `http://localhost:3000/app/`. Vite applies React and CSS edits with hot reload,
+and FastAPI restarts automatically when files under `code/` change. Requests under
+`/api` are proxied from port 3000 to the API on port 8000. Use `run_web.sh` for the
+compiled production-style app instead.
+
+On macOS, install the development UI and observe-only SHM watcher as persistent
+user services:
+
+```bash
+bash launchd/install.sh
+```
+
+They start at login, restart after a crash, and write logs under
+`~/.airlines_manager/`. The watcher keeps its normal request pacing and
+single-instance database lock.
+
+### The 42 tools
 
 Mutating tools default to `dry_run=True`. Two API surfaces: **web/CDP** (the browser
 game) and **mobile** (`mobile_*` / `shm_*`, the mobile app's JSON API for the
@@ -84,12 +108,12 @@ second-hand market and daily rewards — features the browser game lacks).
 
 | Group | Tools |
 |---|---|
-| **Read / live state** | `get_balance`, `list_hubs`, `list_routes`, `get_aircraft_at_hub`, `list_aircraft_for_sale`, `get_page_text`, `navigate_to` |
+| **Read / live state** | `get_balance`, `list_hubs`, `list_routes`, `resolve_aircraft`, `get_aircraft_at_hub`, `list_aircraft_for_sale`, `get_page_text`, `navigate_to` |
 | **Direct game actions (CDP)** | `buy_route`, `schedule_flight` |
 | **Planning & bulk ops** | `plan_circuits`, `buy_circuit_routes`, `buy_aircraft`, `schedule_circuits`, `auto_price_routes`, `number_circuit_aircraft`, `reconfigure_circuit_aircraft`, `rename_circuit`, `mass_rename_aircraft`, `mass_unschedule_aircraft` |
 | **Data sync / scraping** | `refresh_internal_audits`, `sync_warehouse`, `get_masstool_data`, `scrape_line_ids`, `scrape_audit_line_ids` |
-| **Mobile — second-hand market** | `shm_market`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch` |
-| **Mobile — daily rewards & session** | `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`, `mobile_balance`, `mobile_catalog`, `mobile_session_import` |
+| **Mobile — second-hand market** | `shm_market`, `shm_watch_add`, `shm_watch_add_booster`, `shm_watch_list`, `shm_watch_remove`, `shm_snipe`, `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch` |
+| **Mobile — daily rewards & session** | `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`, `mobile_balance`, `mobile_catalog`, `mobile_session_import`, `mobile_session_renew` |
 
 The web/CDP tools are each also a standalone CLI script under `code/`. The mobile tools
 call the mobile HTTP API directly via `code/mobile_api.py` (access_token auth, stored at
@@ -107,7 +131,7 @@ airlines-manager/
 ├── CHANGELOG.md         ← project evolution
 ├── .mcp.json            ← Claude Code MCP registration
 └── code/
-    ├── mcp_server.py            ← MCP server: 36 tools (the control plane)
+    ├── mcp_server.py            ← MCP server: 42 tools (the control plane)
     ├── cdp.py                   ← shared Chrome DevTools Protocol layer
     ├── db.py                    ← shared SQLite access layer
     ├── circuit_planner.py       ← primary optimizer (Phase 1 + Phase 2)
@@ -119,7 +143,9 @@ airlines-manager/
     ├── auto_pricer.py           ← per-route seat pricing
     ├── aircraft_numberer.py / aircraft_reconfigurator.py / mass_*.py  ← fleet ops
     ├── warehouse_sync.py / masstool.py / scrape_*.py  ← data sync
-    └── gui_app.py + gui/        ← NiceGUI desktop control panel
+    ├── gui_app.py + gui/        ← NiceGUI desktop control panel
+    └── api_server.py            ← FastAPI server for the browser app and REST API
+├── web/src/                     ← React/TypeScript browser app (Vite build)
 ```
 
 The scraped game database (`db/*.db`) and generated `data/` are **not** committed —
@@ -233,7 +259,8 @@ Populated by the `scrape_*` / `warehouse_sync` / audit tools against a live sess
 ## Dependencies
 
 Python 3.10+. Pinned in [`code/requirements.txt`](code/requirements.txt):
-`mcp`, `httpx`, `websocket-client`, `numpy`, `colorama`, and `nicegui` (GUI only).
+`mcp`, `httpx`, `websocket-client`, `numpy`, `colorama`, `fastapi`, `uvicorn`, and
+`nicegui` (legacy GUI only).
 The native beam search needs a C++ compiler (`code/native/build.sh`).
 
 ---

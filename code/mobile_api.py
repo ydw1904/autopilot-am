@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -26,6 +27,11 @@ from typing import Any, Iterator, Optional
 import httpx
 
 SESSION_PATH = Path.home() / ".airlines_manager" / "session.json"
+
+# Guards token renewal: several AMClients can share one AMSession across
+# threads (the purchase-date backfill runs a small pool), and the refresh
+# token rotates on every grant.
+_RENEW_LOCK = threading.Lock()
 
 # Match the app so traffic looks identical to a real client.
 USER_AGENT = "UnityPlayer/2022.3.67f2 (UnityWebRequest/1.0, libcurl/8.10.1-DEV)"
@@ -341,7 +347,13 @@ class AMClient:
         except AMAuthError:
             if not (self.auto_renew and self.s.can_renew):
                 raise
-            self.s.renew()
+            # The refresh token is single-use, so two threads renewing the same
+            # session at once would burn the chain. Serialize, and let whoever
+            # loses the race reuse the token the winner just minted.
+            stale = self.s.access_token
+            with _RENEW_LOCK:
+                if self.s.access_token == stale:
+                    self.s.renew()
             self.http.cookies.update(self.s.cookies)
             return self._request_once(method, endpoint, params, data, allow_empty)
 
@@ -637,6 +649,26 @@ class AMClient:
             self.store.commit()
         return body
 
+    # ── challenge ───────────────────────────────────────────────────────
+    def challenges(self) -> list:
+        """Active challenges, each with its full objective/reward ladder.
+
+        The trailing slash is load-bearing: `challenge` answers 301 to
+        `challenge/` and the client does not follow redirects, so the bare
+        spelling looks like an HTML page. Every objective carries `rewards`
+        (the free track) and `battlePassRewards` (the paid one), and an
+        `effectType == "aircraft"` reward embeds a full `skin` object. That
+        makes this the naming source for challenge liveries, which no shop
+        endpoint has ever heard of — they are awarded, never sold.
+        """
+        body = self._request("GET", "challenge/")
+        out = body.get("challenges", [])
+        if self.store:
+            for ch in out:
+                self.store.record_challenge(ch)
+            self.store.commit()
+        return out
+
     # ── writes ──────────────────────────────────────────────────────────
     def buy_multiple(self, *, model_id: int, hub_id: int, quantity: int,
                      name: str, skin_id: int, eco: int, bus: int,
@@ -739,7 +771,19 @@ class AMClient:
 
     # ── daily: free shop currency ───────────────────────────────────────
     def shop_offers(self) -> list:
-        return self._request("GET", "shop2023/offers").get("offers", [])
+        """The shop ("workshop") feed: free pickups, packs and battle passes.
+
+        Beyond the free currency it is a livery source — a `content` entry with
+        `effectType == "aircraft"` carries a `skin` object, and unlike the
+        challenge that one states its `type`, so the livery class is exact
+        rather than inferred.
+        """
+        offers = self._request("GET", "shop2023/offers").get("offers", [])
+        if self.store:
+            for o in offers:
+                self.store.record_shop_offer(o)
+            self.store.commit()
+        return offers
 
     def claim_offer(self, offer_id: int) -> dict:
         return self._request("POST", "shop2023/in-game/purchase/item",

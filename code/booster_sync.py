@@ -83,10 +83,14 @@ def sync_images(client: AMClient, store: MobileStore, size: str,
     client.skin_catalog()
     todo = store.skins_missing_image(size)
     if not all_skins:
-        booster_skins = {r[0] for r in store.conn.execute(
-            "SELECT DISTINCT skin_id FROM mobile_booster_cards "
-            "WHERE skin_id IS NOT NULL")}
-        todo = [t for t in todo if t[0] in booster_skins]
+        # Everything the reward feeds hand out: booster cards, challenge
+        # objectives, and the liveries the shop's packs contain.
+        wanted = {r[0] for r in store.conn.execute("""
+            SELECT skin_id FROM mobile_booster_cards WHERE skin_id IS NOT NULL
+            UNION SELECT skin_id FROM mobile_challenge_rewards WHERE skin_id IS NOT NULL
+            UNION SELECT skin_id FROM mobile_shop_offer_items WHERE skin_id IS NOT NULL
+        """)}
+        todo = [t for t in todo if t[0] in wanted]
     if limit:
         todo = todo[:limit]
     print(f"  {len(todo)} skins missing a {size} image")

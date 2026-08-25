@@ -10,7 +10,7 @@ you learn something durable about this codebase, edit *this* file.
 ## Project Overview
 
 Agent control plane for the browser game [Airlines Manager](https://www.airlines-manager.com):
-an **MCP server exposing 37 tools** over a live, logged-in game session, plus the
+an **MCP server exposing 42 tools** over a live, logged-in game session, plus the
 optimization engine and browser-automation layer it drives. Goal: maximize weekly
 revenue by selecting circuits (route sets), seat configs, schedules, and prices.
 
@@ -23,9 +23,10 @@ are otherwise independent of CDP (see "Mobile API surface" below).
 **Language:** Python 3.10+. Browser automation via Chrome DevTools Protocol (CDP,
 primary) with an optional OpenClaw backend in `scraping/`. The circuit beam search
 has a hot path in native **C++** (`code/native/beam_search.cpp`) behind a ctypes
-wrapper. GUI is **NiceGUI**. Deps declared with minimum versions in
+wrapper. The two UI surfaces are **NiceGUI** and a React/Vite browser app served by
+FastAPI. Python deps are declared with minimum versions in
 `code/requirements.txt` (`mcp`, `httpx`, `websocket-client`, `numpy`,
-`colorama`, `nicegui`; `pytest` for the test suite).
+`colorama`, `fastapi`, `uvicorn`, `nicegui`; `pytest` for the test suite).
 
 **Pure logic has a test suite:** `.venv/bin/python -m pytest code/tests/ -q`
 (offline, no Chrome, ~1s). It covers the pricing/flight-time formulas, the
@@ -33,7 +34,7 @@ schedule builder, and `db.py`. Anything that touches CDP is still verified
 manually by running scripts with `--dry-run` / `--phase1-only`, and by booting
 the MCP server (see [Verification](#verification)).
 
-## Three surfaces, one core
+## Four surfaces, one core
 
 Everything funnels through two shared layers — touch these and you touch everything:
 
@@ -45,7 +46,7 @@ Everything funnels through two shared layers — touch these and you touch every
 
 The three surfaces on top:
 
-1. **MCP server** (`code/mcp_server.py`) — 37 typed tools; the agent-facing control
+1. **MCP server** (`code/mcp_server.py`) — 42 typed tools; the agent-facing control
    plane. Live-state tools call CDP directly; heavier ops shell out to the CLI scripts;
    the mobile tools call the mobile HTTP API via `mobile_api.py`.
    **Mutating tools default to `dry_run=True`.**
@@ -55,8 +56,18 @@ The three surfaces on top:
    `masstool`) take `--json`: stdout carries exactly one JSON document and the
    human report moves to stderr, so the server parses a result instead of
    scraping ASCII tables. Without the flag the human report is unchanged.
-3. **GUI** (`code/gui_app.py` + `code/gui/`) — a NiceGUI desktop control panel over the
+3. **NiceGUI** (`code/gui_app.py` + `code/gui/`) — a desktop control panel over the
    same CLI/core code.
+4. **Browser app** (`code/api_server.py` + `web/src/`) — a React/TypeScript UI
+   compiled by Vite and served under `/app/` alongside the REST API. `run_web.sh`
+   installs dependencies when needed, builds the frontend, then starts FastAPI.
+   For development, `run_dev.sh` serves Vite on port 3000 with hot reload and
+   FastAPI on port 8000 with Python source auto-reload.
+
+For persistent local operation on macOS, `launchd/install.sh` installs user
+LaunchAgents for `run_dev.sh` and the observe-only SHM watcher. Both use
+`KeepAlive`, start at login, and log under `~/.airlines_manager/`. The watcher
+retains its database lock, so launchd cannot create a second polling loop.
 
 ## Directory Layout
 
@@ -95,11 +106,15 @@ airlines-manager/
     ├── mobile_login.py             ← press OK/Login over adb when the session dies
     ├── booster_sync.py             ← booster drop tables + livery names/artwork → DB
     ├── skin_name_sync.py           ← livery names + Playrion/market origin → DB
+    ├── purchase_date_sync.py       ← paced per-aircraft purchase-date backfill → DB
     ├── shm_watcher.py              ← watch the SHM for named liveries, buy on sight
     │
     ├── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
     └── gui/                        ← NiceGUI pages (fleet, liveries, planner, hub, library, mass,
                                        warehouse, scraper, log) + state/workers/theme
+├── web/src/                         ← React browser UI; Vite output is web/dist/
+│   ├── components/MenuSelect.tsx ← the ONE dropdown; never use a native <select>
+│   └── components/TagPicker.tsx  ← tag combobox: free text + preset/known tags
 ```
 
 Generated state is **not** committed: the SQLite DB (`db/*.db`) and the `data/`
@@ -174,6 +189,11 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   `AMClient` calls it automatically on an auth error and retries, so a long
   sweep can't die halfway. `refresh_mobile_session.sh` tries this first and only
   falls back to the BlueStacks/mitmproxy path if it can't (2.6s vs 22.6s).
+  An aircraft's exact purchase timestamp is `profile.purchasedAt` on
+  `aircraft/{id}` only. The compact `bfa/paged/aircraft` records do not carry it,
+  so the fleet UI fetches one requested profile and caches the timestamp in
+  `mobile_aircraft.purchased_at`; never add a thousands-request purchase-date
+  backfill to the normal fleet sync.
   Three things that bite:
   **(1) `?version=40008` is a QUERY param on the token endpoint and is
   load-bearing.** Omit it and the grant still returns HTTP 200 with a
@@ -207,6 +227,16 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   (raw value) so a one-bid auction can't close under cost. Never
   `minAuctionSellPrice` — on a 747SP it's $88M against a $160M mint. Full table
   in `tools/mobile-capture/market_usage.md`.
+- **The fee is progressive, and the official rules are written down.** Playrion's
+  KB (<https://help.airlines-manager.com/knowledge-base/second-hand-market/?lang=en>)
+  publishes the processing fee as `min(0.5, (BestBid / cataloguePrice) / 20)`,
+  i.e. 5% at catalogue price but rising with the sale/catalogue ratio, so a
+  threshold-priced arbitrage listing pays tens of percent, not 5%. Same page
+  confirms the $200B weekly bid exposure, 20 buys/day and 10 live listings (the
+  `auctionRules` fields), that `binThreshold` is per-livery and re-tuned by the
+  game, that bids are *maximum* bids resolved by auto-increment, and that
+  classic planes cost no AM Coins second-hand. Full notes in
+  `tools/mobile-capture/market_usage.md`.
 - **Model ids are shared across surfaces:** the mobile `aircraftListId` and the web
   purchase box's `aircraft[id]` are the same id space (spot-checked on 27 models via
   the auction feed, no mismatches), so one table serves both —
@@ -255,28 +285,45 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
 
 - **Coverage comes from the per-model filter, not from polling harder.** A
   livery belongs to exactly one model, so one filtered request per watched
-  model is complete coverage of that model. A pass costs one request per
-  watched model plus one wide `sort=timePlus` sweep; watchlists wider than
-  `--per-pass` rotate least-recently-checked first, and the sweep still
-  catches anything that lands in the newest 100 out of turn. A full booster
-  (33 liveries, 25 models) is ~26 requests and ~12s.
+  model is complete coverage of that model. A one-shot scan costs one request
+  per selected model plus one wide `sort=timePlus` sweep. Continuous `run`
+  mode instead paces two lanes: the newest 100 every 60s and one model every
+  45s by default, with a two-second client-wide request delay. Automatic
+  paid-pack and challenge targets alternate with background models so their
+  cycle stays short without bursting through all watched models. Armed runs
+  refresh limits and balance every 10 minutes; observation runs do no guard reads. A
+  database-scoped file lock prevents two continuous watchers from running at
+  once.
+- **Automatic targets come from the cached shop and challenge feeds.**
+  `sync-paid-packs` retains its old name but syncs special liveries in paid
+  `template=pack`, `currency=realMoney` offers as well as challenge rewards.
+  Paid-pack targets that are missing start armed; challenge and manual targets
+  begin observing. Owned automatic entries remain visible but inactive, which
+  explains why a known paid livery is not purchasable again. The SHM tab has a
+  per-watch arm toggle that applies to any active row and does not stop its
+  market observation.
 - **It only ever buys at the listing's own `binPrice`, never an incremental
-  bid** — so it either takes a plane under a cap set in advance or does
-  nothing. It cannot be drawn into a price war, and a listing with no buy-now
+  bid** — so it takes an armed plane only when its BIN leaves a strictly
+  positive live balance. It cannot be drawn into a price war, and a listing with no buy-now
   is skipped by design.
 - **Guards, in order:** per-livery `max_price` (compared to the raw `binPrice`,
   the number on the market), the day's `maxBidByDay` headroom (server's
-  `countOfBidding` vs the local ledger, whichever is higher), `--budget` per
-  UTC day, and the live balance. `est_cost` adds `purchaseFeePercent` on top
-  of the BIN for the budget/balance checks — whether that fee is actually
-  charged to the buyer or the seller is **not confirmed**, so those two guards
-  run 20% conservative on purpose. An armed buy with neither a per-livery cap
-  nor a `--budget` is refused rather than run blind against $8B listings.
-- **Nothing spends without `--arm`** (`dry_run=False` on `shm_snipe`). Every
-  decision, dry-run included, lands in `shm_buys`, so a rehearsal is auditable
-  and the daily budget reads its own ledger back.
+  `countOfBidding` vs the local ledger, whichever is higher), optional
+  `--budget` per UTC day, and the live balance. `purchaseFeePercent` is not
+  treated as a buyer charge because that is unconfirmed; the accepted cost is
+  exactly the submitted BIN. Every decision, dry-run included, lands in
+  `shm_buys`, so activity is auditable and the daily budget reads its own
+  ledger back. Armed runs fail closed when auction rules, bid usage or balance
+  cannot be refreshed. Repeated API errors back off exponentially to a one-hour
+  ceiling.
 - `shm_watcher.py prices` reports what each watched livery has actually been
   listed at, which is how a `--max` gets picked from data rather than guessed.
+- **The browser app has a read-only SHM tab.** `/api/shm-monitor` reads only
+  the local watcher tables and reports recent activity, standing orders,
+  watched-listing matches, model coverage and the buy decision ledger. The
+  watch table includes the cached livery PNG and ownership count. The React tab
+  refreshes that local snapshot every 15 seconds; it never polls the game API
+  and exposes no arm or purchase control.
 - **`daily_routine.py`** — the freebies, once a day, tasks in random order with a
   `--jitter` start delay. Tasks: `currencies`, `slots`, `donate` (the last one via
   `alliance_donator`, so that task alone needs **Chrome up and logged in** — the
@@ -331,6 +378,21 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
   index.html that links them (cheap: a 500-livery page is 0.2MB); `--embed FILE`
   inlines them as data URIs for one portable file (~1.35x the PNG bytes). Filters
   (`--booster/--owned/--missing/--name`) compose.
+- **`purchase_date_sync.py`** — backfills `mobile_aircraft.purchased_at`. The
+  compact fleet read (`bfa/paged/aircraft`) has no purchase date; the only source
+  is the per-aircraft profile (`aircraft/{id}`), one request each at ~1.5s, so a
+  2.8k fleet is a couple of hours. It therefore never runs inline: `api_server`
+  starts it in a background thread after every **mobile** fleet sync (never after
+  the CDP fallback, which means the mobile session is already down) and the fleet
+  page polls `/api/fleet/purchase-dates` for progress. **Deliberately sequential
+  with a jittered 0.6-1.6s gap** (`DEFAULT_WORKERS = 1`): the app opens one
+  aircraft card at a time, and a parallel sweep over the whole fleet is the most
+  conspicuous traffic this account could produce. `--workers` can raise it; that
+  is a cover-for-speed trade, not a tuning knob. Cancelling is free — the cached
+  dates define the remaining work, so the next sync resumes where it stopped.
+  Because several AMClients can then share one AMSession, `mobile_api` serializes
+  token renewal (`_RENEW_LOCK`): the refresh token is single-use and two threads
+  renewing at once would burn the chain.
 - **`skin_name_sync.py`** — fills in livery **names** and where each livery comes
   from (`mobile_skins.source`: `manufacturer` / `playrion` / `market`). Three
   passes, `--web` / `--dutyfree` / `--shm`, all three by default; they cover
@@ -357,6 +419,47 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
     only source that calls out a plain manufacturer paint. Types 0 and 1 come back
     at the 100-row cap, so the pass falls through to the per-model sweep described
     above (`--shm-shallow` skips it); 180 models × 2 types, none at the cap.
+  - **`--challenge`** reads `challenge/` — the running challenge with its whole
+    objective ladder. **The trailing slash is load-bearing**: bare `challenge`
+    answers 301 (to an HTML page, which reads as "session expired"), and every
+    guessable spelling (`challenges`, `challenge/list`, `challenge/rewards`,
+    `bfa/challenge`) answers errorCode 99. Each objective carries `rewards`
+    (free track) and `battlePassRewards` (paid), and an `effectType ==
+    "aircraft"` reward embeds a full `skin` — so this names challenge liveries
+    *while the challenge is live*, which no shop endpoint ever does. First run
+    (Copa Airways, 2026-08-19→09-01): 101 objectives, 202 reward slots, 22
+    distinct liveries, 3 of them challenge-exclusive.
+  - **`--shop`** reads `shop2023/offers` (the same feed `daily collect` uses):
+    81 offers, 35 carrying a livery, 31 distinct. Packs, gifts and the
+    travel-card "aircraft" offers each list their contents, and unlike the
+    challenge a shop item states the livery's own `skin.type`, so its class is
+    read rather than inferred. This is where paid-pack liveries (Aguachica
+    Airlines, ArgentinAir Vintage, AM Gold Crew) are named.
+  - **Half of what these two feeds hand out is not a livery at all.** 21 of the
+    42 aircraft-bearing offers sell a model in its factory paint (`skin.type`
+    0 → `source = 'manufacturer'`), and 13 of the Copa ladder's 22 liveries are
+    stock planes; the Copilot/Captain/Commander packs and the AM Gold pack of
+    the month are plane-only. Both passes print the split (`N special, M
+    factory paint`, and `plane only` per offer) and the album filters
+    manufacturer paints out, so no chip ever claims a pack sells a paint
+    scheme it doesn't.
+  - Both land in `mobile_challenges`/`mobile_challenge_rewards` and
+    `mobile_shop_offers`/`mobile_shop_offer_items`, mirroring the booster
+    tables, and `mobile_skin_overview` gained `challenges` / `shop_offers`
+    columns beside `boosters`. `booster_sync --images` fetches artwork for
+    their skins too. First run added 19 liveries (24 are reachable *only*
+    through these two feeds: not in any booster, not sold in the duty free).
+  - **Tags, not a source.** `db.get_livery_tags()` turns those tables into
+    `{kind, label, title}` chips per livery and the collection endpoint ships
+    them as `tags[]`. A livery routinely has several — the Copa challenge
+    planes are *also* sold as travel-card offers — so the card renders one chip
+    per way it can be obtained: challenge (amber trophy), booster (violet box),
+    shop gift / ad gift / travel cards / paid pack (the shop's own
+    `template` + `currency` pair), duty free, user-created. Retired challenges
+    keep their chip off the name pattern ("<model> - Challenge <event>"), which
+    is the only trace left once the ladder is gone. `mobile_skins.source` stays
+    what it was: the three-way manufacturer/playrion/market origin, not a
+    "where do I get it" answer.
   - **Artwork fallback**, applied last to whatever no endpoint spoke for (289
     retired seasonals: "Christmas 2016", "Halloween 2K18"): a player livery is
     served from `painterPublic`, an official one from the game's own
@@ -393,8 +496,9 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
   pipeline that produces the JSONL `import_from_capture()` reads. `capture_am.py`
   is the mitmdump addon, `bluestacks_mitm_setup.sh` wires the emulator to the
   proxy, and `bluestacks_mitm_runbook.md` covers the manual steps (root toggle /
-  APK-repackage route). `market_usage.md` records the SHM economics and the
-  daily-reward gotchas. **Captures are gitignored — they hold live tokens.**
+  APK-repackage route). `market_usage.md` records the SHM economics, the
+  official market rules from Playrion's knowledge base, and the daily-reward
+  gotchas. **Captures are gitignored — they hold live tokens.**
   Two guards around the exposure the emulator creates: BlueStacks binds adb to
   `*:5555` with no setting to change it, so `capture_window.sh` runs a capture
   inside a bounded window and kills BlueStacks from an EXIT trap (port closes on
@@ -434,8 +538,10 @@ treasury gets it less `dollarTax` (10%). Cap observed 2026-08-04: **$200M/day**.
 | `mobile_models` / `mobile_skins` | mobile model specs + liveries: id, name, `source` (`manufacturer`/`playrion`/`market`), creator, duty free price + sold counter (from `skin_name_sync`) |
 | `mobile_aircraft` | mobile account fleet (SHM auction reads are live-only; nothing is logged) |
 | `mobile_boosters` / `mobile_booster_cards` | booster windows/prices/pity + published drop tables (from `booster_sync`) |
+| `mobile_challenges` / `mobile_challenge_rewards` | the challenge ladder: window, rank, and every objective's reward slot on both the free and battle-pass tracks (from `skin_name_sync --challenge`) |
+| `mobile_shop_offers` / `mobile_shop_offer_items` | the shop feed and the liveries each pack/gift/offer contains (from `skin_name_sync --shop`) |
 | `mobile_skin_images` | livery PNG bytes (from `booster_sync --images`) |
-| `mobile_skin_overview` | VIEW: livery + source/creator/price + owned-aircraft count + best drop rate + artwork cached. Rebuilt on every `MobileStore()` open, so its columns can grow |
+| `mobile_skin_overview` | VIEW: livery + source/creator/price + owned-aircraft count + best drop rate + which boosters/challenges/shop offers carry it + artwork cached. Rebuilt on every `MobileStore()` open, so its columns can grow |
 | `shm_watch` | liveries under standing order: price cap, copies wanted, copies bought |
 | `shm_sightings` | every SHM listing the watcher has seen — the price history a `--max` is picked from |
 | `shm_buys` | every buy the watcher decided on, dry runs included (the daily-budget ledger) |
@@ -459,14 +565,67 @@ Aircraft **aliases** (e.g. `B742` → `747-200B`) live in the `ALIASES` dict in
 - **Purchase reliability:** use the country-listing `form.submit()` flow, not `fetch()`
   (see `circuit_route_buyer.py` above).
 
+### Dropdowns (browser UI) — `web/src/components/MenuSelect.tsx`
+
+Every dropdown in `web/src/` — filters, sorts, pickers — uses `<MenuSelect>`. Do
+not add a native `<select>`: the OS popup it opens is tiny, unstyleable, and
+looks foreign against the dark UI. There are no `<select>` elements left in the
+repo, so a new one is always a mistake.
+
+```tsx
+<MenuSelect label="Hub" value={hub} onChange={setHub} options={hubOptions} icon={Building2} />
+<MenuSelect label="Sort by" value={sort} onChange={setSort} groups={SORT_GROUPS} />
+```
+
+- `options` for a flat list, `groups` for one split by headings; each option is
+  `{ value, label, hint?, icon? }` where `hint` is the short qualifier printed
+  next to the label ("A to Z", "12 aircraft").
+- `label` is the caption above the current value; `icon` is the trigger icon
+  used when the selected option carries none. `align="right"` makes the panel
+  line up with the trigger's right edge, for controls near a container's edge.
+- Styling lives in `web/src/index.css` under `.menu-select*`. The panel is
+  absolutely positioned, so a container that wraps one must not set
+  `overflow: hidden` (see the comment on `.fleet-controls`).
+- **Sort menus:** name ascending is always the first entry and the default,
+  name descending second, then the remaining fields as a "most first" /
+  "least first" pair. Spell the direction out in `hint` — never a `+` / `-`
+  suffix or a bare arrow.
+- Only offer a sort the data can actually deliver. `FLEET_SORTS` in `db.py` is
+  the full set of fleet orderings; anything not in that table silently falls
+  back to name order.
+
+### Aircraft tags (browser UI) — `web/src/components/TagPicker.tsx`
+
+Custom aircraft tags are free text, so the selection bar uses `<TagPicker>` (a
+combobox) rather than `<MenuSelect>` (a closed set). It lists the tags already
+in use — `stats.tags`, with live counts — above the presets in
+`PRESET_AIRCRAFT_TAGS`, so a tag is retyped only the first time it is coined.
+Picking a row applies it immediately; typing something new offers a "Create …"
+row so Enter never applies a near-match nobody chose. Tags carried by every
+selected aircraft are ticked (adding one again is a no-op: `db.py` inserts with
+`INSERT OR IGNORE` under a NOCASE key). A preset disappears from "Suggested"
+once it exists in "Your tags", and an unused preset is written nowhere until it
+is applied. Its panel opens **upward** — the selection bar is pinned to the
+bottom of the viewport.
+
+A tag edit must **not** call `onDataChanged()`. That bumps `refreshToken`, which
+re-runs the fleet query, replaces the grid with the loading line, clears the
+selection, and drops the reader back to the top of the page. `applyTagResult()`
+in `FleetWorkspace.tsx` patches the affected rows from the PATCH response and
+re-reads `stats` on its own for the counts. For the same reason a refetch dims
+the rows already on screen (`.is-refetching`) instead of unmounting them.
+
 ## Verification
 
 Pure logic is covered by pytest; everything that touches CDP or the live game is
 verified by hand.
 
 ```bash
-# Test suite: offline, no Chrome, ~1s. 148 passed, 1 xfailed as of 2026-08-22.
+# Test suite: offline, no Chrome, ~3s. 197 passed, 1 xfailed as of 2026-08-23.
 .venv/bin/python -m pytest code/tests/ -q
+
+# Browser app production build
+cd web && bun run build
 
 # Planner smoke test (no game connection needed)
 python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2 --phase1-only
@@ -474,7 +633,7 @@ python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2   # full 
 
 # MCP server boots and registers all tools
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
-  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 37 tools
+  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 42 tools
 
 # Mobile API surface (needs a valid ~/.airlines_manager/session.json)
 .venv/bin/python -c "import sys; sys.path.insert(0,'code'); import mcp_server; \

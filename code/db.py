@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import sqlite3
 import os
+import re
 import threading
 
 # Imported as a module, not `from aircraft_aliases import resolve`: that module
@@ -76,6 +77,24 @@ def _migrate(conn):
         if name not in fleet_cols:
             conn.execute(f"ALTER TABLE fleet ADD COLUMN {name} {sql_type}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fleet_skin ON fleet(skin_id)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS aircraft_tags ("
+        "aircraft_id INTEGER NOT NULL, "
+        "tag TEXT NOT NULL COLLATE NOCASE, "
+        "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "PRIMARY KEY (aircraft_id, tag))"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_aircraft_tags_tag ON aircraft_tags(tag)")
+
+    # The fleet UI joins this table directly. MobileStore owns its schema, but
+    # db.py may be the first layer opened after an upgrade, so keep the one
+    # joined column safe for existing databases too.
+    if "mobile_aircraft" in tables:
+        mobile_aircraft_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(mobile_aircraft)").fetchall()
+        }
+        if "purchased_at" not in mobile_aircraft_cols:
+            conn.execute("ALTER TABLE mobile_aircraft ADD COLUMN purchased_at TEXT")
 
     if "routes" not in tables:
         conn.commit()
@@ -646,9 +665,15 @@ def resolve_skin_ids(aircraft_list: list[dict]) -> tuple[int, int]:
     return resolved, len(aircraft_list) - resolved
 
 
-def upsert_fleet(aircraft_list: list[dict]):
+def upsert_fleet(aircraft_list: list[dict], prune_hubs: list[str] | None = None):
     """Update or insert fleet data from a list of dicts:
     [{id, name, model, util, hub, skin_id?, skin_img?}, ...]
+
+    ``prune_hubs``, if given, are the hubs that were just fully re-scraped:
+    any stored fleet row for one of those hubs whose aircraft_id is *not*
+    in ``aircraft_list`` no longer exists in-game (sold, scrapped, etc.) and
+    is deleted, so a sync fully replaces its hubs instead of only adding to
+    them.
     """
     db = get_db()
     db.executemany(
@@ -666,7 +691,148 @@ def upsert_fleet(aircraft_list: list[dict]):
           ac.get("skin_id"), ac.get("skin_img") or None)
          for ac in aircraft_list],
     )
+    if prune_hubs:
+        synced_ids = [ac["id"] for ac in aircraft_list]
+        hub_placeholders = ",".join("?" * len(prune_hubs))
+        db.execute("CREATE TEMP TABLE IF NOT EXISTS _synced_fleet_ids (aircraft_id INTEGER PRIMARY KEY)")
+        db.execute("DELETE FROM _synced_fleet_ids")
+        db.executemany("INSERT INTO _synced_fleet_ids VALUES (?)", [(i,) for i in synced_ids])
+        db.execute(
+            f"DELETE FROM fleet WHERE hub_iata IN ({hub_placeholders}) "
+            "AND aircraft_id NOT IN (SELECT aircraft_id FROM _synced_fleet_ids)",
+            prune_hubs,
+        )
+        db.execute(
+            "DELETE FROM aircraft_tags WHERE aircraft_id NOT IN "
+            "(SELECT aircraft_id FROM fleet)"
+        )
+        db.execute("DROP TABLE _synced_fleet_ids")
     db.commit()
+
+
+def _clean_aircraft_tag(tag: str) -> str:
+    """Normalize a user-facing fleet tag while preserving its chosen casing."""
+    cleaned = " ".join(str(tag or "").split())
+    if not cleaned:
+        raise ValueError("Tag cannot be empty")
+    if len(cleaned) > 40:
+        raise ValueError("Tag must be 40 characters or fewer")
+    return cleaned
+
+
+def update_aircraft_tags(aircraft_ids, *, add=None, remove=None) -> dict[int, list[str]]:
+    """Add/remove local custom tags and return current tags for each aircraft.
+
+    Tags are deliberately separate from the synced ``fleet`` row so scraping
+    the game cannot overwrite operator metadata. SQLite's NOCASE primary key
+    makes a tag unique per aircraft without preventing several different tags.
+    """
+    ids = sorted({int(aircraft_id) for aircraft_id in aircraft_ids})
+    if not ids:
+        raise ValueError("Select at least one aircraft")
+    if len(ids) > 200:
+        raise ValueError("At most 200 aircraft can be tagged at once")
+
+    add_tags = list(dict.fromkeys(_clean_aircraft_tag(tag) for tag in (add or [])))
+    remove_tags = list(dict.fromkeys(_clean_aircraft_tag(tag) for tag in (remove or [])))
+    if not add_tags and not remove_tags:
+        raise ValueError("Provide at least one tag to add or remove")
+
+    db = get_db()
+    placeholders = ",".join("?" * len(ids))
+    existing = {
+        row[0] for row in db.execute(
+            f"SELECT aircraft_id FROM fleet WHERE aircraft_id IN ({placeholders})", ids
+        ).fetchall()
+    }
+    missing = [aircraft_id for aircraft_id in ids if aircraft_id not in existing]
+    if missing:
+        raise ValueError(f"Aircraft not found: {', '.join(map(str, missing))}")
+
+    if add_tags:
+        db.executemany(
+            "INSERT OR IGNORE INTO aircraft_tags (aircraft_id, tag) VALUES (?, ?)",
+            [(aircraft_id, tag) for aircraft_id in ids for tag in add_tags],
+        )
+    if remove_tags:
+        db.executemany(
+            "DELETE FROM aircraft_tags WHERE aircraft_id = ? AND tag = ?",
+            [(aircraft_id, tag) for aircraft_id in ids for tag in remove_tags],
+        )
+    db.commit()
+
+    rows = db.execute(
+        f"SELECT aircraft_id, tag FROM aircraft_tags "
+        f"WHERE aircraft_id IN ({placeholders}) ORDER BY tag COLLATE NOCASE", ids
+    ).fetchall()
+    result = {aircraft_id: [] for aircraft_id in ids}
+    for row in rows:
+        result[row["aircraft_id"]].append(row["tag"])
+    return result
+
+
+def get_aircraft_tag_counts() -> list[dict]:
+    """Return the current custom-tag vocabulary and live aircraft counts."""
+    rows = get_db().execute(
+        "SELECT t.tag, COUNT(*) AS count FROM aircraft_tags t "
+        "JOIN fleet f ON f.aircraft_id = t.aircraft_id "
+        "GROUP BY t.tag COLLATE NOCASE ORDER BY t.tag COLLATE NOCASE"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_missing_skin_images(aircraft_list: list[dict], size: str = "big") -> tuple[int, int]:
+    """Download the CDN PNG for any livery flown by this fleet that has a known
+    picture_path but no cached image at ``size``.
+
+    Scoped to the skin_ids actually present in ``aircraft_list`` (the fleet just
+    synced) rather than the whole catalog, so a sync only pays for the art it is
+    about to show. Returns (fetched, failed). Never raises: a CDN hiccup on one
+    livery must not fail the sync.
+    """
+    skin_ids = {ac.get("skin_id") for ac in aircraft_list if ac.get("skin_id")}
+    if not skin_ids:
+        return 0, 0
+
+    # Lazy imports: mobile_store/mobile_api import db, so importing them at module
+    # load time would be circular.
+    import mobile_api
+    from mobile_store import MobileStore
+
+    db = get_db()
+    placeholders = ",".join("?" * len(skin_ids))
+    try:
+        todo = db.execute(
+            f"""SELECT s.skin_id, s.picture_path
+                  FROM mobile_skins s
+                  LEFT JOIN mobile_skin_images i
+                         ON i.skin_id = s.skin_id AND i.size = ?
+                 WHERE s.skin_id IN ({placeholders})
+                   AND s.picture_path IS NOT NULL
+                   AND i.skin_id IS NULL""",
+            [size, *skin_ids],
+        ).fetchall()
+    except sqlite3.Error:
+        return 0, 0
+    if not todo:
+        return 0, 0
+
+    store = MobileStore(db)
+    cdn = mobile_api.skin_image_client()
+    fetched = failed = 0
+    try:
+        for row in todo:
+            try:
+                data, url = mobile_api.fetch_skin_png(row["picture_path"], size=size, client=cdn)
+            except Exception:                              # noqa: BLE001 — CDN best-effort
+                failed += 1
+                continue
+            store.store_skin_image(row["skin_id"], size, data, url)
+            fetched += 1
+    finally:
+        cdn.close()
+    store.commit()
+    return fetched, failed
 
 
 def get_stored_aircraft(min_util=0, max_util=0, hubs=None, models=None, name_query=None, model_query=None):
@@ -720,6 +886,25 @@ HAUL_CASE_SQL = """
 
 IS_CARGO_SQL = "(CASE WHEN a.type = 'Cargo' THEN 1 ELSE 0 END)"
 
+# Every sort the fleet UI can ask for, mapped to an ORDER BY clause. Unknown
+# keys fall back to name order; purchase-date sorts put uncached dates last.
+FLEET_SORTS = {
+    "name_asc": "f.name ASC",
+    "name_desc": "f.name DESC",
+    "use_desc": "f.utilization DESC, f.name ASC",
+    "use_asc": "f.utilization ASC, f.name ASC",
+    "hub_asc": "f.hub_iata ASC, f.model ASC, f.name ASC",
+    "model_asc": "f.model ASC, f.name ASC",
+    "purchased_desc": "m.purchased_at IS NULL, m.purchased_at DESC, f.name ASC",
+    "purchased_asc": "m.purchased_at IS NULL, m.purchased_at ASC, f.name ASC",
+}
+# Names the API accepted before the sort menu was reworked.
+FLEET_SORTS["name"] = FLEET_SORTS["name_asc"]
+FLEET_SORTS["util_asc"] = FLEET_SORTS["use_asc"]
+FLEET_SORTS["util_desc"] = FLEET_SORTS["use_desc"]
+FLEET_SORTS["hub"] = FLEET_SORTS["hub_asc"]
+FLEET_SORTS["model"] = FLEET_SORTS["model_asc"]
+
 
 def haul_filter_sql(haul):
     """SQL fragment for a haul tab. Returns '' for 'all'/None (no filtering)."""
@@ -743,6 +928,7 @@ def get_fleet_aircraft(
     skin_filter=None,
     skin_id=None,
     haul=None,
+    tag=None,
     sort_by="name",
     limit=None,
     offset=None,
@@ -752,12 +938,13 @@ def get_fleet_aircraft(
     sql = """
         SELECT f.aircraft_id, f.name, f.model, f.utilization, f.hub_iata, f.updated_at,
                f.skin_id, f.skin_img,
-               a.category, a.speed_kmh, a.range_km, a.max_pax, a.max_tonnage, a.gross_price, a.icao_code,
+               a.category, a.speed_kmh, a.max_pax, a.max_tonnage, a.gross_price, a.icao_code,
                a.type AS ac_type,
                """ + HAUL_CASE_SQL + """ AS haul,
                """ + IS_CARGO_SQL + """ AS is_cargo,
                s.name AS skin_name, s.picture_path AS skin_picture_path,
-               m.seats_eco, m.seats_bus, m.seats_first, m.payload_t, m.wear
+               m.seats_eco, m.seats_bus, m.seats_first, m.payload_t,
+               m.purchased_at
         FROM fleet f
         LEFT JOIN aircraft a ON a.model = f.model
         LEFT JOIN mobile_skins s ON s.skin_id = f.skin_id
@@ -804,43 +991,380 @@ def get_fleet_aircraft(
 
     sql += haul_filter_sql(haul)
 
+    if tag:
+        sql += (" AND EXISTS (SELECT 1 FROM aircraft_tags t "
+                "WHERE t.aircraft_id = f.aircraft_id AND t.tag = ?)")
+        args.append(_clean_aircraft_tag(tag))
+
     if skin_id is not None:
         sql += " AND f.skin_id = ?"
         args.append(int(skin_id))
     elif skin_filter == "special":
         sql += """ AND f.skin_id IS NOT NULL AND NOT (
-            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            COALESCE(s.source, '') = 'manufacturer'
+            OR s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
             OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
             OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
         )"""
     elif skin_filter == "manufacturer":
         sql += """ AND (
-            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            COALESCE(s.source, '') = 'manufacturer'
+            OR s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
             OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
             OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
             OR f.skin_id IS NULL
         )"""
 
-    if sort_by == "util_asc":
-        sql += " ORDER BY f.utilization ASC, f.name ASC"
-    elif sort_by == "util_desc":
-        sql += " ORDER BY f.utilization DESC, f.name ASC"
-    elif sort_by == "hub":
-        sql += " ORDER BY f.hub_iata ASC, f.model ASC, f.name ASC"
-    elif sort_by == "model":
-        sql += " ORDER BY f.model ASC, f.name ASC"
-    elif sort_by == "wear_desc":
-        sql += " ORDER BY COALESCE(m.wear, 0) DESC, f.name ASC"
-    else:
-        sql += " ORDER BY f.name ASC"
+    sql += " ORDER BY " + FLEET_SORTS.get(sort_by or "", FLEET_SORTS["name_asc"])
 
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
         if offset is not None:
             sql += f" OFFSET {int(offset)}"
 
-    rows = db.execute(sql, args).fetchall()
-    return [dict(r) for r in rows]
+    rows = [dict(r) for r in db.execute(sql, args).fetchall()]
+    tag_map: dict[int, list[str]] = {}
+    for tag_row in db.execute(
+        "SELECT aircraft_id, tag FROM aircraft_tags ORDER BY tag COLLATE NOCASE"
+    ).fetchall():
+        tag_map.setdefault(tag_row["aircraft_id"], []).append(tag_row["tag"])
+    for row in rows:
+        row["tags"] = tag_map.get(row["aircraft_id"], [])
+    return rows
+
+
+def get_fleet_aircraft_page(*, query=None, limit=50, offset=0, **filters) -> dict:
+    """Return one fleet page with a trustworthy total.
+
+    The current fleet is only a few thousand rows, so this deliberately reuses
+    ``get_fleet_aircraft`` and slices the filtered result in memory.  That keeps
+    every filter in one place.  If the fleet grows materially, this seam can be
+    replaced by a SQL window count without changing the API contract.
+    """
+    items = get_fleet_aircraft(limit=None, offset=None, **filters)
+    needle = (query or "").strip().lower()
+    if needle:
+        searchable = ("name", "model", "icao_code", "hub_iata", "skin_name")
+        items = [
+            item for item in items
+            if (any(needle in str(item.get(key) or "").lower() for key in searchable)
+                or any(needle in tag.lower() for tag in item.get("tags", [])))
+        ]
+
+    safe_limit = max(1, min(int(limit or 50), 200))
+    safe_offset = max(0, int(offset or 0))
+    return {
+        "items": items[safe_offset:safe_offset + safe_limit],
+        "total": len(items),
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
+
+
+def get_command_center_snapshot(*, browser_connected=False, mobile_configured=False) -> dict:
+    """Aggregate the operational state needed by the browser command center."""
+    db = get_db()
+    tables = {
+        row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    fleet = get_fleet_summary_stats()
+
+    pipeline = [
+        {"key": "planned", "label": "Planned", "count": 0, "weekly_rev": 0},
+        {"key": "bought", "label": "Acquiring", "count": 0, "weekly_rev": 0},
+        {"key": "completed", "label": "Operating", "count": 0, "weekly_rev": 0},
+    ]
+    circuit_by_hub = {}
+    if "circuits" in tables:
+        rows = db.execute(
+            "SELECT status, COUNT(*) AS count, COALESCE(SUM(weekly_rev), 0) AS weekly_rev "
+            "FROM circuits GROUP BY status"
+        ).fetchall()
+        by_status = {row["status"]: dict(row) for row in rows}
+        for stage in pipeline:
+            row = by_status.get(stage["key"], {})
+            stage["count"] = row.get("count", 0) or 0
+            stage["weekly_rev"] = row.get("weekly_rev", 0) or 0
+        circuit_by_hub = {
+            row["hub_iata"]: dict(row)
+            for row in db.execute(
+                "SELECT hub_iata, COUNT(*) AS circuits, "
+                "COALESCE(SUM(weekly_rev), 0) AS weekly_rev "
+                "FROM circuits GROUP BY hub_iata"
+            ).fetchall()
+        }
+
+    freshness = db.execute(
+        "SELECT MIN(updated_at) AS oldest, MAX(updated_at) AS newest FROM fleet"
+    ).fetchone()
+    oldest = freshness["oldest"] if freshness else None
+    newest = freshness["newest"] if freshness else None
+    stale_aircraft = 0
+    if newest:
+        try:
+            cutoff = (datetime.datetime.fromisoformat(newest) - datetime.timedelta(days=1)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            stale_aircraft = db.execute(
+                "SELECT COUNT(*) FROM fleet WHERE updated_at < ?", (cutoff,)
+            ).fetchone()[0]
+        except (TypeError, ValueError):
+            stale_aircraft = 0
+
+    hub_util = {
+        row["hub_iata"]: round(row["avg_util"] or 0.0, 1)
+        for row in db.execute(
+            "SELECT hub_iata, AVG(utilization) AS avg_util FROM fleet GROUP BY hub_iata"
+        ).fetchall()
+    }
+    hubs = []
+    for hub in fleet["hubs"]:
+        circuits = circuit_by_hub.get(hub["hub_iata"], {})
+        hubs.append({
+            **hub,
+            "avg_utilization": hub_util.get(hub["hub_iata"], 0),
+            "circuits": circuits.get("circuits", 0) or 0,
+            "weekly_rev": circuits.get("weekly_rev", 0) or 0,
+        })
+    hubs.sort(key=lambda item: (item["weekly_rev"], item["count"]), reverse=True)
+
+    route_count = owned_route_count = 0
+    if "routes" in tables:
+        route_row = db.execute(
+            "SELECT COUNT(*) AS total, "
+            "COALESCE(SUM(CASE WHEN is_owned = 1 THEN 1 ELSE 0 END), 0) AS owned "
+            "FROM routes"
+        ).fetchone()
+        route_count = route_row["total"] or 0
+        owned_route_count = route_row["owned"] or 0
+
+    watch_count = 0
+    if "shm_watch" in tables:
+        watch_count = db.execute("SELECT COUNT(*) FROM shm_watch").fetchone()[0]
+
+    planned = next(stage for stage in pipeline if stage["key"] == "planned")
+    completed = next(stage for stage in pipeline if stage["key"] == "completed")
+    alerts = []
+    if not browser_connected:
+        available = ("Mobile fleet sync, cached fleet data, and liveries remain available."
+                     if mobile_configured else
+                     "Cached command data, fleet data, and liveries remain available.")
+        alerts.append({
+            "id": "browser", "tone": "warning", "title": "Running with limited features",
+            "detail": f"{available} Web-only game actions require Chrome.",
+            "target": "system",
+        })
+    if fleet["idle"]:
+        alerts.append({
+            "id": "idle", "tone": "warning", "title": f"{fleet['idle']:,} aircraft are idle",
+            "detail": "Open the idle fleet view to inspect unassigned capacity.",
+            "target": "fleet", "preset": "idle",
+        })
+    if planned["count"]:
+        alerts.append({
+            "id": "planned", "tone": "info", "title": f"{planned['count']:,} circuits await execution",
+            "detail": "Planned revenue is not contributing until routes, aircraft, and schedules are complete.",
+            "target": "command",
+        })
+    if stale_aircraft:
+        alerts.append({
+            "id": "stale", "tone": "warning", "title": f"{stale_aircraft:,} fleet records are stale",
+            "detail": "These records are more than one day older than the newest fleet record.",
+            "target": "fleet", "preset": "all",
+        })
+
+    return {
+        "status": {
+            "browser_connected": bool(browser_connected),
+            "mobile_configured": bool(mobile_configured),
+            "fleet_last_synced": newest,
+        },
+        "portfolio": {
+            "fleet_total": fleet["total"],
+            "active": fleet["active"],
+            "idle": fleet["idle"],
+            "avg_utilization": fleet["avg_utilization"],
+            "planned_weekly_rev": planned["weekly_rev"],
+            "operating_weekly_rev": completed["weekly_rev"],
+        },
+        "pipeline": pipeline,
+        "alerts": alerts,
+        "hubs": hubs[:8],
+        "fleet_facets": {"hubs": fleet["hubs"], "models": fleet["models"], "hauls": fleet.get("hauls", {})},
+        "data_health": {
+            "oldest_fleet_record": oldest,
+            "newest_fleet_record": newest,
+            "stale_aircraft": stale_aircraft,
+            "routes": route_count,
+            "owned_routes": owned_route_count,
+            "market_watches": watch_count,
+        },
+    }
+
+
+def get_shm_monitor_snapshot() -> dict:
+    """Read-only operational snapshot for the SHM watcher web tab."""
+    db = get_db()
+    tables = {row["name"] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    empty = {
+        "status": {"observing": False, "last_activity": None},
+        "summary": {
+            "active_watches": 0,
+            "paid_pack_watches": 0,
+            "armed_watches": 0,
+            "watched_models": 0,
+            "matched_sightings": 0,
+            "real_buys_today": 0,
+            "dry_runs_today": 0,
+        },
+        "watches": [],
+        "model_checks": [],
+        "sightings": [],
+        "decisions": [],
+    }
+    if "shm_watch" not in tables:
+        return empty
+
+    watch_columns = {row["name"] for row in db.execute("PRAGMA table_info(shm_watch)")}
+    has_armed = "armed" in watch_columns
+    has_sightings = "shm_sightings" in tables
+    has_checks = "shm_model_checks" in tables
+    has_buys = "shm_buys" in tables
+
+    watch_summary = db.execute(f"""
+        SELECT COUNT(*) AS active_watches,
+               COUNT(DISTINCT model_id) AS watched_models,
+               COALESCE(SUM(CASE WHEN source = 'shop-pack:auto'
+                                 THEN 1 ELSE 0 END), 0) AS paid_pack_watches
+               , COALESCE(SUM(CASE WHEN {"armed" if has_armed else "0"} = 1
+                                   THEN 1 ELSE 0 END), 0) AS armed_watches
+          FROM shm_watch
+         WHERE active = 1 AND bought < want
+    """).fetchone()
+
+    latest_values = []
+    if has_sightings:
+        row = db.execute(
+            "SELECT MAX(last_seen) AS value FROM shm_sightings").fetchone()
+        if row and row["value"]:
+            latest_values.append(row["value"])
+    if has_checks:
+        row = db.execute(
+            "SELECT MAX(last_checked) AS value FROM shm_model_checks").fetchone()
+        if row and row["value"]:
+            latest_values.append(row["value"])
+    last_activity = max(latest_values) if latest_values else None
+    observing = False
+    if last_activity:
+        observing = bool(db.execute(
+            "SELECT ? >= datetime('now', '-3 minutes')", (last_activity,)
+        ).fetchone()[0])
+
+    if has_sightings:
+        owned_queries = []
+        if "fleet" in tables:
+            owned_queries.append(
+                "SELECT aircraft_id FROM fleet f WHERE f.skin_id = w.skin_id")
+        if "mobile_aircraft" in tables:
+            owned_queries.append(
+                "SELECT aircraft_id FROM mobile_aircraft m WHERE m.skin_id = w.skin_id")
+        owned_count = ("(SELECT COUNT(*) FROM (" + " UNION ".join(owned_queries) + "))"
+                       if owned_queries else "0")
+        watches = [dict(row) for row in db.execute(f"""
+            SELECT w.skin_id, w.model_id, w.label, w.max_price, w.want,
+                   w.bought, w.active, {"w.armed" if has_armed else "0 AS armed"}, w.source,
+                   {owned_count} AS owned_count,
+                   (SELECT COUNT(*) FROM shm_sightings s
+                     WHERE s.skin_id = w.skin_id) AS sightings,
+                   (SELECT MIN(s.bin_price) FROM shm_sightings s
+                     WHERE s.skin_id = w.skin_id AND s.bin_price > 0
+                       AND s.is_own = 0) AS cheapest_seen,
+                   (SELECT MAX(s.last_seen) FROM shm_sightings s
+                     WHERE s.skin_id = w.skin_id) AS last_seen
+              FROM shm_watch w
+             ORDER BY w.active DESC,
+                      CASE WHEN w.source = 'shop-pack:auto' THEN 0 ELSE 1 END,
+                      w.label
+        """).fetchall()]
+        sightings = [dict(row) for row in db.execute("""
+            SELECT s.auction_id, s.skin_id, s.model_id,
+                   COALESCE(s.skin_name, w.label) AS skin_name,
+                   s.current_price, s.bin_price, s.time_left_s, s.bids,
+                   s.first_seen, s.last_seen
+              FROM shm_sightings s
+              JOIN shm_watch w ON w.skin_id = s.skin_id
+             WHERE s.is_own = 0
+             ORDER BY s.last_seen DESC
+             LIMIT 30
+        """).fetchall()]
+        matched_sightings = db.execute("""
+            SELECT COUNT(*) FROM shm_sightings s
+            JOIN shm_watch w ON w.skin_id = s.skin_id
+            WHERE s.is_own = 0
+        """).fetchone()[0]
+    else:
+        watches = [dict(row) | {"owned_count": 0, "sightings": 0,
+                                "cheapest_seen": None, "last_seen": None}
+                   for row in db.execute(f"""
+                       SELECT skin_id, model_id, label, max_price, want,
+                              bought, active, {"armed" if has_armed else "0 AS armed"}, source
+                         FROM shm_watch ORDER BY active DESC, label
+                   """).fetchall()]
+        sightings = []
+        matched_sightings = 0
+
+    for watch in watches:
+        watch["is_owned"] = bool(watch["owned_count"])
+
+    model_checks = []
+    if has_checks:
+        model_checks = [dict(row) for row in db.execute("""
+            SELECT model_id, last_checked, checks, truncated
+              FROM shm_model_checks
+             ORDER BY last_checked DESC
+             LIMIT 20
+        """).fetchall()]
+
+    decisions = []
+    real_buys_today = dry_runs_today = 0
+    if has_buys:
+        decisions = [dict(row) for row in db.execute("""
+            SELECT buy_id, auction_id, skin_id, model_id, skin_name,
+                   bin_price, est_cost, dry_run, confirmed, note, bought_at
+              FROM shm_buys
+             ORDER BY bought_at DESC, buy_id DESC
+             LIMIT 20
+        """).fetchall()]
+        decision_summary = db.execute("""
+            SELECT COALESCE(SUM(CASE WHEN dry_run = 0 THEN 1 ELSE 0 END), 0)
+                       AS real_buys,
+                   COALESCE(SUM(CASE WHEN dry_run = 1 THEN 1 ELSE 0 END), 0)
+                       AS dry_runs
+              FROM shm_buys
+             WHERE bought_at >= date('now') || ' 00:00:00'
+        """).fetchone()
+        real_buys_today = decision_summary["real_buys"]
+        dry_runs_today = decision_summary["dry_runs"]
+
+    return {
+        "status": {"observing": observing, "last_activity": last_activity},
+        "summary": {
+            "active_watches": watch_summary["active_watches"],
+            "paid_pack_watches": watch_summary["paid_pack_watches"],
+            "armed_watches": watch_summary["armed_watches"],
+            "watched_models": watch_summary["watched_models"],
+            "matched_sightings": matched_sightings,
+            "real_buys_today": real_buys_today,
+            "dry_runs_today": dry_runs_today,
+        },
+        "watches": watches,
+        "model_checks": model_checks,
+        "sightings": sightings,
+        "decisions": decisions,
+    }
 
 
 # The `hubs` catalog carries country_code, but only for hubs the game still
@@ -918,7 +1442,8 @@ def get_fleet_summary_stats() -> dict:
         SELECT COUNT(*) as cnt FROM fleet f
         JOIN mobile_skins s ON s.skin_id = f.skin_id
         WHERE NOT (
-            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            COALESCE(s.source, '') = 'manufacturer'
+            OR s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
             OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
             OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
         )
@@ -955,19 +1480,23 @@ def get_fleet_summary_stats() -> dict:
         "models": models,
         "special_skin_count": special_skin_count,
         "hauls": hauls,
+        "tags": get_aircraft_tag_counts(),
     }
 
 
-def get_daily_fleet_liveries(count: int = 3, day: str | None = None) -> list[dict]:
+def get_daily_fleet_liveries(count: int = 3, day: str | None = None, seed: str | None = None) -> list[dict]:
     """Pick `count` special liveries flown by the fleet, rotating once per day.
 
-    Deterministic for a given day: the order is a hash of "<day>:<skin_id>", so
-    every client that asks on the same date gets the same three, and the set
-    changes at midnight without any stored state. Manufacturer liveries are
-    excluded — they are not a collection item.
+    Deterministic for a given day: the order is a hash of "<day>:<seed>:<skin_id>",
+    so every client that asks on the same date with no seed gets the same three,
+    and the set changes at midnight without any stored state. Passing a `seed`
+    (used by the manual reroll) shuffles the order to surface a different set
+    without waiting for midnight. Manufacturer liveries are excluded — they are
+    not a collection item.
     """
     db = get_db()
     day = day or datetime.date.today().isoformat()
+    salt = f"{day}:{seed or ''}"
     rows = db.execute("""
         SELECT s.skin_id, s.name, s.picture_path,
                COUNT(*) AS fleet_count,
@@ -975,7 +1504,8 @@ def get_daily_fleet_liveries(count: int = 3, day: str | None = None) -> list[dic
         FROM fleet f
         JOIN mobile_skins s ON s.skin_id = f.skin_id
         WHERE NOT (
-            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            COALESCE(s.source, '') = 'manufacturer'
+            OR s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
             OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
             OR f.skin_img LIKE '%Manufacturer%' OR f.skin_img LIKE '%constructeur%'
         )
@@ -984,7 +1514,7 @@ def get_daily_fleet_liveries(count: int = 3, day: str | None = None) -> list[dic
 
     picks = sorted(
         (dict(r) for r in rows),
-        key=lambda r: hashlib.sha256(f"{day}:{r['skin_id']}".encode()).hexdigest(),
+        key=lambda r: hashlib.sha256(f"{salt}:{r['skin_id']}".encode()).hexdigest(),
     )[:max(0, int(count))]
 
     for item in picks:
@@ -993,22 +1523,174 @@ def get_daily_fleet_liveries(count: int = 3, day: str | None = None) -> list[dic
             "FROM fleet WHERE skin_id = ? ORDER BY name ASC LIMIT 1",
             (item["skin_id"],),
         ).fetchone()
+        # A livery is rarely flown from a single base -- the 16 Rio Carnival
+        # EMB-120s sit at GIG and GRU -- so the card gets every hub that flies
+        # it, busiest first, rather than only the sample aircraft's one.
+        hubs = db.execute(
+            "SELECT hub_iata, COUNT(*) AS count FROM fleet "
+            "WHERE skin_id = ? AND hub_iata IS NOT NULL AND hub_iata != '' "
+            "GROUP BY hub_iata ORDER BY count DESC, hub_iata ASC",
+            (item["skin_id"],),
+        ).fetchall()
         item["day"] = day
         item["sample_aircraft"] = dict(plane) if plane else None
+        item["hubs"] = [dict(row) for row in hubs]
     return picks
+
+
+# How a livery can be obtained, in the order the tags read on a card. A livery
+# is routinely reachable more than one way (the Copa challenge planes are also
+# sold as travel-card offers), so these are additive, never a single "source".
+LIVERY_TAG_ORDER = ("challenge", "booster", "shop_gift", "shop_ad", "shop_tc",
+                    "shop_pack", "dutyfree", "market")
+
+# A shop offer's (template, currency) pair, as `shop2023/offers` spells it,
+# mapped to the tag it earns. Currency is what separates the flavours of a
+# giveaway: "gift or free" is a straight claim, "adv" wants an ad watched.
+_SHOP_TAGS = {
+    ("gift", "gift or free"): ("shop_gift", "Shop gift"),
+    ("gift", "adv"): ("shop_ad", "Ad gift"),
+    ("aircraft", "tc"): ("shop_tc", "Travel cards"),
+    ("pack", "realMoney"): ("shop_pack", "Paid pack"),
+}
+
+
+def _shop_tag(template: str | None, currency: str | None) -> tuple[str, str]:
+    """Tag for a shop offer, falling back to its currency alone.
+
+    The (template, currency) pairs above are what the live feed uses today; a
+    new pairing should still land somewhere sensible rather than vanish.
+    """
+    hit = _SHOP_TAGS.get((template or "", currency or ""))
+    if hit:
+        return hit
+    if currency == "adv":
+        return ("shop_ad", "Ad gift")
+    if currency == "tc":
+        return ("shop_tc", "Travel cards")
+    if currency == "realMoney":
+        return ("shop_pack", "Paid pack")
+    return ("shop_gift", "Shop gift")
+
+
+def get_livery_tags() -> dict[int, list[dict]]:
+    """skin_id → every way the game hands that livery out.
+
+    Four feeds answer this, and a livery can appear in any combination of them:
+    booster drop tables, the challenge reward ladder, the shop's offers
+    (gifts, travel-card buys, paid packs), and the duty free's own price tag.
+    Each tag is ``{kind, label, title}``; `kind` picks the icon and colour on
+    the card, `title` is the hover text.
+    """
+    db = get_db()
+    tags: dict[int, list[dict]] = {}
+
+    def add(skin_id, kind, label, title):
+        if skin_id is None or not label:
+            return
+        bucket = tags.setdefault(skin_id, [])
+        if not any(t["kind"] == kind and t["label"] == label for t in bucket):
+            bucket.append({"kind": kind, "label": label, "title": title})
+
+    def query(sql):
+        try:
+            return db.execute(sql).fetchall()
+        except sqlite3.Error:       # a DB synced before these tables existed
+            return []
+
+    for r in query("""
+        SELECT DISTINCT c.skin_id AS skin_id, b.name AS name
+          FROM mobile_booster_cards c
+          JOIN mobile_boosters b ON b.booster_id = c.booster_id
+         WHERE c.skin_id IS NOT NULL"""):
+        add(r["skin_id"], "booster", r["name"],
+            f"Drops from the {r['name']} booster")
+
+    for r in query("""
+        SELECT DISTINCT r.skin_id AS skin_id, ch.title AS title
+          FROM mobile_challenge_rewards r
+          JOIN mobile_challenges ch ON ch.challenge_id = r.challenge_id
+         WHERE r.skin_id IS NOT NULL"""):
+        add(r["skin_id"], "challenge", _challenge_label(r["title"]),
+            f"Awarded by {r['title']}")
+
+    for r in query("""
+        SELECT DISTINCT i.skin_id AS skin_id, o.title AS title,
+               o.template AS template, o.currency AS currency, o.cost AS cost
+          FROM mobile_shop_offer_items i
+          JOIN mobile_shop_offers o ON o.offer_id = i.offer_id
+         WHERE i.skin_id IS NOT NULL"""):
+        kind, label = _shop_tag(r["template"], r["currency"])
+        price = ""
+        if r["cost"]:
+            price = (f" for {int(r['cost']):,} travel cards" if r["currency"] == "tc"
+                     else f" for {r['cost']} (real money)"
+                     if r["currency"] == "realMoney" else f" for {r['cost']}")
+        add(r["skin_id"], kind, label, f"Shop: {r['title']}{price}")
+
+    # Retired challenges: their ladder is gone from `challenge/`, but the game
+    # names those liveries "<model> - Challenge <event>" for good, which is the
+    # only trace left that they were awarded rather than sold.
+    for r in query("""
+        SELECT skin_id, name FROM mobile_skins WHERE name LIKE '%Challenge%'"""):
+        if any(t["kind"] == "challenge" for t in tags.get(r["skin_id"], [])):
+            continue
+        m = re.search(r"\bChallenge\b\s*(.+)$", r["name"] or "", re.I)
+        event = (m.group(1).strip() if m else "")
+        if event:
+            add(r["skin_id"], "challenge", event, f"Awarded by the {event} challenge")
+
+    for r in query("""
+        SELECT skin_id, price_amcoins, source FROM mobile_skins
+         WHERE price_amcoins IS NOT NULL OR source = 'market'"""):
+        if r["price_amcoins"] is not None:
+            add(r["skin_id"], "dutyfree", "Duty free",
+                f"Sold in the duty free for {r['price_amcoins']} AM coins")
+        if r["source"] == "market":
+            add(r["skin_id"], "market", "User-created",
+                "Player-designed livery sold on the livery market")
+
+    order = {k: i for i, k in enumerate(LIVERY_TAG_ORDER)}
+    for bucket in tags.values():
+        bucket.sort(key=lambda t: (order.get(t["kind"], 99), t["label"]))
+    return tags
+
+
+def _challenge_label(title: str | None) -> str:
+    """Turn "Copa Airways Challenge!" into "Copa Airways".
+
+    The card already says what a challenge tag means through its icon, so the
+    word itself is redundant in the label — and the same livery's name carries
+    the event alone ("X777-9 - Challenge Copa Airways").
+    """
+    if not title:
+        return ""
+    cleaned = re.sub(r"\s*challenges?\s*!*\s*$", "", title.strip(), flags=re.I)
+    return cleaned or title.strip()
 
 
 def get_livery_collection(
     include_manufacturer: bool = False,
+    include_user_created: bool = True,
     status_filter: str | None = None,
     model_query: str | None = None,
     search_query: str | None = None,
 ) -> list[dict]:
     """Return all special/custom liveries (excluding manufacturer liveries by default),
-    indicating ownership and listing owned aircraft names."""
+    indicating ownership and listing owned aircraft names.
+
+    User-created liveries (source='market', e.g. 'LH-A388') are player-designed
+    skins sold on the market rather than official Playrion drops. They carry an
+    ``is_user_created`` flag and can be dropped entirely via ``include_user_created``.
+
+    ``first_seen`` is when a scrape first wrote the livery into the local DB, not
+    when the game released it. It is what "recently added" sorts on, so a catalog
+    or booster sync surfaces the rows it just pulled in.
+    """
     db = get_db()
     sql = """
-        SELECT s.skin_id, s.name, s.model_id, s.picture_path,
+        SELECT s.skin_id, s.name, s.model_id, s.picture_path, s.source,
+               s.first_seen, s.last_seen,
                (SELECT GROUP_CONCAT(DISTINCT b.name)
                   FROM mobile_booster_cards c
                   JOIN mobile_boosters b ON b.booster_id = c.booster_id
@@ -1022,10 +1704,17 @@ def get_livery_collection(
     args = []
 
     if not include_manufacturer:
+        # `source = 'manufacturer'` catches factory skins whose name/path don't
+        # say so (e.g. the DC-8 "Metal" livery, 'DC8-55 - Metal'); the name and
+        # path LIKEs still catch older rows where source was never tagged.
         sql += """ AND NOT (
-            s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
+            COALESCE(s.source, '') = 'manufacturer'
+            OR s.name LIKE '%(Manufacturer%' OR s.name LIKE '%Manufacturer%'
             OR s.picture_path LIKE '%Manufacturer%' OR s.picture_path LIKE '%constructeur%'
         )"""
+
+    if not include_user_created:
+        sql += " AND (s.source IS NULL OR s.source != 'market')"
 
     if model_query:
         q = model_query.strip().lower()
@@ -1036,8 +1725,22 @@ def get_livery_collection(
     if search_query:
         q = search_query.strip().lower()
         if q:
-            sql += " AND (LOWER(s.name) LIKE ? OR LOWER(COALESCE(boosters, '')) LIKE ?)"
-            args.extend([f"%{q}%", f"%{q}%"])
+            # Booster, challenge and shop-offer names are all searchable, so
+            # "copa" or "gift" finds every livery that feed hands out.
+            sql += """ AND (LOWER(s.name) LIKE ?
+                            OR LOWER(COALESCE(boosters, '')) LIKE ?
+                            OR EXISTS (SELECT 1 FROM mobile_challenge_rewards r
+                                         JOIN mobile_challenges ch
+                                           ON ch.challenge_id = r.challenge_id
+                                        WHERE r.skin_id = s.skin_id
+                                          AND LOWER(ch.title) LIKE ?)
+                            OR EXISTS (SELECT 1 FROM mobile_shop_offer_items i
+                                         JOIN mobile_shop_offers o
+                                           ON o.offer_id = i.offer_id
+                                        WHERE i.skin_id = s.skin_id
+                                          AND (LOWER(o.title) LIKE ?
+                                               OR LOWER(COALESCE(o.template, '')) LIKE ?)))"""
+            args.extend([f"%{q}%"] * 5)
 
     sql += " ORDER BY (fleet_count + mobile_count) DESC, s.name ASC"
     rows = db.execute(sql, args).fetchall()
@@ -1048,15 +1751,20 @@ def get_livery_collection(
         "SELECT aircraft_id, name, model, hub_iata, utilization, skin_id "
         "FROM fleet WHERE skin_id IS NOT NULL ORDER BY name ASC"
     ).fetchall()
+    hub_country_cache: dict[str, str | None] = {}
     for ac in ac_rows:
         sid = ac["skin_id"]
         if sid not in ac_map:
             ac_map[sid] = []
+        hub_iata = ac["hub_iata"]
+        if hub_iata not in hub_country_cache:
+            hub_country_cache[hub_iata] = get_hub_country_code(hub_iata)
         ac_map[sid].append({
             "aircraft_id": ac["aircraft_id"],
             "name": ac["name"],
             "model": ac["model"],
-            "hub": ac["hub_iata"],
+            "hub": hub_iata,
+            "country_code": hub_country_cache[hub_iata],
             "utilization": ac["utilization"],
         })
 
@@ -1078,15 +1786,19 @@ def get_livery_collection(
                 "utilization": 0,
             })
 
+    tag_map = get_livery_tags()
+
     results = []
     for r in rows:
         item = dict(r)
         sid = item["skin_id"]
+        item["tags"] = tag_map.get(sid, [])
         planes = ac_map.get(sid, [])
         item["aircraft"] = planes
         item["aircraft_names"] = [p["name"] for p in planes if p["name"]]
         item["owned_count"] = len(planes)
         item["is_owned"] = len(planes) > 0
+        item["is_user_created"] = item.get("source") == "market"
 
         # Apply status filter if requested
         if status_filter == "owned" and not item["is_owned"]:
@@ -1114,4 +1826,3 @@ def get_skin_image_bytes(skin_id: int, size: str = "big") -> bytes | None:
         (int(skin_id),),
     ).fetchone()
     return bytes(row["png"]) if row and row["png"] else None
-

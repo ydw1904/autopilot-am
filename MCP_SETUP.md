@@ -21,7 +21,7 @@ Verify the server boots and registers its tools:
 ```bash
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
 print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"
-# -> 36 tools
+# -> 42 tools
 ```
 
 ## 2. Chrome with remote debugging
@@ -115,9 +115,9 @@ no tab is on airlines-manager.com.
 
 ## Tools at a glance
 
-36 tools. The mutating ones default to `dry_run=True`.
+42 tools. The mutating ones default to `dry_run=True`.
 
-- **Read / live CDP:** `get_balance`, `list_hubs`, `list_routes`,
+- **Read / live CDP:** `get_balance`, `list_hubs`, `list_routes`, `resolve_aircraft`,
   `get_aircraft_at_hub`, `list_aircraft_for_sale`, `get_page_text`,
   `navigate_to`
 - **Direct game actions (CDP):** `buy_route`, `schedule_flight`
@@ -127,11 +127,12 @@ no tab is on airlines-manager.com.
   `number_circuit_aircraft`, `reconfigure_circuit_aircraft`, `rename_circuit`,
   `mass_rename_aircraft`, `mass_unschedule_aircraft`, `scrape_line_ids`,
   `scrape_audit_line_ids`
-- **Mobile API (second-hand market):** `shm_market`, `shm_fleet`,
-  `shm_aircraft`, `shm_sell`, `shm_sell_batch`
+- **Mobile API (second-hand market):** `shm_market`, `shm_watch_add`,
+  `shm_watch_add_booster`, `shm_watch_list`, `shm_watch_remove`, `shm_snipe`,
+  `shm_fleet`, `shm_aircraft`, `shm_sell`, `shm_sell_batch`
 - **Mobile API (daily rewards + session):** `mobile_daily_status`,
   `mobile_daily_bonuses`, `mobile_daily_slot`, `mobile_balance`,
-  `mobile_catalog`, `mobile_session_import`
+  `mobile_catalog`, `mobile_session_import`, `mobile_session_renew`
 
 The mobile tools authenticate with the mobile access_token (stored at
 `~/.airlines_manager/session.json`), not the web session — refresh it with

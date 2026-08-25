@@ -30,8 +30,32 @@ def listing(auction_id, skin_id, bin_price, *, model_id=134, name="Event Livery"
                          "skin": {"id": skin_id, "name": name, "type": 1}}}
 
 
-def watch(skin_id=113648, model_id=134, max_price=None, want=1, bought=0):
-    return sw.Watch(skin_id, model_id, "Event Livery", max_price, want, bought)
+def watch(skin_id=113648, model_id=134, max_price=None, want=1, bought=0,
+          source="manual"):
+    return sw.Watch(skin_id, model_id, "Event Livery", max_price, want, bought,
+                    source)
+
+
+def add_catalog_tables(conn):
+    conn.executescript("""
+        CREATE TABLE mobile_skins (
+            skin_id INTEGER PRIMARY KEY,
+            model_id INTEGER,
+            name TEXT,
+            source TEXT
+        );
+        CREATE TABLE mobile_shop_offers (
+            offer_id INTEGER PRIMARY KEY,
+            template TEXT,
+            currency TEXT
+        );
+        CREATE TABLE mobile_shop_offer_items (
+            offer_id INTEGER,
+            skin_id INTEGER
+        );
+        CREATE TABLE fleet (skin_id INTEGER);
+        CREATE TABLE mobile_aircraft (skin_id INTEGER);
+    """)
 
 
 # ── prices ──────────────────────────────────────────────────────────────────
@@ -88,13 +112,13 @@ def test_skips_dead_listings(kwargs):
     assert got == [] and skipped[0].reason == "already gone"
 
 
-def test_fee_inflates_the_cost_but_not_the_cap_comparison():
-    # The cap is read against the price on the market; the fee only shows up in
-    # what the budget and balance guards are charged.
+def test_balance_cost_is_the_submitted_buy_now_price():
+    # purchaseFeePercent is not confirmed as a buyer charge, so the amount the
+    # client posts is the only amount reserved from the balance.
     got, _ = sw.choose([listing(1, 113648, 1_000_000_000)],
                        [watch(max_price=1_000_000_000)], fee_pct=20)
     assert got[0].bin_price == 1_000_000_000
-    assert got[0].est_cost == 1_200_000_000
+    assert got[0].est_cost == 1_000_000_000
 
 
 def test_a_satisfied_watch_stops_matching():
@@ -130,6 +154,103 @@ def test_plan_models_ignores_watches_with_no_model(conn):
     assert sw.plan_models(conn, [watch(model_id=None)], per_pass=5) == []
 
 
+def test_plan_next_model_alternates_paid_pack_and_background_lanes(conn):
+    watches = [watch(skin_id=1, model_id=10, source=sw.PAID_PACK_SOURCE),
+               watch(skin_id=2, model_id=20),
+               watch(skin_id=3, model_id=30)]
+    assert sw.plan_next_model(conn, watches, priority_turn=True) == 10
+    assert sw.plan_next_model(conn, watches, priority_turn=False) == 20
+
+
+def test_plan_next_model_uses_nonempty_lane_as_fallback(conn):
+    watches = [watch(skin_id=1, model_id=10)]
+    assert sw.plan_next_model(conn, watches, priority_turn=True) == 10
+
+
+# Paid-pack target discovery
+def test_sync_automatic_watches_lists_owned_paid_liveries_but_only_arms_missing_ones(conn):
+    add_catalog_tables(conn)
+    conn.executemany(
+        "INSERT INTO mobile_skins VALUES (?,?,?,?)",
+        [(1, 10, "Pack Special", "playrion"),
+         (2, 20, "Factory Paint", "manufacturer"),
+         (3, 30, "Owned Special", "playrion"),
+         (4, 40, "Ad Special", "playrion"),
+         (5, 50, "Manual Special", "playrion")],
+    )
+    conn.executemany(
+        "INSERT INTO mobile_shop_offers VALUES (?,?,?)",
+        [(100, "pack", "realMoney"), (200, "gift", "adv")],
+    )
+    conn.executemany(
+        "INSERT INTO mobile_shop_offer_items VALUES (?,?)",
+        [(100, 1), (100, 2), (100, 3), (100, 5), (200, 4)],
+    )
+    conn.execute("INSERT INTO mobile_aircraft VALUES (3)")
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, max_price, source) "
+        "VALUES (5, 50, 'My manual watch', 123, 'manual')")
+
+    result = sw.sync_paid_pack_watches(conn)
+
+    assert result["targets"] == 3
+    assert result["models"] == 3
+    assert result["added"] == 2
+    rows = {r["skin_id"]: r for r in conn.execute(
+        "SELECT skin_id, source, max_price, active, armed FROM shm_watch").fetchall()}
+    assert rows[1]["source"] == sw.PAID_PACK_SOURCE
+    assert rows[1]["max_price"] is None
+    assert rows[1]["armed"] == 1
+    assert rows[3]["active"] == 0
+    assert rows[3]["armed"] == 0
+    assert rows[5]["source"] == "manual"
+    assert rows[5]["max_price"] == 123
+    assert 2 not in rows and 4 not in rows
+
+    updated = sw.sync_paid_pack_watches(conn, max_price=456)
+    assert updated["added"] == 0
+    assert updated["updated"] == 2
+    caps = dict(conn.execute(
+        "SELECT skin_id, max_price FROM shm_watch").fetchall())
+    assert caps == {1: 456, 3: 456, 5: 123}
+
+
+def test_sync_automatic_watches_marks_acquired_managed_rows_inactive(conn):
+    add_catalog_tables(conn)
+    conn.executemany(
+        "INSERT INTO mobile_skins VALUES (?,?,?,?)",
+        [(1, 10, "Managed", "playrion"), (2, 20, "Manual", "playrion")],
+    )
+    conn.execute("INSERT INTO mobile_shop_offers VALUES (100, 'pack', 'realMoney')")
+    conn.executemany("INSERT INTO mobile_shop_offer_items VALUES (100, ?)",
+                     [(1,), (2,)])
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, source) "
+        "VALUES (1, 10, 'Managed', ?), (2, 20, 'Manual', 'manual')",
+        (sw.PAID_PACK_SOURCE,),
+    )
+    conn.executemany("INSERT INTO fleet VALUES (?)", [(1,), (2,)])
+
+    result = sw.sync_paid_pack_watches(conn)
+
+    assert result["disabled"] == 0
+    states = {r["skin_id"]: (r["active"], r["bought"])
+              for r in conn.execute("SELECT skin_id, active, bought FROM shm_watch")}
+    assert states == {1: (0, 1), 2: (1, 0)}
+
+
+def test_sync_automatic_watches_adds_challenge_rows_as_observe_only(conn):
+    add_catalog_tables(conn)
+    conn.execute("CREATE TABLE mobile_challenge_rewards (skin_id INTEGER)")
+    conn.execute("INSERT INTO mobile_skins VALUES (7, 70, 'Challenge Special', 'playrion')")
+    conn.execute("INSERT INTO mobile_challenge_rewards VALUES (7)")
+
+    sw.sync_automatic_watches(conn)
+
+    row = conn.execute("SELECT source, armed, active FROM shm_watch WHERE skin_id=7").fetchone()
+    assert dict(row) == {"source": sw.CHALLENGE_SOURCE, "armed": 0, "active": 1}
+
+
 # ── limits ──────────────────────────────────────────────────────────────────
 def test_bid_headroom_accounts_for_the_reserve():
     lim = sw.Limits(max_bids_per_day=20, reserve_bids=5, bids_used=12)
@@ -140,3 +261,163 @@ def test_spent_today_counts_only_real_buys(conn):
     conn.execute("INSERT INTO shm_buys (auction_id, est_cost, dry_run) "
                  "VALUES (1, 500, 0), (2, 700, 0), (3, 999, 1)")
     assert sw.spent_today(conn) == (2, 1200)
+
+
+def test_limit_cache_obeys_ttl():
+    cache = sw.LimitCache(ttl=600, limits=sw.Limits(), refreshed_at=100)
+    assert not cache.due(now=699)
+    assert cache.due(now=700)
+
+
+def test_armed_limit_read_fails_closed_when_guards_are_unavailable(conn):
+    class Client:
+        def auction_rules(self):
+            raise sw.AMError("offline")
+
+        def my_bidding(self):
+            raise sw.AMError("offline")
+
+        def resources(self):
+            raise sw.AMError("offline")
+
+    with pytest.raises(sw.AMError, match="purchase guards unavailable"):
+        sw.read_limits(Client(), conn, strict=True)
+
+
+def test_empty_pass_does_not_read_account_limits(conn):
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, source) "
+        "VALUES (1, 10, 'Wanted', 'manual')")
+
+    class Client:
+        def auctions(self, **kwargs):
+            return []
+
+        def auction_rules(self):
+            raise AssertionError("limit read should not happen")
+
+        def my_bidding(self):
+            raise AssertionError("bidding read should not happen")
+
+        def resources(self):
+            raise AssertionError("balance read should not happen")
+
+    result = sw.one_pass(
+        Client(), conn, arm=False, per_pass=1, sweep=True, pool_only=False,
+        reserve_bids=0, daily_budget=None, verbose=False)
+    assert result["requests"] == 2
+    assert result["bought"] == []
+
+
+def test_dry_run_candidate_does_not_read_account_limits(conn):
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, max_price, source) "
+        "VALUES (1, 10, 'Wanted', 1000, 'manual')")
+
+    class Client:
+        def auction_rules(self):
+            raise AssertionError("limit read should not happen")
+
+        def my_bidding(self):
+            raise AssertionError("bidding read should not happen")
+
+        def resources(self):
+            raise AssertionError("balance read should not happen")
+
+    result = sw.act_on_listings(
+        Client(), conn, [listing(1, 1, 500, model_id=10)], arm=False,
+        reserve_bids=0, daily_budget=None)
+    assert result["candidates"] == 1
+    assert result["bought"][0]["dry_run"] is True
+
+
+def test_paid_pack_only_mode_buys_pack_and_observes_other_sources(conn):
+    conn.executemany(
+        "INSERT INTO shm_watch "
+        "(skin_id, model_id, label, max_price, source) VALUES (?,?,?,?,?)",
+        [(1, 10, "Paid Pack", 1000, sw.PAID_PACK_SOURCE),
+         (2, 20, "Manual", 1000, "manual")],
+    )
+
+    class Session:
+        player_id = 42
+
+    class Client:
+        s = Session()
+
+        def __init__(self):
+            self.bids = []
+
+        def bid(self, auction_id, amount):
+            self.bids.append((auction_id, amount))
+
+        def auction(self, auction_id):
+            return {"isPurchased": True, "winner": {"id": 42}}
+
+    client = Client()
+    limits = sw.Limits(
+        max_bids_per_day=20, fee_pct=0, balance=10_000,
+        daily_budget=10_000,
+    )
+    result = sw.act_on_listings(
+        client, conn,
+        [listing(101, 1, 500, model_id=10, name="Paid Pack"),
+         listing(202, 2, 600, model_id=20, name="Manual")],
+        arm=True, arm_sources={sw.PAID_PACK_SOURCE}, reserve_bids=0,
+        daily_budget=10_000, limits=limits,
+    )
+
+    assert client.bids == [(101, 500)]
+    assert [(row["auction_id"], row["dry_run"]) for row in result["bought"]] == [
+        (101, False), (202, True),
+    ]
+    states = dict(conn.execute(
+        "SELECT skin_id, active FROM shm_watch").fetchall())
+    assert states == {1: 0, 2: 1}
+
+
+def test_armed_watch_can_buy_without_a_cap_when_balance_stays_positive(conn):
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, source, armed) "
+        "VALUES (1, 10, 'Paid Pack', ?, 1)",
+        (sw.PAID_PACK_SOURCE,),
+    )
+
+    class Client:
+        class Session:
+            player_id = 42
+        s = Session()
+
+        def bid(self, auction_id, amount):
+            assert (auction_id, amount) == (101, 500)
+
+        def auction(self, auction_id):
+            return {"isPurchased": True, "winner": {"id": 42}}
+
+    result = sw.act_on_listings(
+        Client(), conn, [listing(101, 1, 500, model_id=10)],
+        arm=True, arm_sources={sw.PAID_PACK_SOURCE}, reserve_bids=0,
+        daily_budget=None, limits=sw.Limits(balance=10_000, fee_pct=0),
+    )
+
+    assert result["bought"][0]["dry_run"] is False
+
+
+def test_armed_watch_keeps_balance_strictly_positive(conn):
+    conn.execute("INSERT INTO shm_watch (skin_id, model_id, label, armed) "
+                 "VALUES (1, 10, 'Paid Pack', 1)")
+    result = sw.act_on_listings(
+        object(), conn, [listing(101, 1, 10_000, model_id=10)],
+        arm=True, reserve_bids=0, daily_budget=None,
+        limits=sw.Limits(balance=10_000, fee_pct=0), require_armed=True,
+    )
+    assert result["bought"] == []
+    assert any("keeping a positive balance" in line for line in result["log"])
+
+
+def test_watcher_lock_rejects_second_owner(tmp_path):
+    lock_path = tmp_path / "watcher.lock"
+    with sw.watcher_lock(str(lock_path)):
+        with pytest.raises(sw.WatcherAlreadyRunning):
+            with sw.watcher_lock(str(lock_path)):
+                pass

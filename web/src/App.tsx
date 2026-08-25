@@ -1,130 +1,106 @@
-import React, { useState, useEffect } from "react";
-import { Sidebar } from "./components/Sidebar";
-import { Header } from "./components/Header";
-import { FleetManagement } from "./components/FleetManagement";
+import React, { useCallback, useEffect, useState } from "react";
+import { fetchCommandCenter } from "./api";
+import { AppShell, AppView } from "./components/AppShell";
+import { CommandCenter } from "./components/CommandCenter";
+import { FleetWorkspace } from "./components/FleetWorkspace";
 import { LiveryCollection } from "./components/LiveryCollection";
-import { FleetStats } from "./types";
-import { fetchStats } from "./api";
+import { ShmMonitor } from "./components/ShmMonitor";
+import { CommandCenterSnapshot } from "./types";
+
+const ROUTES: AppView[] = ["command", "fleet", "liveries", "shm"];
+
+function readLocation(): { view: AppView; preset?: string } {
+  const raw = window.location.hash.replace(/^#/, "");
+  const [route, query = ""] = raw.split("?");
+  const params = new URLSearchParams(query);
+  return {
+    view: (ROUTES as string[]).includes(route) ? (route as AppView) : "command",
+    preset: params.get("preset") || undefined,
+  };
+}
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<string>("fleet");
-  const [stats, setStats] = useState<FleetStats | null>(null);
-  const [filterSkinId, setFilterSkinId] = useState<number | null>(null);
+  const initial = readLocation();
+  const [view, setView] = useState<AppView>(initial.view);
+  const [fleetPreset, setFleetPreset] = useState(initial.preset);
+  const [snapshot, setSnapshot] = useState<CommandCenterSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshToken, setRefreshToken] = useState(0);
 
-  const loadStats = async () => {
+  const loadSnapshot = useCallback(async (quiet = false) => {
+    quiet ? setRefreshing(true) : setLoading(true);
+    setError(null);
     try {
-      const data = await fetchStats();
-      setStats(data);
-    } catch (e) {
-      console.error("Failed to fetch fleet stats", e);
+      setSnapshot(await fetchCommandCenter());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Command Center request failed");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
-  };
-
-  useEffect(() => {
-    loadStats();
   }, []);
 
-  const handleJumpToFleetWithSkin = (skinId: number) => {
-    setFilterSkinId(skinId);
-    setActiveTab("fleet");
+  useEffect(() => { loadSnapshot(); }, [loadSnapshot]);
+
+  useEffect(() => {
+    const handleHash = () => {
+      const location = readLocation();
+      setView(location.view);
+      setFleetPreset(location.preset);
+    };
+    window.addEventListener("hashchange", handleHash);
+    return () => window.removeEventListener("hashchange", handleHash);
+  }, []);
+
+  const navigate = (next: AppView, preset?: string) => {
+    const suffix = preset ? `?preset=${encodeURIComponent(preset)}` : "";
+    window.location.hash = `${next}${suffix}`;
   };
 
-  const getHeaderInfo = () => {
-    switch (activeTab) {
-      case "fleet":
-        return {
-          title: "Fleet Operations Management",
-          subtitle: "Live fleet overview, schedules, configurations & bulk management",
-        };
-      case "liveries":
-        return {
-          title: "Livery Collection & Aircraft Assignments",
-          subtitle: "Special & event livery gallery · Excludes standard manufacturer liveries",
-        };
-      case "warehouse":
-        return {
-          title: "Aircraft Warehouse (Idle Fleet)",
-          subtitle: "Manage 0% utilization planes across all hubs",
-        };
-      case "hubs":
-        return {
-          title: "Hubs & Network Routes",
-          subtitle: "Route network connectivity, demand & fleet allocations",
-        };
-      case "planner":
-        return {
-          title: "Revenue Optimizer Planner",
-          subtitle: "Circuit discovery, wave pricing & seat configuration search",
-        };
-      default:
-        return {
-          title: "Autopilot AM",
-          subtitle: "Airlines Manager Operations Control",
-        };
-    }
+  // A preset is a one-shot instruction ("open this livery", "show the idle
+  // planes"), so once a workspace lets it go the URL drops it too -- otherwise
+  // a reload would silently reapply a view the operator already dismissed.
+  const clearPreset = () => {
+    setFleetPreset(undefined);
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#${view}`);
   };
 
-  const headerInfo = getHeaderInfo();
+  const dataChanged = () => {
+    setRefreshToken((value) => value + 1);
+    loadSnapshot(true);
+  };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#F5F2EC] font-sans antialiased text-[#0A1E3C]">
-      {/* Sidebar Navigation */}
-      <Sidebar
-        activeTab={activeTab}
-        setActiveTab={(tab) => {
-          if (tab !== "fleet") setFilterSkinId(null);
-          setActiveTab(tab);
-        }}
-        stats={stats ? { total: stats.total, special_skin_count: stats.special_skin_count } : undefined}
-      />
-
-      {/* Main Workspace Area */}
-      <div className="flex-1 flex flex-col h-screen overflow-hidden">
-        <Header
-          title={headerInfo.title}
-          subtitle={headerInfo.subtitle}
+    <AppShell
+      activeView={view}
+      snapshot={snapshot}
+      refreshing={refreshing}
+      onNavigate={(next) => navigate(next)}
+      onRefresh={() => { setRefreshToken((value) => value + 1); loadSnapshot(true); }}
+    >
+      {view === "command" ? (
+        <CommandCenter snapshot={snapshot} loading={loading} error={error} onNavigate={navigate} />
+      ) : view === "fleet" ? (
+        <FleetWorkspace
+          snapshot={snapshot}
+          initialPreset={fleetPreset}
+          refreshToken={refreshToken}
+          onDataChanged={dataChanged}
+          onOpenLivery={(skinId) => navigate("liveries", `skin:${skinId}`)}
         />
-
-        <main className="flex-1 flex flex-col overflow-hidden">
-          {activeTab === "fleet" && (
-            <FleetManagement
-              stats={stats}
-              onRefreshStats={loadStats}
-              initialSkinId={filterSkinId}
-              onClearSkinFilter={() => setFilterSkinId(null)}
-            />
-          )}
-
-          {activeTab === "liveries" && (
-            <LiveryCollection onViewInFleet={handleJumpToFleetWithSkin} />
-          )}
-
-          {activeTab === "warehouse" && (
-            <div className="p-8 flex flex-col items-center justify-center h-full text-[#8B877C] font-mono">
-              <p className="text-sm">Warehouse filter view integrated into Fleet Management.</p>
-              <button
-                onClick={() => setActiveTab("fleet")}
-                className="mt-3 px-4 py-2 rounded-lg bg-[#05164D] text-white font-bold text-xs"
-              >
-                Go to Fleet (Filter by Idle)
-              </button>
-            </div>
-          )}
-
-          {activeTab === "hubs" && (
-            <div className="p-8 flex flex-col items-center justify-center h-full text-[#8B877C] font-mono">
-              <p className="text-sm">Hub routes & network module.</p>
-            </div>
-          )}
-
-          {activeTab === "planner" && (
-            <div className="p-8 flex flex-col items-center justify-center h-full text-[#8B877C] font-mono">
-              <p className="text-sm">Circuit optimization planner engine.</p>
-            </div>
-          )}
-        </main>
-      </div>
-    </div>
+      ) : view === "liveries" ? (
+        <LiveryCollection
+          initialPreset={fleetPreset}
+          refreshToken={refreshToken}
+          onViewInFleet={(liveryName) => navigate("fleet", `livery:${liveryName}`)}
+          onPresetCleared={clearPreset}
+        />
+      ) : (
+        <ShmMonitor refreshToken={refreshToken} />
+      )}
+    </AppShell>
   );
 }
 

@@ -8,15 +8,20 @@ fill that in, each covering what the others cannot:
   --web       the browser game's reconfigure page. Every aircraft's page ships
               a hidden `#aircraftSkinJson` listing the liveries THAT aircraft
               can wear, names included, and the one it currently wears is
-              always among them. It is the only source that names a challenge
-              or event livery — those are awarded, never sold, so no shop
-              endpoint has ever heard of them. One page fetch per unnamed
-              livery, not per aircraft.
+              always among them. It is the only source that names an awarded
+              livery once its challenge or event is over and the reward ladder
+              below has moved on. One page fetch per unnamed livery, not per
+              aircraft.
   --dutyfree  the mobile duty free (`shop/skin/getSkins/{page}`), 3k liveries
               with names, prices, creators and an owned flag, split into the
               shop's own `playrion` and `market` buckets.
   --shm       the second-hand market's live listings, whose `skin.type` is the
               game's own Playrion / player-made / manufacturer verdict.
+  --challenge the running challenge's reward ladder (`challenge/`), the only
+              endpoint that names the challenge liveries while they are still
+              being awarded — the shop never sells them.
+  --shop      the shop feed (`shop2023/offers`): packs and battle passes list
+              the liveries they contain, with the livery's own type stated.
 
 Together they set `mobile_skins.source`, which is what separates an official
 Playrion livery from one an airline designed and sells on the livery market.
@@ -176,6 +181,115 @@ def sync_dutyfree(client: AMClient, store: MobileStore, dry_run: bool) -> None:
         store.commit()
 
 
+def _skin_delta(store: MobileStore, before: tuple) -> str:
+    """How many liveries a pass added, and how many it named for the first time."""
+    after = _skin_state(store)
+    return (f"{after[0] - before[0]} liveries new to the DB, "
+            f"{after[1] - before[1]} named for the first time")
+
+
+def _skin_state(store: MobileStore) -> tuple:
+    row = store.conn.execute(
+        "SELECT COUNT(*), SUM(name IS NOT NULL) FROM mobile_skins").fetchone()
+    return (row[0] or 0, row[1] or 0)
+
+
+def split_by_paint(store: MobileStore, skin_ids: set) -> tuple[list, list]:
+    """Split livery ids into (special, factory paint).
+
+    Both reward feeds hand out plain aircraft as often as painted ones — half
+    the shop's offers are a model in its default colours, and a challenge
+    ladder is mostly stock planes with a few exclusives on top. The game says
+    which is which itself: an aircraft reward's `skin.type` is 0 for a
+    manufacturer paint, and those liveries are named "<model> - (Manufacturer
+    livery)". `mobile_skins.source` carries that verdict, so the split is a
+    lookup, not a guess.
+    """
+    if not skin_ids:
+        return [], []
+    marks = ",".join("?" * len(skin_ids))
+    rows = store.conn.execute(
+        f"""SELECT skin_id, name, COALESCE(source, '') = 'manufacturer' AS is_manu
+              FROM mobile_skins WHERE skin_id IN ({marks})""",
+        tuple(skin_ids)).fetchall()
+    special = [r["name"] or str(r["skin_id"]) for r in rows if not r["is_manu"]]
+    factory = [r["name"] or str(r["skin_id"]) for r in rows if r["is_manu"]]
+    return sorted(special), sorted(factory)
+
+
+def sync_challenge(client: AMClient, store: MobileStore, dry_run: bool) -> None:
+    """Read the running challenge's reward ladder.
+
+    Challenge liveries are awarded, never sold, so the duty free has never
+    heard of them — the ladder is where they are named, exactly as the booster
+    drop table names the booster ones.
+    """
+    print("== challenge ==")
+    before = _skin_state(store)
+    challenges = client.challenges()
+    if not challenges:
+        print("  no challenge running")
+        return
+    for ch in challenges:
+        objectives = ch.get("objectives") or []
+        rewards = [r for o in objectives
+                   for key in ("rewards", "battlePassRewards")
+                   for r in (o.get(key) or [])]
+        skins = {(r.get("skin") or {}).get("id") for r in rewards} - {None}
+        window = (f"{_date_of(ch.get('startDate'))} → "
+                  f"{_date_of(ch.get('endDate'))}")
+        prog = ch.get("airlineProgress") or {}
+        print(f"  [{ch.get('id')}] {ch.get('title')}  ({ch.get('challengeType')})"
+              f"  {window}")
+        special, factory = split_by_paint(store, skins)
+        print(f"        {len(objectives)} objectives, {len(rewards)} reward slots, "
+              f"{len(skins)} distinct liveries ({len(special)} special, "
+              f"{len(factory)} factory paint); rank {prog.get('rank')} "
+              f"at {prog.get('progress')}")
+        for a in (ch.get("aircraft") or []):
+            print(f"        x{a.get('multiplier')}  {a.get('id'):<9} {a.get('name')}")
+    print(f"  {_skin_delta(store, before)}")
+    if not dry_run:
+        store.commit()
+
+
+def sync_shop(client: AMClient, store: MobileStore, dry_run: bool) -> None:
+    """Read the shop feed — packs and battle passes carry liveries too."""
+    print("== shop offers ==")
+    before = _skin_state(store)
+    offers = client.shop_offers()
+    with_skins = [o for o in offers
+                  if any((it or {}).get("skin") for it in (o.get("content") or []))]
+    skins = {(it.get("skin") or {}).get("id")
+             for o in offers for it in (o.get("content") or [])
+             if isinstance(it, dict) and it.get("skin")} - {None}
+    special, factory = split_by_paint(store, skins)
+    print(f"  {len(offers)} offers, {len(with_skins)} of them carry an aircraft, "
+          f"{len(skins)} distinct liveries "
+          f"({len(special)} special, {len(factory)} factory paint)")
+    for o in with_skins:
+        ids = {(it.get("skin") or {}).get("id")
+               for it in (o.get("content") or [])
+               if isinstance(it, dict) and it.get("skin")} - {None}
+        sp, fa = split_by_paint(store, ids)
+        # An offer whose every aircraft is a stock paint sells the plane, not a
+        # livery — worth calling out, because it looks identical in the feed.
+        note = "plane only" if not sp else f"{len(sp)} livery"
+        cost = o.get("purchaseCost")
+        print(f"  [{o.get('id'):>6}] {(o.get('title') or '')[:38]:<38} "
+              f"{o.get('template') or '':<10} {len(ids):>2} aircraft  "
+              f"{note:<9} {cost} {o.get('purchaseCurrency') or ''}")
+    print(f"  {_skin_delta(store, before)}")
+    if not dry_run:
+        store.commit()
+
+
+def _date_of(v) -> str:
+    if isinstance(v, dict):
+        return (v.get("date") or "")[:10]
+    return str(v or "")[:10]
+
+
 def sync_shm(client: AMClient, store: MobileStore, deep: bool,
              dry_run: bool) -> None:
     """Sweep live listings for the game's own livery classification.
@@ -283,6 +397,10 @@ def main() -> int:
                     help="sync the duty free livery catalogue")
     ap.add_argument("--shm", action="store_true",
                     help="sync livery classes off live market listings")
+    ap.add_argument("--challenge", action="store_true",
+                    help="sync the running challenge's reward ladder")
+    ap.add_argument("--shop", action="store_true",
+                    help="sync the shop feed's packs and battle passes")
     ap.add_argument("--limit", type=int, default=0,
                     help="with --web, cap how many liveries to chase (0 = all)")
     ap.add_argument("--shm-shallow", action="store_true",
@@ -292,13 +410,14 @@ def main() -> int:
     args = ap.parse_args()
 
     # No pass named means every pass.
-    passes = (args.web, args.dutyfree, args.shm)
+    passes = (args.web, args.dutyfree, args.shm, args.challenge, args.shop)
     if not any(passes):
         args.web = args.dutyfree = args.shm = True
+        args.challenge = args.shop = True
 
     store = MobileStore()
     client = None
-    if args.dutyfree or args.shm:
+    if args.dutyfree or args.shm or args.challenge or args.shop:
         session = AMSession.load()
         try:
             session.renew()
@@ -315,6 +434,10 @@ def main() -> int:
             sync_dutyfree(client, store, args.dry_run)
         if args.shm:
             sync_shm(client, store, not args.shm_shallow, args.dry_run)
+        if args.challenge:
+            sync_challenge(client, store, args.dry_run)
+        if args.shop:
+            sync_shop(client, store, args.dry_run)
     finally:
         if client:
             client.close()

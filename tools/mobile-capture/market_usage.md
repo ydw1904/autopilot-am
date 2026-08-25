@@ -177,6 +177,83 @@ offer is drained it drops from the feed, so re-running is a no-op. Safe to put o
 a daily schedule. Full haul when fresh = +$50M money, +10 coins, +$25M research,
 +5000 cards.
 
+## Official market rules (Playrion knowledge base)
+
+Source: <https://help.airlines-manager.com/knowledge-base/second-hand-market/?lang=en>
+(the April 2021 / v3.5.2 "Buy It Now" update page, read 2026-08-24). This is the
+game's own description of the SHM, and every number in it lines up with what
+`loading/notification` → `auctionRules` reports live, so it explains *why* the
+caps in this document exist.
+
+**Access.** A mobile-only feature, open to any player above 1 bronze star, found
+under "Aircraft" → "Aircraft Acquisition". Buying a **classic** aircraft
+second-hand costs **no AM Coins**, which is the whole demand side of the 747SP
+flip: buyers without the license pay dollars instead of coins.
+
+**Spending caps** (KB wording, and the `auctionRules` field that carries each):
+
+| Rule | Value | `auctionRules` field |
+|---|---|---|
+| Weekly bid exposure | $200B across live bids, rolling 7 days | `maxSpentInBidSince` |
+| Purchases per day | 20 | `maxBidByDay` |
+| Simultaneous listings | 10 | `countMaxAuction` |
+
+The weekly figure meters money *committed to leading bids*, not settled spend:
+$1B on a winning bid leaves $199B for the next 7 days. Playrion states these can
+move at any time, so read them from `auctionRules` rather than hardcoding.
+
+**The three prices, per the KB.** Same objects `shm_aircraft` returns:
+
+- *Opening price* is the seller's choice, floored at the "sell for spare parts"
+  price and ceilinged at "the plane standard price" (`maxAuctionSellPrice`).
+- *Threshold* is the ceiling on Buy It Now, "regularly monitored and updated
+  according to the marketability ... for the associated liveries". That is the
+  official confirmation that `binThreshold` is **per livery and mutable** — read
+  it off the aircraft every time, never cache a tier.
+- *Buy It Now* must sit between the opening price and the threshold.
+
+**Auctions.** Minimum duration 2 hours; **cannot be cancelled** once started;
+capped in number as above. On an unsuccessful sale the seller gets the plane
+back and no fee is charged. Settlement is asynchronous: a completed sale can sit
+"processing" for a while before the plane and the money move, flagged in
+"My bids" / "My sales".
+
+**Bidding is proxy bidding.** A bid is a *maximum bid*; the server auto-outbids
+in small increments, so a winner often pays less than their maximum, and a bid
+that looks high can still lose to someone's larger standing maximum. Maxima can
+be raised but never lowered, and are capped at the BIN. A maximum at or above
+the BIN buys instantly. A bid the market judges suspiciously high triggers a
+confirmation warning (bids cannot be undone), and bad-faith bidding, i.e. using
+the market for anything other than player-to-player trade, is sanctionable.
+Relevant to `shm_snipe`: keep caps at defensible fair values.
+
+**Processing fee (the published formula).** Taken off the final price, on
+successful sales only:
+
+```
+fee_fraction = minimum(0,5 ; ((BestBid / AircraftCataloguePrice) / 20))
+```
+
+That is French notation: `0,5` is 0.5 and `;` separates the two arguments, so it
+reads `min(0.5, ratio / 20)` where `ratio = winning bid / brand-new catalogue
+price`. The KB's own worked examples: a plane sold at 50% of catalogue pays
+2.5%, at 100% of catalogue pays 5%. The `/20` divisor is exactly the
+`purchaseFeePercent = 20` that `auctionRules` publishes.
+
+Two consequences the examples hide, because both examples sit at or below
+catalogue price:
+
+- The fee is **progressive, not flat**. Below the 50% cap it is
+  `fee = BestBid² / (20 × catalogue)`, so it grows with the *square* of the sale
+  price. The 50% cap only binds at 10× catalogue.
+- Arbitrage listings live far above catalogue, where that matters a lot. A
+  Spirit 747SP clearing at its $1.209B threshold against a ~$177M catalogue
+  price is a ratio of ~6.8, i.e. a ~34% fee (~$413M), netting ~$796M on a ~$160M
+  mint. Still a large win, but the flip is a ~5x, not the ~7.5x the gross
+  suggests. **Worth confirming against a settled sale**, since the formula's
+  `AircraftCataloguePrice` is assumed here to be the raw/new value
+  (`maxAuctionSellPrice`) rather than some separate catalogue figure.
+
 ## Ban-risk note
 This drives the real game API. Keep `sell-batch --min-delay` reasonable, don't
 run 24/7, and prefer human-scale volumes. Your account, your call.
