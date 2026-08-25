@@ -168,7 +168,8 @@ def get_aircraft_at_hub(cdp, hub_iata=None):
             const id = parseInt(idMatch[1]);
             const boldEl = box.querySelector('.title .bold');
             const raw = boldEl ? boldEl.textContent.trim() : '';
-            const model = raw.split('/')[0].trim();
+            const parts = raw.split('/').map(s => s.trim()).filter(Boolean);
+            const model = parts.length >= 2 ? parts[1] : (parts[0] || '');
             // Utilization: "<N>%" in .content .listBox1 > b. 0% = empty schedule.
             const utilEl = box.querySelector('.content .listBox1 > b');
             const utilStr = utilEl ? utilEl.textContent.trim().replace('%','') : '0';
