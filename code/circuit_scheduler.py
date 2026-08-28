@@ -94,16 +94,107 @@ def planning_api_call(cdp, payload):
     return cdp.eval_json(js, await_promise=True)
 
 
-def clear_schedule(cdp, aircraft_id):
-    """Clear all flights for an aircraft."""
-    return planning_api_call(cdp, {"aircraftId": aircraft_id})
+def _mobile_client():
+    """A paced mobile client, or None when there is no session on disk.
+
+    The mobile API writes schedules without a browser (see AMClient.add_flight
+    / clear_planning), so it is the primary backend whenever a session exists.
+    """
+    try:
+        session = AMSession.load()
+        return AMClient(session) if session.access_token else None
+    except Exception:
+        return None
 
 
-def submit_flights(cdp, aircraft_id, flights):
-    """Submit (add) flights for an aircraft."""
+def clear_schedule(backend, aircraft_id):
+    """Clear all flights for an aircraft. `backend` is an AMClient or a CDP."""
+    if isinstance(backend, AMClient):
+        try:
+            backend.clear_planning(aircraft_id)
+            return {"result": True, "message": "cleared"}
+        except AMError as e:
+            return {"result": False, "message": str(e)}
+    return planning_api_call(backend, {"aircraftId": aircraft_id})
+
+
+def count_scheduled_flights(backend, aircraft_id):
+    """How many flights an aircraft already has, or None if unknowable.
+
+    Only the mobile backend can answer (one request per aircraft); a CDP
+    backend gets None and the caller falls back to the coarse idle/busy signal.
+    """
+    if isinstance(backend, AMClient):
+        try:
+            return len(backend.aircraft_planning(aircraft_id))
+        except AMError:
+            return None
+    return None
+
+
+def only_new_may_skip(have, want):
+    """Whether --only-new can leave a busy aircraft alone.
+
+    The hub read reports only idle-or-not, so an aircraft holding 1 of 7 legs
+    looks exactly like a fully scheduled one. That is not hypothetical: a read
+    timeout mid-write left CGK-C008-099 with 3 of 7 legs, and every later
+    --only-new pass skipped it, stranding the plane at 46% utilisation. Skip
+    only when the schedule is known to be complete.
+    """
+    return have is None or have >= want
+
+
+def submit_flights(backend, aircraft_id, flights):
+    """Submit (add) flights for an aircraft. `backend` is an AMClient or a CDP.
+
+    The mobile endpoint takes one flight per call, so a partial failure leaves
+    the flights before it in place — the caller re-runs after a clear, which is
+    exactly what the scheduler already does.
+    """
     if not flights:
         return {"result": True, "message": "No flights to add"}
-    return planning_api_call(cdp, {"aircraftId": aircraft_id, "added": flights})
+    if isinstance(backend, AMClient):
+        for i, f in enumerate(flights):
+            try:
+                backend.add_flight(aircraft_id, f["lineId"], f["takeOffTime"])
+            except AMError as e:
+                return {"result": False,
+                        "message": f"flight {i + 1}/{len(flights)}: {e}"}
+        return {"result": True, "message": f"{len(flights)} flights added"}
+    return planning_api_call(backend, {"aircraftId": aircraft_id, "added": flights})
+
+
+# ── Mobile reads (the CDP planning-page twins) ────────────────────────────
+
+def _mobile_hub_view(client, hub_iata):
+    """(aircraft, lines) at a hub off the mobile API, or None if unresolvable.
+
+    The twin of planning_page.get_aircraft_at_hub / get_lines_at_hub, in two
+    requests instead of a browser. `util` is only ever 0 or 100 here — the
+    mobile side reports *whether* a plane is idle (hub/masstool's
+    inactiveAircrafts), not how busy it is, and --only-new is the only caller.
+    """
+    hub_id = get_player_hub_id(hub_iata)
+    if not hub_id:
+        return None
+    hub = client.hub_masstool(int(hub_id))
+    idle = {a["id"] for a in
+            (hub.get("inactiveAircrafts") or {}).get("aircraft", [])}
+    models = {r[0]: r[1] for r in
+              get_db().execute("SELECT model_id, name FROM mobile_models")}
+    aircraft = [{"id": it["id"], "name": (it.get("n") or "").strip(),
+                 "model": models.get(it.get("al_id"), ""),
+                 "util": 0 if it["id"] in idle else 100}
+                for it in client.fleet(per_page=500)
+                if it.get("h_id") == int(hub_id)]
+
+    lines = []
+    for ln in (hub.get("activeLines") or []) + (hub.get("inactiveLines") or []):
+        a1 = ((ln.get("airportOne") or {}).get("iata") or "").upper()
+        a2 = ((ln.get("airportTwo") or {}).get("iata") or "").upper()
+        dest = a2 if a1 == hub_iata.upper() else a1
+        lines.append({"lineId": ln["id"], "dest": dest, "name": f"{a1}/{a2}"})
+    return aircraft, lines
 
 
 # ── Schedule builder ──────────────────────────────────────────────────────
@@ -621,13 +712,18 @@ def _schedule(args, p):
             print(f"\n  {Fore.WHITE}{label} (wave {wave}, {DAY_NAMES[day]}) "
                   f"util={util_by_id.get(ac_id, 0):.0f}%")
 
-            if args.only_new and already_flying:
-                print(f"    {Fore.CYAN}--only-new: skipping (already scheduled)")
-                preserved += 1
-                res["skipped"].append(label)
-                continue
-
             flights = build_flight_schedule(routes_with_ids, mmm - 1)
+
+            if args.only_new and already_flying:
+                have = count_scheduled_flights(backend, ac_id)
+                if only_new_may_skip(have, len(flights)):
+                    print(f"    {Fore.CYAN}--only-new: skipping (already scheduled)")
+                    preserved += 1
+                    res["skipped"].append(label)
+                    continue
+                print(f"    {Fore.YELLOW}--only-new: partial schedule "
+                      f"({have}/{len(flights)} legs) — rescheduling")
+
             if not flights:
                 print(f"    {Fore.YELLOW}No flights generated — skipping")
                 skipped_count += 1

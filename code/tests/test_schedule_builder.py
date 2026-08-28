@@ -131,3 +131,22 @@ def test_wrapped_leg_matches_what_gets_posted():
 
     assert all(0 <= f["takeOffTime"] < WEEK_SECONDS for f in flights)
     assert flights[-1]["takeOffTime"] == 10800  # Mon 03:00, not a second Sunday
+
+
+def test_only_new_skips_only_complete_schedules():
+    # The hub read reports idle-or-busy, so a partial schedule looks busy.
+    # --only-new must reschedule it rather than preserve it (CGK-C008-099 sat
+    # at 3/7 legs and 46% utilisation because every pass skipped it).
+    from circuit_scheduler import only_new_may_skip
+
+    assert only_new_may_skip(7, 7) is True      # complete -> leave alone
+    assert only_new_may_skip(8, 7) is True      # more than expected -> leave alone
+    assert only_new_may_skip(3, 7) is False     # partial -> reschedule
+    assert only_new_may_skip(0, 7) is False
+    assert only_new_may_skip(None, 7) is True   # unknowable (CDP) -> old behaviour
+
+
+def test_count_scheduled_flights_is_none_without_mobile_backend():
+    from circuit_scheduler import count_scheduled_flights
+
+    assert count_scheduled_flights(object(), 12345) is None
