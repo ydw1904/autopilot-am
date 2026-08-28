@@ -452,9 +452,12 @@ def save_circuit_full(circuit: dict, custom_name: str | None = None) -> str:
     return name
 
 
-def locked_route_iatas(hub: str | None = None, statuses=("completed",)) -> set[str]:
+def locked_route_iatas(hub: str | None = None,
+                       statuses=("planned", "bought", "completed")) -> set[str]:
     """IATAs of destinations belonging to circuits in the given statuses.
-    Used to auto-exclude already-locked routes from new planning runs."""
+    Used to auto-exclude already-locked routes from new planning runs.
+    Default covers every saved circuit except archived ones — archiving a
+    circuit is how you release its routes back to the planner."""
     db = get_db()
     placeholders = ",".join("?" * len(statuses))
     sql = (

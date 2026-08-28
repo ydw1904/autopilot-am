@@ -827,6 +827,9 @@ def main():
     p.add_argument("--exclude", nargs="*", default=[])
     p.add_argument("--exclude-routes", default=None,
                    help="File to persist excluded route IATAs across runs")
+    p.add_argument("--ignore-saved", action="store_true",
+                   help="Plan over routes already used by saved circuits at this "
+                        "hub (default: they are locked; archive a circuit to free them)")
     p.add_argument("--phase1-only", action="store_true")
     p.add_argument("--save", action="store_true",
                    help="Persist resulting circuits to DB via save_circuit_full")
@@ -883,6 +886,13 @@ def _plan(args):
             exclude_base.add(oh)
     exclude_base.add(hub)  # exclude self
 
+    # Routes already committed to saved circuits at this hub (any status but archived)
+    saved_locked = set()
+    if not args.ignore_saved:
+        from db import locked_route_iatas
+        saved_locked = locked_route_iatas(hub=hub)
+        exclude_base.update(saved_locked)
+
     # Route exclusions from file (previous circuits)
     prev_locked = set()
     if args.exclude_routes and os.path.exists(args.exclude_routes):
@@ -909,9 +919,11 @@ def _plan(args):
         print(f"  {ac['alias']:>4} — {ac['model']:<12} cat>={ac['cat']}  {ac['speed']}km/h  "
               f"range={ac['range']:,}km  pax={ac['pax']}  ton={ac['tonnage']}T")
     hub_excluded = exclude_base & set(owned)
-    file_excluded = exclude_base - hub_excluded - {hub}
+    file_excluded = exclude_base - hub_excluded - {hub} - saved_locked
     if hub_excluded:
         print(f"Hub conflicts: {', '.join(sorted(hub_excluded))}")
+    if saved_locked:
+        print(f"Locked routes: {len(saved_locked)} from saved {hub} circuits")
     if file_excluded:
         print(f"Locked routes: {len(file_excluded)} from file")
     for ac in aircraft_list:

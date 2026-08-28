@@ -185,6 +185,12 @@ python3 code/circuit_planner.py --hub HKG --aircraft B742 B743 --circuits 5 \
 | `--match` | 0.9 | Min demand-balance ratio within a circuit |
 | `--phase1-only` | — | Demand summary only, skip seat optimization |
 | `--save` | — | Persist circuits to the local SQLite DB |
+| `--ignore-saved` | — | Plan over routes already used by saved circuits at this hub |
+
+Routes belonging to saved circuits at the hub (any status except `archived`) are
+locked out of new planning runs automatically, so `--save` compounds: each run
+plans around everything saved before it. Archive a circuit to release its routes,
+or pass `--ignore-saved` for a one-off unconstrained run.
 
 <details>
 <summary><strong>Mathematical model</strong> (capacity, pricing, constraints, MIP formulation)</summary>
