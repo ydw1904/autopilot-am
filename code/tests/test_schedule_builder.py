@@ -110,3 +110,24 @@ def test_single_full_week_route_yields_one_flight():
     flights = build_flight_schedule([("AAA", 168.0, 1), ("BBB", 1.0, 2)], 0)
 
     assert flights == [{"takeOffTime": 0, "lineId": 1}]
+
+
+def test_fmt_time_wraps_past_sunday_into_monday():
+    # A leg that runs past Sunday midnight belongs to the next Monday, not to
+    # a second Sunday. The dry-run printer used to clamp it and show "Sun".
+    from circuit_scheduler import fmt_time
+
+    assert fmt_time(0) == "Mon 00:00"
+    assert fmt_time(6 * DAY + 3600) == "Sun 01:00"
+    assert fmt_time(WEEK_SECONDS + 10800) == "Mon 03:00"
+
+
+def test_wrapped_leg_matches_what_gets_posted():
+    # Tuesday-offset aircraft on a ~168h circuit: the last leg wraps to Monday.
+    routes = [("YOL", 26.5, 1), ("MSZ", 25.75, 2), ("CBT", 25.5, 3),
+              ("VPE", 25.0, 4), ("VFA", 22.5, 5), ("KRT", 21.75, 6),
+              ("MWZ", 21.0, 7)]
+    flights = build_flight_schedule(routes, 1)
+
+    assert all(0 <= f["takeOffTime"] < WEEK_SECONDS for f in flights)
+    assert flights[-1]["takeOffTime"] == 10800  # Mon 03:00, not a second Sunday

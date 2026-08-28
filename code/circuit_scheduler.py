@@ -151,8 +151,14 @@ def build_flight_schedule(routes, aircraft_index):
 
 
 def fmt_time(seconds):
-    """Format seconds-since-Monday as 'Day HH:MM'."""
-    day = min(int(seconds // 86400), 6)
+    """Format seconds-since-Monday as 'Day HH:MM'.
+
+    The week is a cycle, so a time past Sunday midnight belongs to the next
+    Monday. This used to clamp the day index to Sunday instead, which rendered
+    every wrapped departure as another Sunday flight — a schedule that looked
+    like it stacked several legs on one day and ran backwards in time.
+    """
+    day = int(seconds // 86400) % 7
     secs = seconds % 86400
     hour = int(secs // 3600)
     minute = int((secs % 3600) // 60)
@@ -462,15 +468,20 @@ def _schedule(args, p):
                 for r in c["routes"]:
                     dest_iata = r[0]
                     ft_rt = r[3]
+                    # Mirror build_flight_schedule() exactly — including the
+                    # wrap into the next week. That is the authority on what
+                    # gets POSTed; this loop only exists to show it.
                     takeoff = current
                     if takeoff % GRANULARITY != 0:
                         takeoff = math.ceil(takeoff / GRANULARITY) * GRANULARITY
+                    takeoff %= WEEK_SECONDS
                     print(f"    {dest_iata:<5}  depart {fmt_time(takeoff)}"
                           f"  (rt={ft_rt:.2f}h)")
                     rt_sec = math.ceil(ft_rt * 3600 / GRANULARITY) * GRANULARITY
                     current = takeoff + rt_sec
                 if current > WEEK_SECONDS:
-                    print(f"    {Fore.YELLOW}WARNING: Schedule exceeds 1 week boundary")
+                    print(f"    {Fore.CYAN}  (rotation starts mid-week; final "
+                          f"legs fall in the next week — expected)")
             print()
         print(f"{Fore.YELLOW}DRY RUN - no changes made to the game.\n")
         close_db()
