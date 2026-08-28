@@ -792,12 +792,16 @@ def buy_aircraft(
     cargo: Optional[int] = None,
     quantity: Optional[int] = None,
     name: Optional[str] = None,
+    alliance: bool = False,
     dry_run: bool = True,
     list_only: bool = False,
 ) -> dict:
     """Run the aircraft buyer script.
 
     Safety default: dry_run=True because this spends in-game money.
+    alliance=True buys via "Purchase through Alliance" (alliance fixed discount
+    plus members assistance fronted by the treasury) instead of paying in full
+    personally; the personal path takes the game's own variable bulk discount.
     Use either circuit mode or standalone model+hub mode. The 'model' arg accepts
     any spelling (alias/ICAO/colloquial, e.g. 'A380') and is normalized before
     buying; an ambiguous name returns 'candidates' and an unknown one returns
@@ -845,6 +849,8 @@ def buy_aircraft(
         args.extend(["--quantity", str(quantity)])
     if name:
         args.extend(["--name", name])
+    if alliance:
+        args.append("--alliance")
     if dry_run:
         args.append("--dry-run")
 
@@ -855,6 +861,7 @@ def buy_aircraft(
         "circuit": circuit,
         "model": model,
         "hub": hub.upper().strip() if hub else None,
+        "alliance": alliance,
         "dry_run": dry_run,
     })
     return result

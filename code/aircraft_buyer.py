@@ -27,9 +27,10 @@ Flow (verified against the live page):
        each slider clamps against the others' current values.
      - Set quantity (.aircraftQuantity, max 99) and optional name.
      - GUARD: read the seats back; abort if they don't match the request.
-  5. Click "Personal purchase" (input[data-purchaseassistance="false"]). The
-     game serialises the config into the hidden `aircrafts` field in that
-     button's CLICK handler, then POSTs to /aircraft/buy/new/buyMultiple.
+  5. Click "Personal purchase" (input[data-purchaseassistance="false"]), or
+     "Purchase through Alliance" (…="true") with --alliance. The game
+     serialises the config into the hidden `aircrafts` field in that button's
+     CLICK handler, then POSTs to /aircraft/buy/new/buyMultiple.
   6. Verify success by checking the page navigates to /buyMultiple.
 
 Requirements:
@@ -88,7 +89,30 @@ def wait_for_aircraft_list(cdp, timeout=15):
     return 0
 
 
-def navigate_to_list(cdp, haul, timeout=15):
+# Consecutive equal box counts required before a haul list is considered
+# finished loading (0.5s per poll).
+STABLE_POLLS = 3
+
+
+def navigate_to_list(cdp, haul, timeout=15, attempts=2):
+    """Navigate to a haul list page, retrying a navigation that never took.
+
+    Chrome intermittently drops a Page.navigate issued while the previous one
+    is still in flight: the stale marker survives, _navigate_to_list_once times
+    out, and the caller concludes the aircraft does not exist on that page —
+    which aborts a purchase that was perfectly valid. Re-issuing the navigation
+    is free and read-only, so try again before giving up.
+    """
+    for attempt in range(attempts):
+        count = _navigate_to_list_once(cdp, haul, timeout)
+        if count:
+            return count
+        if attempt + 1 < attempts:
+            print(f"  /{haul} list did not load; re-navigating…")
+    return 0
+
+
+def _navigate_to_list_once(cdp, haul, timeout=15):
     """Navigate to a haul list page and wait for a FRESH document to load.
 
     Guards against a stale-DOM race: right after Page.navigate the previous
@@ -104,7 +128,7 @@ def navigate_to_list(cdp, haul, timeout=15):
     cdp.eval("window.__acStale = true;")
     cdp.navigate(f"{BASE_URL}/aircraft/buy/new/{haul}")
     deadline = time.monotonic() + timeout
-    prev = -1
+    prev, stable = -1, 0
     while time.monotonic() < deadline:
         time.sleep(0.5)
         state = cdp.eval_json("""(() => ({
@@ -114,8 +138,14 @@ def navigate_to_list(cdp, haul, timeout=15):
         if not state or state.get("stale"):
             continue  # still on the old document
         count = state.get("count") or 0
-        if count > 0 and count == prev:
-            return count  # unchanged for one poll → list finished loading
+        # One repeat is not enough: the list opens with ~2 placeholder boxes
+        # before growing to ~55, and two polls landing on that plateau used to
+        # return a PARTIAL list. The caller then searched a DOM that genuinely
+        # lacked the aircraft and aborted a valid purchase. Require the count
+        # to hold across STABLE_POLLS before trusting it.
+        stable = stable + 1 if count == prev else 0
+        if count > 0 and stable >= STABLE_POLLS:
+            return count
         prev = count
     return prev if prev > 0 else 0
 
@@ -291,7 +321,8 @@ def set_seat_js(form_js, selector, value):
 
 
 def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
-                           num_aircraft=1, dry_run=False, name_prefix=None):
+                           num_aircraft=1, dry_run=False, name_prefix=None,
+                           alliance=False):
     """Fill configure form and submit purchase.
 
     Returns (success: bool|None, message: str). None = dry run.
@@ -439,16 +470,22 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
               file=sys.stderr)
         return False, f"seat_config_mismatch: {detail}"
 
+    # "Purchase through Alliance" takes the alliance's fixed discount and
+    # fronts the members-assistance share from the treasury; whatever members
+    # do not cover is billed back later. Same form, same payload, same POST —
+    # only the button differs.
+    assist = "true" if alliance else "false"
+
     if dry_run:
-        # Exercise the real serialization without buying: clicking "Personal
-        # purchase" makes the game build the `aircrafts` JSON and call
+        # Exercise the real serialization without buying: clicking the purchase
+        # button makes the game build the `aircrafts` JSON and call
         # form.submit(). Stub form.submit() + preventDefault the submit event so
         # we capture the exact payload that WOULD be posted, then restore.
         payload = cdp.eval(r"""(() => {
             const cfg = document.getElementById('buyAircraft_configure');
             const form = cfg && cfg.querySelector('form[action*="buyMultiple"]');
             const btn = cfg && cfg.querySelector(
-                'input.purchaseButton[data-purchaseassistance="false"]');
+                'input.purchaseButton[data-purchaseassistance="ASSIST"]');
             if (!form || !btn) return 'no_form_or_button';
             const orig = HTMLFormElement.prototype.submit;
             let captured = null;
@@ -463,7 +500,7 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
                 form.removeEventListener('submit', block, false);
             }
             return captured || form.querySelector('[name="aircrafts"]').value || '(empty)';
-        })()""")
+        })()""".replace("ASSIST", assist))
         print("  DRY RUN: would POST /aircraft/buy/new/buyMultiple")
         print(f"  DRY RUN: aircrafts = {payload}")
         return None, "dry run"
@@ -475,16 +512,17 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
     # skips that handler, leaving `aircrafts` empty — the POST then buys
     # nothing. So we must click the actual button. data-purchaseassistance
     # ="false" selects a personal (non-alliance) purchase.
-    print(f"  Submitting purchase for {num_aircraft}x aircraft...")
+    print(f"  Submitting {'alliance' if alliance else 'personal'} purchase "
+          f"for {num_aircraft}x aircraft...")
     submit_result = cdp.eval(r"""(() => {
         const cfg = document.getElementById('buyAircraft_configure');
         if (!cfg) return 'no_configure_section';
         const btn = cfg.querySelector(
-            'input.purchaseButton[data-purchaseassistance="false"]');
-        if (!btn) return 'no_personal_purchase_button';
+            'input.purchaseButton[data-purchaseassistance="ASSIST"]');
+        if (!btn) return 'no_purchase_button';
         btn.click();
         return 'submitted';
-    })()""")
+    })()""".replace("ASSIST", assist))
 
     if submit_result != 'submitted':
         print(f"  ERROR: submit returned {submit_result}", file=sys.stderr)
@@ -610,6 +648,9 @@ List:
     p.add_argument("--cargo", type=int, default=None)
     p.add_argument("--quantity", type=int, default=None)
     p.add_argument("--name", default=None, help="Aircraft name prefix")
+    p.add_argument("--alliance", action="store_true",
+                   help="Buy via 'Purchase through Alliance' (fixed discount + "
+                        "members assistance) instead of a personal purchase")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--list", action="store_true")
     p.add_argument("--json", action="store_true",
@@ -865,7 +906,7 @@ def _buy(args, doc):
             cdp, hub_iata,
             eco=eco, bus=bus, first=first, cargo=cargo,
             num_aircraft=batch_qty, name_prefix=name_prefix,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run, alliance=args.alliance,
         )
         print(f"  Result: {message}")
 
