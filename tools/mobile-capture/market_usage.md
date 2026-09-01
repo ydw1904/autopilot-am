@@ -112,11 +112,35 @@ Minting a 747SP (model **151**, Manufacturer skin **2801396**, `isClassic`):
 - With the 747SP **license**, the 20 AM-coins/plane cost is **waived** — you pay
   **money only, ~$160M each** (raw value $177M). Verified: a batch of 20 dropped
   dollars by $3.19B and left AM-coins **unchanged**.
-- New planes have a **30-min delivery** and are **NOT sellable until delivered**:
-  `put_up` during delivery is rejected with `status=0 message=0` (observed
-  2026-08-12; wait ~35 min after minting, then list). Also, fresh planes do
-  **not** all appear in the paged fleet right away — so sell freshly-minted
-  planes by explicit id from the buy response, not a name scan.
+- New planes are **NOT sellable until delivered**: `put_up` during delivery is
+  rejected with `status=0 message=0`, which `put_up` now raises as
+  `AMNotDelivered`. Do not sleep on a constant — **ask `GET event`**, the app's
+  waiting list: `AMClient.pending_events()` / `pending_aircraft_ids()` /
+  `is_delivered(id)`, one request whatever the fleet size, or the
+  `mobile_deliveries` MCP tool. `AMClient.wait_for_delivery(ids)` blocks on it.
+  An aircraft entry gives `objectid` (the new aircraft id) and `finishAt`.
+  Delivery measured **30 min** on a DHC-6 minted 2026-08-26 (02:20:39 →
+  02:50:39), but read `finishAt` rather than trusting that.
+- **The timer is not enough — finished deliveries must be claimed.** Past its
+  `finishAt` the event stays in the queue and the plane stays unsellable until
+  `event/validateended` (`AMClient.deliver_finished()`) fires. Verified
+  2026-08-26: an event sat 5 min past `finishAt` untouched, then cleared
+  instantly on the call. **This is what stalled the 2026-08-25 run** — it
+  completed only because the player opened the app, which fires the same call.
+  `shm_sell_batch` now claims before listing. The claim also sets the plane's
+  `purchasedAt` to the claim moment, so an unclaimed plane is not fully bought.
+- **`purchasedAt` is not a delivery clock.** While a plane is undelivered the
+  aircraft profile reports it exactly **one hour ahead** of the server's own
+  `irlDateTime` (minted 02:20:39, server clock 02:21, `purchasedAt` 03:20:39 —
+  and `finishAt` was 02:50:39, so the skew is not the delivery window). On
+  delivery it is rewritten to the real delivery moment. `finishAt` from `event`
+  shares the server's clock; compare the two as strings.
+- **Ads / AM coins skip the wait.** Each event carries `amcoinsactionid: 101`
+  and `amount` = the AM-coin cost to finish it now, which decays as the timer
+  runs down (7 → 6 → 3 observed). Watching an ad moved `finishAt` back 20 min
+  and added `initialEndDate` holding the original deadline.
+- Fresh planes do **not** all appear in the paged fleet right away — so sell
+  freshly-minted planes by explicit id from the buy response, not a name scan.
 - Mint via mobile: `AMClient.buy_multiple(model_id=151, hub_id=…, quantity=20,
   name=…, skin_id=…, eco=136, bus=74, first=31, payload=12)` (added 2026-08-12;
   wraps the captured `POST aircraft/buymultiple`). New ids come back in

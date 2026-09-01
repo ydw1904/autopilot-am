@@ -17,7 +17,6 @@ import re
 import sys
 import time
 import argparse
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab
@@ -102,7 +101,6 @@ def main():
     cdp = CDP(tab["webSocketDebuggerUrl"], timeout=30)
     cdp.connect()
 
-    snapshot_at = None
     deltas = []
     failed = []
     for i, r in enumerate(rows, 1):

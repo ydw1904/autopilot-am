@@ -40,6 +40,7 @@ interface FleetWorkspaceProps {
   refreshToken: number;
   onDataChanged: () => void;
   onOpenLivery: (skinId: number) => void;
+  onOpenAircraft: (aircraftId: number) => void;
 }
 
 type UtilizationFilter = "all" | "active" | "idle" | "partial" | "full";
@@ -239,7 +240,7 @@ function AircraftArtwork({ skinId, alt, featured = false }: { skinId: number | n
   );
 }
 
-export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataChanged, onOpenLivery }: FleetWorkspaceProps) {
+export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataChanged, onOpenLivery, onOpenAircraft }: FleetWorkspaceProps) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [items, setItems] = useState<FleetAircraft[]>([]);
   const [total, setTotal] = useState(0);
@@ -287,6 +288,8 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
       setUtilization("idle");
     } else if (initialPreset.startsWith("livery:")) {
       setQuery(initialPreset.slice("livery:".length));
+    } else if (initialPreset.startsWith("name:")) {
+      setQuery(initialPreset.slice("name:".length));
     }
   }, [initialPreset]);
 
@@ -573,13 +576,13 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
                   <div>
                     <b>{livery.fleet_count} in fleet</b>
                     {hubs.slice(0, DAILY_HUB_CHIPS).map((hub) => (
-                      <b key={hub.hub_iata} title={`${hub.count} at ${hub.hub_iata}`}>
+                      <b key={hub.hub_iata} title={`${hub.count} at ${hubLabel(hub.hub_iata, hubFlags.get(hub.hub_iata))}`}>
                         {hubLabel(hub.hub_iata, hubFlags.get(hub.hub_iata))}
                         {hubs.length > 1 && <i>{hub.count}</i>}
                       </b>
                     ))}
                     {hiddenHubs.length > 0 && (
-                      <b title={hiddenHubs.map((hub) => `${hub.hub_iata} (${hub.count})`).join(", ")}>+{hiddenHubs.length}</b>
+                      <b title={hiddenHubs.map((hub) => `${hubLabel(hub.hub_iata, hubFlags.get(hub.hub_iata))} (${hub.count})`).join(", ")}>+{hiddenHubs.length}</b>
                     )}
                   </div>
                 </div>
@@ -622,7 +625,7 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
         </div>
 
         <div className="active-filter-row">
-          <span><Filter size={14} /> {activeFilters ? `${activeFilters} active filters` : "No filters applied"}</span>
+          <span><Filter size={14} /> {activeFilters ? `${activeFilters} active filter${activeFilters === 1 ? "" : "s"}` : "No filters applied"}</span>
           {activeFilters > 0 && <button onClick={clearFilters}>Clear all</button>}
           <small>Showing {total ? page * pageSize + 1 : 0} to {Math.min((page + 1) * pageSize, total)} of {integer.format(total)}</small>
           {snapshot?.status.fleet_last_synced && <small>Last synced {formatTime(snapshot.status.fleet_last_synced)}</small>}
@@ -650,9 +653,12 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
             const badge = liveryBadge(item);
             const selectedItem = selected.has(item.aircraft_id);
             return (
-              <article className={`aircraft-card${selectedItem ? " is-selected" : ""}`} key={item.aircraft_id} onClick={() => toggleOne(item.aircraft_id)}>
+              <article className={`aircraft-card${selectedItem ? " is-selected" : ""}`} key={item.aircraft_id}
+                role="link" tabIndex={0} onClick={() => onOpenAircraft(item.aircraft_id)}
+                onKeyDown={(event) => { if (event.target === event.currentTarget && event.key === "Enter") onOpenAircraft(item.aircraft_id); }}>
                 <div className="aircraft-card-head">
-                  <button className={`check-button${selectedItem ? " is-checked" : ""}`} aria-label={`Select ${item.name}`}>{selectedItem && <Check size={13} />}</button>
+                  <button className={`check-button${selectedItem ? " is-checked" : ""}`} aria-label={`Select ${item.name}`}
+                    onClick={(event) => { event.stopPropagation(); toggleOne(item.aircraft_id); }}>{selectedItem && <Check size={13} />}</button>
                   <div><strong>{cleanAircraftName(item.name) || `Aircraft ${item.aircraft_id}`}</strong><small>#{item.aircraft_id}</small></div>
                   <span className="hub-code">{item.hub_iata ? hubLabel(item.hub_iata, hubFlags.get(item.hub_iata)) : "?"}</span>
                 </div>
@@ -672,8 +678,11 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
             <thead><tr><th className="check-column"><button className={`check-button${allVisibleSelected ? " is-checked" : ""}`} onClick={toggleAll} aria-label="Select visible aircraft">{allVisibleSelected && <Check size={13} />}</button></th><th>Aircraft</th><th>Model</th><th>Hub</th><th>Utilization</th><th>Configuration</th><th>Livery</th></tr></thead>
             <tbody>{items.map((item) => {
               const badge = liveryBadge(item);
-              return <tr key={item.aircraft_id} className={selected.has(item.aircraft_id) ? "is-selected" : ""} onClick={() => toggleOne(item.aircraft_id)}>
-                <td className="check-column"><button className={`check-button${selected.has(item.aircraft_id) ? " is-checked" : ""}`} aria-label={`Select ${item.name}`}>{selected.has(item.aircraft_id) && <Check size={13} />}</button></td>
+              return <tr key={item.aircraft_id} className={selected.has(item.aircraft_id) ? "is-selected" : ""}
+                role="link" tabIndex={0} onClick={() => onOpenAircraft(item.aircraft_id)}
+                onKeyDown={(event) => { if (event.target === event.currentTarget && event.key === "Enter") onOpenAircraft(item.aircraft_id); }}>
+                <td className="check-column"><button className={`check-button${selected.has(item.aircraft_id) ? " is-checked" : ""}`} aria-label={`Select ${item.name}`}
+                  onClick={(event) => { event.stopPropagation(); toggleOne(item.aircraft_id); }}>{selected.has(item.aircraft_id) && <Check size={13} />}</button></td>
                 <td><div className="aircraft-list-name"><AircraftArtwork skinId={item.skin_id} alt="" /><span><strong>{cleanAircraftName(item.name) || `Aircraft ${item.aircraft_id}`}</strong><small>#{item.aircraft_id}</small>{item.tags.length > 0 && <span className="aircraft-tags">{item.tags.map((itemTag) => <span className="aircraft-tag" key={itemTag}><Tag size={10} /><b>{itemTag}</b><button onClick={(event) => removeAircraftTag(event, item.aircraft_id, itemTag)} aria-label={`Remove ${itemTag} from ${item.name}`}><X size={10} /></button></span>)}</span>}<PurchaseDate aircraft={item} backfilling={backfill?.running} onLoaded={rememberPurchaseDate} onError={setNotice} /></span></div></td>
                 <td><strong>{item.model}</strong><small>{item.icao_code || haulLabel(item)}</small></td>
                 <td><span className="hub-code">{item.hub_iata ? hubLabel(item.hub_iata, hubFlags.get(item.hub_iata)) : "?"}</span></td>

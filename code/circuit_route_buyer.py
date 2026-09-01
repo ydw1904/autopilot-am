@@ -2,35 +2,30 @@
 """
 Circuit Route Buyer — Buy routes from a circuit plan.
 
-Two flows:
+Default flow: the mobile API. `POST line/open {hubId, iata}` buys one route;
+no country, no browser, no DOM. `GET line/open/<hubId>/<countryId>` lists what
+a hub can still open there (with price and audit demand) for the dry run.
 
-  (A) Country-listing flow [new, default]
-      For each route in the circuit:
-        - Group by destination country (from `routes.dest_country`)
-        - Navigate to /network/newline/<player_hub_id>/<country>
-        - Find the .hubListBox card whose IATA matches
-        - Click that card's per-route purchase action
+Legacy CDP flows, kept behind flags:
 
-  (B) Direct finalize flow [legacy]
-        - Navigate per-IATA to /network/newlinefinalize/<player_hub_id>/<iata>
-        - Submit form via fetch()
-
-The country-listing flow is preferred because some hubs/countries no longer
-expose newlinefinalize directly without going through the listing first.
+  --cdp     Country-listing: navigate /network/newline/<hubId>/<country>,
+            match the .hubListBox card by IATA, click its purchase action.
+            Card indices go stale as earlier buys leave the listing.
+  --legacy  Straight to /network/newlinefinalize/<hubId>/<iata>.
 
 Usage:
     python3 circuit_route_buyer.py --circuit MPM-C007 --hub-id 10127635 --dry-run
     python3 circuit_route_buyer.py --circuit MPM-C007 --hub-id 10127635
     python3 circuit_route_buyer.py --hub-id 10087991 DSS NKC LOS ABV    # raw IATAs
-    python3 circuit_route_buyer.py --circuit MPM-C007 --hub-id 10127635 --legacy
+    python3 circuit_route_buyer.py --circuit MPM-C007 --hub-id 10127635 --cdp
 
-Requirements: Chrome with --remote-debugging-port=9222 --remote-allow-origins=*
+Only --cdp/--legacy need Chrome with --remote-debugging-port=9222.
 """
 
-import argparse, json, os, re, sys, time
+import argparse, json, os, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdp import CDP, get_am_tab, connect_cdp, wait_for_js, BASE_URL
+from cdp import connect_cdp, wait_for_js, BASE_URL
 from aircraft_buyer import get_balance  # noqa: E402
 from db import get_db, mark_route_owned  # noqa: E402
 
@@ -229,6 +224,68 @@ def finalize_purchase(cdp, url):
     return None, f"unknown url={final_url}"
 
 
+# ── Mobile flow ─────────────────────────────────────────────────────────────
+# The default. `POST line/open {hubId, iata}` needs no country and no DOM, so
+# none of the country-listing machinery below applies: the card indices the
+# CDP flow addresses go stale the moment an earlier buy leaves the listing.
+
+def buy_mobile(routes, hub_id, hub_iata, dry_run, client=None):
+    """Buy via the mobile API. Returns (ok, skip, fail) lists."""
+    from mobile_api import AMSession, AMClient, AMError
+
+    c = client or AMClient(AMSession.load())
+    before = c.resources()["dollar"]
+    print(f"Balance: ${before:,.0f}\n")
+
+    # Prices only, for the dry run: countryList maps the DB's code2 to the
+    # numeric id the listing endpoint wants.
+    prices = {}
+    wanted = {r[1] for r in routes if r[1]}
+    if wanted:
+        ids = {c2["c"]: c2["id"] for c2 in c.world()["countryList"]}
+        for code in sorted(wanted):
+            cid = ids.get(code)
+            if cid is None:
+                print(f"── country {code}: unknown in bfa/world, no price preview")
+                continue
+            for a in c.open_line_candidates(hub_id, cid):
+                prices[a["iata"]] = a["price"]["final"]
+
+    ok, skip, fail = [], [], []
+    for iata, _country, _name in routes:
+        price = prices.get(iata)
+        tag = f"${price:,}" if price else "already owned or unlisted"
+        if dry_run:
+            print(f"   [{iata}] {tag}")
+            continue
+        try:
+            c.open_line(hub_id, iata)
+            print(f"   [{iata}] OK   {tag}")
+            if hub_iata:
+                mark_route_owned(hub_iata, iata)
+            ok.append((iata, price))
+        except AMError as e:
+            msg = str(e).split("message=")[-1]
+            if "already own" in msg.lower():
+                print(f"   [{iata}] SKIP already owned")
+                if hub_iata:
+                    mark_route_owned(hub_iata, iata)
+                skip.append(iata)
+            else:
+                print(f"   [{iata}] FAIL {msg}")
+                fail.append(iata)
+
+    if not dry_run:
+        after = c.resources()["dollar"]
+        print(f"\n{'─' * 50}")
+        print(f"  Bought: {len(ok)}  Skipped: {len(skip)}  Failed: {len(fail)}")
+        if ok:   print(f"  OK:   {' '.join(f'{i}(${p:,})' if p else i for i, p in ok)}")
+        if skip: print(f"  SKIP: {' '.join(skip)}")
+        if fail: print(f"  FAIL: {' '.join(fail)}")
+        print(f"  Balance: ${before:,.0f} → ${after:,.0f} (spent ${before - after:,.0f})")
+    return ok, skip, fail
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -240,6 +297,8 @@ def main():
     p.add_argument("--hub", dest="hub_id_legacy", default=None,
                    help="Alias for --hub-id (back-compat with old GUI)")
     p.add_argument("--dry-run", action="store_true", help="Recon only — dump card structure, no purchase")
+    p.add_argument("--cdp", action="store_true",
+                   help="Use the Chrome/CDP country-listing flow instead of the mobile API")
     p.add_argument("--legacy", action="store_true",
                    help="Skip country-listing flow, go straight to /newlinefinalize per IATA")
     args = p.parse_args()
@@ -278,9 +337,15 @@ def main():
     else:
         p.error("provide --circuit NAME or positional IATAs")
 
-    print(f"Mode: {'DRY-RUN (recon)' if args.dry_run else ('LEGACY' if args.legacy else 'BUY')}")
+    mobile = not (args.cdp or args.legacy)
+    mode = "DRY-RUN" if args.dry_run else "BUY"
+    print(f"Mode: {mode} via {'mobile API' if mobile else 'CDP'}")
     print(f"Hub id: {hub_id}")
     print()
+
+    if mobile:
+        _ok, _skip, bad = buy_mobile(routes, hub_id, hub_iata, args.dry_run)
+        sys.exit(0 if not bad else 2)
 
     print("Connecting to Chrome…")
     cdp = connect_cdp()

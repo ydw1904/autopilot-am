@@ -1,4 +1,3 @@
-import React from "react";
 import { ArrowRight, Plane, X } from "lucide-react";
 import { LiveryItem } from "../types";
 import { hubLabel } from "../hubFlag";

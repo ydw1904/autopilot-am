@@ -28,7 +28,23 @@ from urllib.parse import quote
 from cdp import CDP, get_am_tab  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mobile_renamer  # noqa: E402
 from db import update_circuit_progress, get_db  # noqa: E402
+from mobile_api import AMClient, AMError, AMSession  # noqa: E402
+
+
+def _mobile_client():
+    """A paced mobile client, or None when there is no session on disk.
+
+    Renaming is the only in-game action this script performs, and the mobile
+    API does it in one request with no form token and no browser — so it is
+    the primary path whenever a session exists.
+    """
+    try:
+        session = AMSession.load()
+        return AMClient(session) if session.access_token else None
+    except Exception:
+        return None
 
 
 def planned_target(circuit_name: str) -> int | None:
@@ -134,14 +150,37 @@ def rename(cdp, aircraft_id: int, new_name: str, token: str):
 
 
 def number_circuit(circuit_name: str, dry_run: bool = False) -> int:
-    cdp = CDP(get_am_tab()["webSocketDebuggerUrl"], timeout=PAGE_FETCH_TIMEOUT)
-    cdp.connect()
+    client = _mobile_client()
+    cdp = None
+    if client is None:
+        cdp = CDP(get_am_tab()["webSocketDebuggerUrl"], timeout=PAGE_FETCH_TIMEOUT)
+        cdp.connect()
     try:
-        print(f"Discovering /aircraft pagination (filtered to {circuit_name!r}) …")
-        total_pages = discover_total_pages(cdp, name_filter=circuit_name)
-        print(f"  {total_pages} pages — scraping aircraft list …")
-        all_ac = scrape_all_aircraft(cdp, total_pages, name_filter=circuit_name)
+        if client is not None:
+            print(f"Listing fleet (matching {circuit_name!r}) — mobile API …")
+            all_ac = mobile_renamer.list_fleet(
+                client, match=lambda n: n.startswith(circuit_name))
+        else:
+            print(f"Discovering /aircraft pagination (filtered to {circuit_name!r}) …")
+            total_pages = discover_total_pages(cdp, name_filter=circuit_name)
+            print(f"  {total_pages} pages — scraping aircraft list …")
+            all_ac = scrape_all_aircraft(cdp, total_pages, name_filter=circuit_name)
         print(f"  {len(all_ac)} aircraft total")
+        by_id = {ac["id"]: ac for ac in all_ac}
+
+        def _apply(aircraft_id, new_name):
+            """Rename on whichever backend is live. Returns (ok, detail)."""
+            if client is not None:
+                try:
+                    mobile_renamer.rename(client, by_id[aircraft_id], new_name)
+                    return True, ""
+                except AMError as exc:
+                    return False, str(exc)
+            token = get_form_token(cdp, aircraft_id)
+            if not token:
+                return False, "NO TOKEN"
+            status = rename(cdp, aircraft_id, new_name, token)
+            return status in (200, 302), f"HTTP {status}"
 
         prefix = circuit_name
         full_pat = re.compile(rf"^{re.escape(prefix)}-(\d{{1,3}})$")
@@ -249,13 +288,8 @@ def number_circuit(circuit_name: str, dry_run: bool = False) -> int:
 
         ok = fail = 0
         for idx, (aid, raw, new_name) in enumerate(plan, 1):
-            tok = get_form_token(cdp, aid)
-            if not tok:
-                print(f"  [{idx:3d}/{len(plan)}] {aid}: NO TOKEN", flush=True)
-                fail += 1
-                continue
-            status = rename(cdp, aid, new_name, tok)
-            if status in (200, 302):
+            applied, detail = _apply(aid, new_name)
+            if applied:
                 ok += 1
                 if idx % 10 == 0 or idx == len(plan):
                     print(f"  [{idx:3d}/{len(plan)}] {raw!r} -> {new_name!r}",
@@ -263,8 +297,9 @@ def number_circuit(circuit_name: str, dry_run: bool = False) -> int:
             else:
                 fail += 1
                 print(f"  [{idx:3d}/{len(plan)}] {raw!r} -> {new_name!r} "
-                      f"FAIL HTTP {status}", flush=True)
-            time.sleep(0.2)
+                      f"FAIL {detail}", flush=True)
+            if cdp is not None:
+                time.sleep(0.2)  # the mobile path is paced by mobile_api.PACER
 
         total_after = len(keep)
         waves_bought = total_after // 7
@@ -273,7 +308,10 @@ def number_circuit(circuit_name: str, dry_run: bool = False) -> int:
         print(f"Total numbered: {total_after} → waves_bought={waves_bought}")
         return 0 if fail == 0 else 2
     finally:
-        cdp.close()
+        if cdp is not None:
+            cdp.close()
+        if client is not None:
+            client.close()
 
 
 def main():

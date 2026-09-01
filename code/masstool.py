@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""Masstool scraper — fetch live route data (current prices, remaining demand)
-from /masstool/pricingAjax/<hub_id>.
+"""Masstool — live route data (current prices, demand, remaining demand) per hub.
 
-Returns a dict keyed by destination IATA so it can be joined with circuit/route data.
+Two backends, same return shape (keyed by destination IATA so it joins to
+circuit/route data):
+
+  * MOBILE (primary)  GET api/<player>/hub/<hub_id>/lines/pricing — structured
+    JSON that already carries price, demand, carried pax, remaining demand,
+    the audit's recommended price and the 24h cooldown. One call per hub page.
+  * CDP (fallback)    /masstool/pricingAjax/<hub_id> — the same numbers regexed
+    out of AM+ HTML, and only reachable through a logged-in Chrome tab.
+
+The mobile path needs no browser, so it is what runs unless it has no session
+(or --cdp forces the old path).
 """
 
 import json
 import os
 import re
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab
 from db import get_player_hub_id
+
+CLASSES = ("eco", "bus", "first", "cargo")
 
 
 LINE_HEADER_RE = re.compile(
@@ -85,6 +95,76 @@ def fetch_masstool_hub(cdp: CDP, hub_id: int | str) -> dict[str, dict]:
     return parse_masstool(html)
 
 
+def parse_mobile_lines(lines: list) -> dict[str, dict]:
+    """Convert `AMClient.hub_pricing` rows into the parse_masstool shape.
+
+    Extras the HTML never carried are kept alongside: `audit_price` (the
+    game's recommended price, with bus/first already corrected), the audit's
+    peak `audit_demand` + `audit_reliability`, and `locked_until` (the 24h
+    price cooldown) — everything the pricer would otherwise fetch per route.
+    """
+    result: dict[str, dict] = {}
+    for ln in lines:
+        iata = (ln.get("aTwoName") or "").upper()
+        if not iata:
+            continue
+        price = ln.get("price") or {}
+        demand = ln.get("demand") or {}
+        carried = ln.get("carriedPax") or {}
+        remaining = ln.get("remainingDemand") or {}
+        result[iata] = {
+            "line_id": int(ln["id"]),
+            "iata": iata,
+            "full_name": f"{ln.get('aOneName', '')}/{iata}",
+            "price": {c: int(price.get(c, 0)) for c in CLASSES},
+            "demand": {c: int(demand.get(c, 0)) for c in CLASSES},
+            "carried": {c: int(carried.get(c, 0)) for c in CLASSES},
+            "remaining": {c: int(remaining.get(c, 0)) for c in CLASSES},
+            "audit_price": {c: int((ln.get("audit") or {}).get("price", {}).get(c, 0))
+                            for c in CLASSES},
+            "audit_demand": {c: int((ln.get("audit") or {}).get("demand", {}).get(c, 0))
+                             for c in CLASSES},
+            "audit_reliability": (ln.get("audit") or {}).get("reliability"),
+            "locked_until": ln.get("lockedUntil"),
+        }
+    return result
+
+
+def fetch_masstool_hub_mobile(hub_id: int | str, client=None) -> dict[str, dict]:
+    """Mobile-API equivalent of fetch_masstool_hub. Raises if there's no session."""
+    from mobile_api import AMClient, AMSession
+    own = client is None
+    if own:
+        client = AMClient(AMSession.load())
+    try:
+        return parse_mobile_lines(client.hub_pricing(int(hub_id)))
+    finally:
+        if own:
+            client.close()
+
+
+def fetch_hub(hub_id: int | str, prefer: str = "mobile"):
+    """Live route data for a hub, mobile first and CDP as the backup.
+
+    Returns (data, backend). `prefer="cdp"` forces the browser path.
+    """
+    if prefer != "cdp":
+        try:
+            return fetch_masstool_hub_mobile(hub_id), "mobile"
+        except Exception as exc:  # no session, expired token, API change
+            print(f"mobile masstool failed ({exc}); falling back to CDP",
+                  file=sys.stderr)
+    tab = get_am_tab()
+    if not tab:
+        raise RuntimeError("No AM tab open in Chrome (--remote-debugging-port=9222)")
+    cdp = CDP(tab["webSocketDebuggerUrl"], timeout=60)
+    cdp.connect()
+    try:
+        return fetch_masstool_hub(cdp, hub_id), "cdp"
+    finally:
+        cdp.close()
+
+
 def compute_route_summary(route: dict) -> dict:
     """Derive per-route summary numbers from a parsed masstool entry."""
     price = route.get("price") or {}
@@ -120,21 +200,18 @@ def main():
     p.add_argument("hub", help="Hub IATA")
     p.add_argument("--routes", nargs="+", help="Only print these IATAs")
     p.add_argument("--json", action="store_true", help="Output JSON")
+    p.add_argument("--cdp", action="store_true",
+                   help="Force the browser/CDP backend instead of the mobile API")
     args = p.parse_args()
 
     hub_id = get_player_hub_id(args.hub)
     if not hub_id:
         sys.exit(f"No player_hubs entry for {args.hub}")
 
-    tab = get_am_tab()
-    if not tab:
-        sys.exit("No AM tab open in Chrome (--remote-debugging-port=9222)")
-    cdp = CDP(tab["webSocketDebuggerUrl"], timeout=60)
-    cdp.connect()
     try:
-        data = fetch_masstool_hub(cdp, hub_id)
-    finally:
-        cdp.close()
+        data, backend = fetch_hub(hub_id, prefer="cdp" if args.cdp else "mobile")
+    except RuntimeError as exc:
+        sys.exit(str(exc))
 
     if args.routes:
         want = {r.upper() for r in args.routes}
@@ -143,7 +220,7 @@ def main():
     if args.json:
         print(json.dumps(data, indent=2))
     else:
-        print(f"{len(data)} routes for {args.hub} (hub_id={hub_id})")
+        print(f"{len(data)} routes for {args.hub} (hub_id={hub_id}, via {backend})")
         for iata in sorted(data):
             r = data[iata]
             s = compute_route_summary(r)

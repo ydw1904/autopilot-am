@@ -203,6 +203,10 @@ export interface ShmWatch {
   active: number;
   armed: number;
   source: string | null;
+  /** Which booster / challenge / shop pack actually carries this livery, when
+   *  the catalog tables know; `source` alone only names the kind of feed. */
+  origin: string | null;
+  origin_detail: string | null;
   owned_count: number;
   is_owned: boolean;
   sightings: number;
@@ -270,4 +274,201 @@ export interface FleetPage {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface HangarHubOption {
+  hub_iata: string;
+  hub_id: number;
+}
+
+export interface HangarAircraft {
+  aircraft_id: number;
+  name: string;
+  model: string;
+  model_id: number | null;
+  model_seats_total: number | null;
+  model_payload_t: number | null;
+  icao_code: string | null;
+  category: number | null;
+  speed_kmh: number | null;
+  range_km: number | null;
+  max_pax: number | null;
+  max_tonnage: number | null;
+  gross_price: number | null;
+  hub_id: number | null;
+  hub_iata: string | null;
+  hub_name: string | null;
+  utilization: number;
+  wear: number;
+  age: number;
+  mark: string | null;
+  is_rental: boolean;
+  is_frozen: boolean;
+  purchased_at: string | null;
+  raw_price: number | null;
+  seats: { eco: number; bus: number; first: number };
+  payload: number;
+  skin: { id: number | null; name: string | null };
+  /** The three caps the market enforces, plus what the game itself pays. */
+  sale: {
+    scrap: number | null;
+    bin_threshold: number | null;
+    max_start_bid: number | null;
+    min_start_bid: number | null;
+  };
+  hubs: HangarHubOption[];
+}
+
+export interface HangarLiveryOption {
+  skin_id: number;
+  name: string | null;
+  purchased: boolean;
+  price_amcoins: number;
+  creator: string | null;
+  is_current: boolean;
+}
+
+export interface HangarFlight {
+  flight_id: number;
+  line_id: number | null;
+  from_iata: string | null;
+  to_iata: string | null;
+  departure: string | null;
+  arrival: string | null;
+  in_future: boolean;
+}
+
+export interface NetworkRoute {
+  dest_iata: string;
+  dest_name: string | null;
+  hub_iata: string;
+  distance_km: number | null;
+  flight_time_rt: number | null;
+  route_order: number;
+  eco_demand: number | null;
+  bus_demand: number | null;
+  fir_demand: number | null;
+  cargo_demand: number | null;
+  is_owned: boolean;
+  line_id: number | null;
+}
+
+export interface NetworkCircuit {
+  name: string;
+  hub_iata: string;
+  aircraft_model: string;
+  status: string;
+  total_hours: number;
+  waves: number;
+  waves_bought: number;
+  waves_scheduled: number;
+  seats: { eco: number; bus: number; fir: number; cargo: number };
+  daily_rev: number;
+  weekly_rev: number;
+  investment: number;
+  route_investment: number;
+  updated_at: string | null;
+  aircraft: number;
+  idle_aircraft: number;
+  avg_utilization: number;
+  routes_owned: number;
+  routes: NetworkRoute[];
+}
+
+export interface NetworkSnapshot {
+  totals: {
+    circuits: number;
+    operating: number;
+    planned: number;
+    operating_weekly_rev: number;
+    planned_weekly_rev: number;
+    routes_owned: number;
+    routes_known: number;
+    unscheduled_waves: number;
+  };
+  circuits: NetworkCircuit[];
+  hubs: {
+    hub_iata: string;
+    circuits: number;
+    operating: number;
+    aircraft: number;
+    weekly_rev: number;
+    routes_known: number;
+    routes_owned: number;
+  }[];
+}
+
+export type PriceClass = "eco" | "bus" | "first" | "cargo";
+
+export type ClassValues = Record<PriceClass, number>;
+
+export interface PricingRoute {
+  iata: string;
+  line_id: number | null;
+  name: string | null;
+  circuit: string | null;
+  price: Partial<ClassValues>;
+  audit_price: Partial<ClassValues>;
+  demand: Partial<ClassValues>;
+  carried: Partial<ClassValues>;
+  remaining: Partial<ClassValues>;
+  locked_until: string | null;
+  daily_revenue: number;
+  weekly_revenue: number;
+}
+
+export interface PricingSnapshot {
+  hub_iata: string;
+  backend: string;
+  routes: PricingRoute[];
+  daily_revenue: number;
+}
+
+export interface OpsSnapshot {
+  deliveries: {
+    server_time: string | null;
+    error: string | null;
+    events: {
+      event_id: number | null;
+      type: string | null;
+      label: string | null;
+      aircraft_id: number | null;
+      finish_at: string | null;
+      am_coins_to_skip: number | null;
+    }[];
+  };
+  daily: {
+    error: string | null;
+    currency_claims?: number;
+    currency_offers?: number;
+    wheel_available?: boolean;
+    slot_games_left?: number;
+  };
+  freshness: { label: string; table: string; newest: string | null; rows: number }[];
+  browser_connected: boolean;
+  mobile_configured: boolean;
+}
+
+export type PricingMode = "ideal" | "percent" | "fill";
+
+export interface PricingPlanRoute {
+  iata: string;
+  line_id: number | null;
+  current: Partial<ClassValues>;
+  target?: Partial<ClassValues>;
+  /** "dry-run" = would change; "ok"/"fail" only appear on a live apply. */
+  status: string;
+  detail: string;
+}
+
+export interface PricingPlan {
+  hub: string;
+  hub_id: number;
+  backend: string;
+  mode: PricingMode;
+  dry_run: boolean;
+  applied: number;
+  routes: PricingPlanRoute[];
+  counts: Record<string, number>;
+  fill_revenue?: { current: number; target: number };
 }

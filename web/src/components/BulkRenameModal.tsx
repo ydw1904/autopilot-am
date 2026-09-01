@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Edit3, X, Check } from "lucide-react";
+import { Edit3, X } from "lucide-react";
 
 interface BulkRenameModalProps {
   isOpen: boolean;

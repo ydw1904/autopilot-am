@@ -31,6 +31,7 @@ import {
 import { BulkRenameModal } from "./BulkRenameModal";
 import { MenuOption, MenuSelect } from "./MenuSelect";
 import { AssignCircuitModal } from "./AssignCircuitModal";
+import { hubLabel } from "../hubFlag";
 
 interface FleetManagementProps {
   stats?: FleetStats | null;
@@ -94,15 +95,6 @@ function liveryBadge(ac: { skin_id?: number | null; skin_name?: string | null })
     label: "No Livery",
     cls: "bg-white border-[#E5E1D6] text-[#B6B1A4]",
   };
-}
-
-/** ISO 3166-1 alpha-2 -> regional-indicator flag, so no emoji are hardcoded. */
-function flagEmoji(countryCode?: string | null): string {
-  const cc = (countryCode || "").trim().toUpperCase();
-  if (cc.length !== 2) return "";
-  return String.fromCodePoint(
-    ...[...cc].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65)
-  );
 }
 
 function haulLabel(ac: FleetAircraft): string | null {
@@ -269,22 +261,19 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
 
   const haulCount = (key: HaulTab): number | undefined => stats?.hauls?.[key];
 
-  const hubFlags = useMemo(() => {
-    const map = new Map<string, string>();
-    stats?.hubs.forEach((h) => map.set(h.hub_iata, flagEmoji(h.country_code)));
+  const hubCountries = useMemo(() => {
+    const map = new Map<string, string | null | undefined>();
+    stats?.hubs.forEach((h) => map.set(h.hub_iata, h.country_code));
     return map;
   }, [stats]);
 
-  const hubBadge = (iata: string) => {
-    const flag = hubFlags.get(iata);
-    return flag ? `${flag} ${iata}` : iata;
-  };
+  const hubBadge = (iata: string) => hubLabel(iata, hubCountries.get(iata));
 
   const hubOptions = useMemo<MenuOption[]>(() => [
     { value: "ALL", label: "All hubs", hint: stats ? `${stats.total} aircraft` : undefined },
     ...(stats?.hubs || []).map((h) => ({
       value: h.hub_iata,
-      label: `${flagEmoji(h.country_code)} ${h.hub_iata}`.trim(),
+      label: hubLabel(h.hub_iata, h.country_code),
       hint: `${h.count} aircraft`,
     })),
   ], [stats]);

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from typing import Any, Optional
+from typing import Optional
 
 import db as _db
 
@@ -145,7 +145,12 @@ CREATE TABLE IF NOT EXISTS mobile_shop_offers (
     title      TEXT,
     template   TEXT,
     cost       REAL,
+    -- What the offer actually charges while its `promo` block is live, which
+    -- for the travel-card aircraft is routinely half of `cost`. NULL when the
+    -- offer is not discounted.
+    promo_cost REAL,
     currency   TEXT,
+    am_gold_step INTEGER,
     start_date TEXT,
     end_date   TEXT,
     first_seen TEXT DEFAULT (datetime('now')),
@@ -269,6 +274,16 @@ class MobileStore:
         for name, sql_type in _AIRCRAFT_COLUMNS:
             if name not in aircraft_cols:
                 self._exec(f"ALTER TABLE mobile_aircraft ADD COLUMN {name} {sql_type}", ())
+        try:
+            offer_cols = {r[1] for r in self.conn.execute(
+                "PRAGMA table_info(mobile_shop_offers)").fetchall()}
+        except sqlite3.Error:
+            offer_cols = set()
+        for name, sql_type in (("promo_cost", "REAL"),
+                               ("am_gold_step", "INTEGER")):
+            if offer_cols and name not in offer_cols:
+                self._exec(
+                    f"ALTER TABLE mobile_shop_offers ADD COLUMN {name} {sql_type}", ())
         # after the ALTERs, so the view can select the columns they just added
         try:
             self.conn.executescript(_OVERVIEW_VIEW)
@@ -355,7 +370,7 @@ class MobileStore:
               skin_id=excluded.skin_id, model_id=excluded.model_id,
               name=excluded.name, hub_id=excluded.hub_id,
               seats_eco=excluded.seats_eco, seats_bus=excluded.seats_bus,
-              seats_first=excluded.seats_first,
+              seats_first=excluded.seats_first, payload_t=excluded.payload_t,
               last_seen=datetime('now')
         """, (it.get("id"), it.get("as_id"), it.get("al_id"), it.get("n"),
               it.get("h_id"), it.get("se"), it.get("sb"), it.get("sf"),
@@ -546,17 +561,25 @@ class MobileStore:
         if not o or o.get("id") is None:
             return 0
         oid = o["id"]
+        # `purchaseCost` is the list price; a live `promo` (the travel-card
+        # aircraft run at -50% most of the time) carries the price actually
+        # charged, and quoting the list price overstates the shop by 2x.
+        promo = o.get("promo") if isinstance(o.get("promo"), dict) else None
         self._exec("""
             INSERT INTO mobile_shop_offers
-              (offer_id,title,template,cost,currency,start_date,end_date,last_seen)
-            VALUES (?,?,?,?,?,?,?,datetime('now'))
+              (offer_id,title,template,cost,promo_cost,currency,am_gold_step,
+               start_date,end_date,last_seen)
+            VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))
             ON CONFLICT(offer_id) DO UPDATE SET
               title=excluded.title, template=excluded.template,
-              cost=excluded.cost, currency=excluded.currency,
+              cost=excluded.cost, promo_cost=excluded.promo_cost,
+              currency=excluded.currency, am_gold_step=excluded.am_gold_step,
               start_date=excluded.start_date, end_date=excluded.end_date,
               last_seen=datetime('now')
         """, (oid, o.get("title"), o.get("template"),
-              _num(o.get("purchaseCost")), o.get("purchaseCurrency"),
+              _num(o.get("purchaseCost")),
+              _num(promo.get("purchaseCost")) if promo else None,
+              o.get("purchaseCurrency"), o.get("AMGoldStep"),
               _date(o.get("startDate")), _date(o.get("endDate"))))
         n = 0
         for i, it in enumerate(o.get("content") or []):

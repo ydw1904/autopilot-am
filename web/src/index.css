@@ -23,6 +23,12 @@
   --cyan: #6cbdeb;
   --green: #56cf92;
   --red: #ff747a;
+  /* One palette shared by the config bars, the legends and the sliders, so a
+     colour means the same thing in every one of them. */
+  --eco: #6cbdeb;
+  --bus: #b18cf0;
+  --first: #f1ae3f;
+  --cargo: #56cf92;
   --radius: 14px;
 }
 
@@ -103,6 +109,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .section-title-row { min-height: 76px; padding: 19px 22px 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line-soft); }
 .section-title-row h2, .health-header h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
 .section-count { color: var(--muted-2); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.section-header-controls { display: flex; align-items: center; gap: 8px; }
+.section-header-controls .menu-select { width: 150px; }
+.sort-dir-button { flex: none; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 9px; background: #0e1116; color: var(--amber); }
+.sort-dir-button:hover { border-color: #3a4351; background: #12161d; }
 
 .attention-list { display: grid; }
 .attention-row { width: 100%; min-height: 73px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; display: grid; grid-template-columns: 37px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 20px; text-align: left; transition: background .15s ease; }
@@ -553,6 +563,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .livery-tag.is-dutyfree { background: rgba(108, 189, 235, .14); color: var(--cyan); }
 .livery-tag.is-custom { background: rgba(226, 130, 196, .16); color: #e58ecb; }
 .livery-tag.is-new { background: rgba(108, 189, 235, .16); color: var(--cyan); }
+/* A hand-added watch has no feed behind it, so it gets the neutral chip. */
+.livery-tag.is-manual { background: #1e232b; color: var(--muted); }
 /* Single line + ellipsis so a long name can't wrap to a second line and push
    the head past its reserved height, which made that card taller than its
    row-mates. Full name is available on hover via the title attribute. */
@@ -601,52 +613,132 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .ghost-button:hover { color: var(--text); }
 
 .shm-workspace { display: grid; gap: 18px; }
-.shm-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
-.shm-stat { min-height: 106px; display: grid; grid-template-columns: auto 1fr; align-content: center; gap: 7px 9px; padding: 18px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface); color: var(--muted); }
-.shm-stat svg { color: var(--muted-2); }
-.shm-stat span { align-self: center; font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
-.shm-stat strong { grid-column: 1 / -1; color: var(--text); font-size: 22px; letter-spacing: -.03em; }
-.shm-stat.is-live { border-color: rgba(86, 207, 146, .25); }
-.shm-stat.is-live svg, .shm-stat.is-live span, .shm-stat.is-live strong { color: var(--green); }
+
+/* The watcher's headline is freshness, not a currency, so the strip's lead runs
+   a word where the Command Center runs a number — same shell, smaller type. */
+.shm-strip { grid-template-columns: minmax(220px, 1.1fr) 1px repeat(5, minmax(112px, .58fr)); }
+.shm-strip .portfolio-lead .summary-label { display: inline-flex; align-items: center; gap: 7px; }
+.shm-strip .portfolio-lead > strong { font-size: clamp(24px, 2.1vw, 32px); }
+.shm-strip.is-live .portfolio-lead > strong, .shm-strip.is-live .summary-label { color: var(--green); }
+.shm-strip .summary-stat { gap: 7px; }
+.shm-strip .summary-stat span { display: inline-flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: .07em; }
+.shm-strip .summary-stat span svg { color: var(--muted-2); }
+.shm-strip .summary-stat small { color: var(--muted-2); font-size: 9px; }
+.shm-strip .summary-stat.tone-amber strong { color: var(--amber); }
+.shm-strip .summary-stat.tone-amber span svg { color: var(--amber); }
+
 .shm-section { min-width: 0; }
-.shm-table-wrap { overflow-x: auto; }
-.shm-table { width: 100%; min-width: 1120px; border-collapse: collapse; }
-.shm-table th { height: 38px; padding: 0 15px; background: #0e1116; color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
-.shm-table td { height: 55px; padding: 9px 15px; border-top: 1px solid var(--line-soft); color: #c8ced7; font-size: 11px; }
-.shm-table td strong, .shm-table td small { display: block; }
-.shm-table td strong { color: var(--text); font-size: 11px; }
+.shm-controls { margin: 0 0 1px; border-radius: 0; box-shadow: none; border-bottom: 1px solid var(--line-soft); }
+.shm-controls .fleet-toolbar { border-radius: 0; background: transparent; grid-template-columns: minmax(210px, 1.35fr) repeat(3, minmax(126px, .66fr)) minmax(130px, .62fr); }
+.shm-controls .active-filter-row { border-radius: 0; background: #0d1015; }
+
+/* Sixty standing orders would otherwise run three screens deep before the feeds
+   below them. The list scrolls in place under a pinned header instead. */
+.shm-table-wrap { max-height: min(64vh, 660px); overflow: auto; }
+.shm-table { width: 100%; min-width: 1000px; border-collapse: collapse; table-layout: fixed; }
+.shm-table th { position: sticky; top: 0; z-index: 3; height: 38px; padding: 0 15px; border-bottom: 1px solid var(--line); background: #12161c; color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
+.shm-table th:nth-child(1) { width: 27%; }
+.shm-table th:nth-child(2) { width: 17%; }
+.shm-table th:nth-child(3) { width: 11%; }
+.shm-table th:nth-child(4) { width: 11%; }
+.shm-table th:nth-child(5) { width: 9%; }
+.shm-table th:nth-child(6) { width: 9%; }
+.shm-table th:nth-child(7) { width: 6%; }
+.shm-table th:nth-child(8) { width: 10%; }
+.shm-th-sort { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; white-space: nowrap; }
+.shm-th-sort svg { flex: none; opacity: .45; transition: opacity .15s ease; }
+.shm-th-sort:hover { color: var(--text); }
+.shm-th-sort:hover svg { opacity: .9; }
+.shm-table th.is-sorted .shm-th-sort { color: var(--amber); }
+.shm-table th.is-sorted .shm-th-sort svg { opacity: 1; }
+.shm-table td { height: 58px; padding: 8px 15px; border-bottom: 1px solid var(--line-soft); color: #c8ced7; font-size: 11px; vertical-align: middle; }
+.shm-table tbody tr { transition: background .12s ease; }
+.shm-table tbody tr:hover { background: #171b22; }
+/* A row the watcher no longer works — acquired, or pulled from the shop feed.
+   It stays listed (that is why a known livery is not purchasable again) but it
+   must not read like a live standing order. */
+.shm-table tbody tr.is-dormant td { color: var(--muted-2); }
+.shm-table tbody tr.is-dormant .shm-thumb img { opacity: .45; }
+.shm-table tbody tr.is-dormant .shm-watch-name strong { color: var(--muted); }
+.shm-table td strong, .shm-table td small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shm-table td strong { color: var(--text); font-size: 12px; }
 .shm-table td small { margin-top: 3px; color: var(--muted-2); font-size: 9px; }
-.shm-cap-input { width: 104px; height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: #0e1116; color: var(--text); font-size: 11px; }
+.shm-num { font-variant-numeric: tabular-nums; }
+.shm-table td.is-empty { color: #4d5663; }
+/* The one number that decides whether a standing order can ever fire: the
+   cheapest listing seen against this row's own cap. */
+.shm-num.is-under-cap { color: var(--green); font-weight: 700; }
+.shm-num.is-over-cap { color: var(--amber); }
+.shm-cap-input { width: 100%; max-width: 108px; height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: #0e1116; color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
 .shm-cap-input::placeholder { color: #545e6c; }
+.shm-cap-input:hover:not(:disabled) { border-color: #3a4351; }
 .shm-cap-input:disabled { opacity: .5; }
-.shm-controls { margin-bottom: 14px; }
-.shm-controls .fleet-toolbar { grid-template-columns: minmax(240px, 1.3fr) minmax(104px, .5fr) repeat(4, minmax(130px, .7fr)); }
-.shm-watch-name { min-width: 260px; display: flex; align-items: center; gap: 11px; }
-.shm-watch-name > span { width: 72px; height: 42px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 7px; background: radial-gradient(circle at 50% 45%, #252c36, #0e1116 72%); }
-.shm-watch-name img { width: 94%; height: 90%; object-fit: contain; filter: drop-shadow(0 5px 4px rgba(0, 0, 0, .38)); }
+
+/* One livery frame for the whole tab: the watch table, the match feed and the
+   audit trail all identify a livery by the same picture at the same size. */
+.shm-thumb { width: 74px; height: 42px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 7px; background: radial-gradient(circle at 50% 45%, #252c36, #0e1116 72%); }
+.shm-thumb img { width: 94%; height: 90%; object-fit: contain; filter: drop-shadow(0 5px 4px rgba(0, 0, 0, .38)); }
+.shm-watch-name { min-width: 0; display: flex; align-items: center; gap: 11px; }
 .shm-watch-name > div { min-width: 0; }
-.value-muted { color: var(--muted-2); }
-.shm-chip { display: inline-flex; align-items: center; min-height: 23px; padding: 0 7px; border-radius: 6px; background: #1c222b; color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
-.shm-chip.is-pack { background: rgba(96, 152, 232, .14); color: #7aa9ee; }
-.shm-chip.is-owned { background: rgba(86, 207, 146, .14); color: var(--green); }
+.shm-watch-meta { display: flex; align-items: center; gap: 7px; margin-top: 3px; }
+.shm-watch-meta small { min-width: 0; margin-top: 0; }
+.shm-owned { flex: none; padding: 2px 6px; border-radius: 5px; background: rgba(86, 207, 146, .13); color: var(--green); font-size: 8px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.shm-table .livery-tag { max-width: 100%; overflow: hidden; white-space: nowrap; }
+/* Which booster / challenge / pack the livery actually comes from. The chip
+   above carries the kind, which is the coarse thing you filter on; this is the
+   fine thing you need when a set matters. */
+.shm-origin { margin-top: 4px; color: var(--muted-2); }
+/* Acquired or retired, under a switch that still works: a scarce livery is
+   worth a second copy as trade stock, so arming one re-opens the order. */
+.shm-state { margin-top: 4px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.shm-state.is-fulfilled { color: #4f9c76; }
+.shm-state.is-retired { color: #58606d; }
+
+/* Arming spends real money, so the checked state borrows the amber the rest of
+   the app reserves for actions rather than the violet of a display filter. */
+.shm-arm-toggle { height: 30px; padding: 0 9px; font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
+.shm-arm-toggle input { width: 12px; height: 12px; accent-color: var(--amber); }
+.shm-arm-toggle:has(input:checked) { border-color: rgba(241, 174, 63, .45); background: var(--amber-soft); color: var(--amber); }
+
+.shm-chip { display: inline-flex; align-items: center; min-height: 22px; padding: 0 7px; border-radius: 6px; background: #1c222b; color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .shm-chip.is-warning { background: var(--amber-soft); color: var(--amber); }
 .shm-chip.is-live { background: rgba(86, 207, 146, .14); color: var(--green); }
-.shm-columns { min-width: 0; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 18px; align-items: start; }
+.shm-chip.is-fulfilled { background: rgba(86, 207, 146, .1); color: #4f9c76; }
+.shm-chip.is-retired { background: #191d24; color: #58606d; }
+
+.shm-columns { min-width: 0; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .65fr); gap: 18px; align-items: start; }
+/* The narrow column cannot hold a title and three controls on one line, so it
+   stacks them instead of letting the heading wrap to three words a line. */
+.shm-section.is-narrow .section-title-row { min-height: 0; flex-direction: column; align-items: stretch; gap: 12px; }
+.shm-section.is-narrow .section-header-controls .menu-select { flex: 1; width: auto; }
+
 .shm-feed { display: grid; }
-.shm-feed article { min-height: 59px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, auto) auto auto; align-items: center; gap: 14px; padding: 10px 17px; border-top: 1px solid var(--line-soft); }
+.shm-feed article { min-height: 58px; display: grid; align-items: center; gap: 12px; padding: 9px 17px; border-top: 1px solid var(--line-soft); }
 .shm-feed article:first-child { border-top: 0; }
 .shm-feed article > div { min-width: 0; }
 .shm-feed article strong, .shm-feed article small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shm-feed article strong { color: #d9dee5; font-size: 11px; }
 .shm-feed article small { margin-top: 4px; color: var(--muted-2); font-size: 9px; }
-.shm-feed article time { display: inline-flex; align-items: center; gap: 4px; color: var(--muted-2); font-size: 9px; white-space: nowrap; }
+.shm-feed article time { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--muted-2); font-size: 9px; white-space: nowrap; }
+/* Numbers sit in fixed right-aligned slots so a column of prices lines up on
+   the decimal instead of drifting with the livery name beside it. */
+.shm-metric { text-align: right; font-variant-numeric: tabular-nums; }
+.shm-metric.is-ending strong, .shm-metric.is-over strong { color: var(--amber); }
+.shm-feed.is-sightings article { grid-template-columns: 74px minmax(0, 1fr) 92px 96px 74px 58px; }
+.shm-feed.is-decisions article { grid-template-columns: 74px minmax(0, 1fr) 96px 88px auto 40px 58px; }
 .shm-feed.is-checks article { grid-template-columns: minmax(0, 1fr) auto auto; }
+/* How many times the watcher re-weighed the same listing in this window. */
+.shm-repeats { color: var(--muted-2); font-size: 9px; font-weight: 700; text-align: right; }
 .shm-empty { margin: 0; padding: 28px 20px !important; color: var(--muted-2) !important; font-size: 10px !important; text-align: center; }
 
 @media (max-width: 900px) {
   .livery-stats { grid-template-columns: 1fr 1fr; }
   .livery-toolbar .menu-select { width: 100%; }
-  .shm-summary { grid-template-columns: 1fr 1fr; }
+  .shm-strip { grid-template-columns: 1fr 1fr; }
+  .shm-strip .portfolio-lead { grid-column: span 2; }
+  .shm-controls .fleet-toolbar { grid-template-columns: 1fr 1fr; }
+  .shm-controls .search-control { grid-column: span 2; }
+  /* Stacked, the feeds get the full width back, so they keep their own grids. */
   .shm-columns { grid-template-columns: 1fr; }
 }
 
@@ -660,7 +752,243 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   .livery-sync-panel .primary-action { width: 100%; }
   .livery-toolbar { flex-direction: column; align-items: stretch; }
   .segmented-control { justify-content: space-between; }
-  .shm-summary { grid-template-columns: 1fr; }
-  .shm-feed article { grid-template-columns: 1fr auto; }
-  .shm-feed article time { grid-column: 1 / -1; }
+  .shm-strip { display: block; }
+  .shm-controls .fleet-toolbar { grid-template-columns: 1fr; }
+  .shm-controls .search-control { grid-column: auto; }
+  .shm-feed article, .shm-feed.is-sightings article, .shm-feed.is-decisions article { grid-template-columns: minmax(0, 1fr) auto; }
+  .shm-feed .shm-thumb, .shm-feed .shm-repeats { display: none; }
+  .shm-feed article time { grid-column: 1 / -1; justify-content: flex-start; }
 }
+
+/* Hangar — the picker stays put while the workbench scrolls, so the aircraft
+   being edited is never more than a glance away from the list it came from. */
+.hangar-layout { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 18px; align-items: start; }
+/* The card — not the list — owns the height budget: the list used to cap at
+   72vh on its own, which ignored the controls above it and pushed the card's
+   bottom edge (and its last row) below the fold, where the sticky position
+   made it unreachable. The list now takes whatever the card has left. */
+.hangar-picker { position: sticky; top: 108px; display: grid; grid-template-rows: auto minmax(0, 1fr); max-height: calc(100vh - 128px); }
+.hangar-picker-controls { display: grid; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line-soft); }
+.hangar-picker-list { overflow-y: auto; padding: 7px; }
+.hangar-picker-row { width: 100%; display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 10px; padding: 7px; border: 0; border-radius: 9px; background: transparent; text-align: left; }
+.hangar-picker-row:hover { background: var(--surface-hover); }
+.hangar-picker-row.is-active { background: var(--amber-soft); }
+.hangar-picker-art { width: 54px; height: 34px; display: grid; place-items: center; overflow: hidden; border-radius: 7px; background: radial-gradient(circle at 50% 45%, #252c36, #0e1116 72%); color: #505b69; }
+.hangar-picker-art img { width: 94%; height: 90%; object-fit: contain; }
+.hangar-picker-copy { min-width: 0; display: grid; }
+.hangar-picker-copy strong, .hangar-picker-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hangar-picker-copy strong { font-size: 12px; }
+.hangar-picker-copy small { margin-top: 3px; color: var(--muted-2); font-size: 10px; }
+.hangar-picker-row.is-active .hangar-picker-copy strong { color: var(--amber); }
+
+.hangar-panel { min-width: 0; display: grid; gap: 14px; align-content: start; }
+.hangar-head { display: grid; grid-template-columns: 168px minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 18px; background: var(--surface); border-radius: var(--radius); box-shadow: inset 0 0 0 1px var(--line-soft); }
+.hangar-head-art { width: 168px; height: 112px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 11px; background: radial-gradient(circle at 50% 45%, #252c36, #0e1116 72%); color: #505b69; }
+.hangar-head-art img { width: 92%; height: 88%; object-fit: contain; filter: drop-shadow(0 9px 8px rgba(0, 0, 0, .42)); }
+.hangar-head-copy { min-width: 0; }
+.hangar-head-copy .section-kicker b { color: var(--cyan); }
+.hangar-head-copy h2 { margin: 0; overflow: hidden; font-size: 23px; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
+.hangar-head-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.hangar-head-stats { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 1px; overflow: hidden; margin: 0; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--line-soft); }
+.hangar-head-stats div { min-width: 0; padding: 9px 8px; background: #0d1015; }
+.hangar-head-stats dt { color: var(--muted-2); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.hangar-head-stats dd { overflow: hidden; margin: 4px 0 0; color: #d5dbe3; font-size: 10px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+
+.hangar-alert { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 8px 13px; border: 1px solid rgba(86, 207, 146, .2); border-radius: 9px; background: rgba(86, 207, 146, .08); color: #9fd8bb; font-size: 11px; }
+.hangar-alert.is-error { border-color: rgba(255, 116, 122, .22); background: rgba(255, 116, 122, .08); color: #f2a4a7; }
+.hangar-alert svg { flex: none; }
+
+.hangar-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.hangar-card { min-width: 0; display: grid; align-content: start; gap: 10px; padding: 16px 18px; background: var(--surface); border-radius: var(--radius); box-shadow: inset 0 0 0 1px var(--line-soft); }
+.hangar-card.is-wide { grid-column: 1 / -1; }
+.hangar-card.is-danger { box-shadow: inset 0 0 0 1px rgba(255, 116, 122, .22); }
+.hangar-card h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; }
+.hangar-card.is-danger h3, .hangar-card.is-danger h3 svg { color: var(--red); }
+.hangar-card h3 svg { color: var(--amber); }
+.hangar-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.hangar-card p b { color: #c8cfd7; font-weight: 700; }
+.text-link { display: inline; padding: 0; border: 0; background: transparent; color: var(--cyan); font-weight: 700; font-size: inherit; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.text-link:hover { color: #8fd0f5; }
+.hangar-card > .primary-action { justify-self: start; }
+.hangar-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.hangar-row .model-input { flex: 1 1 160px; }
+.hangar-row .menu-select { flex: 1 1 160px; }
+.hangar-field { display: grid; gap: 5px; }
+.hangar-field > span, .hangar-seat-row-head span { color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.hangar-field .model-input { width: 150px; min-width: 0; }
+
+.million-input { display: flex; align-items: center; gap: 5px; height: 42px; width: 100%; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: #0e1116; }
+.million-input:focus-within { border-color: var(--cyan); }
+.million-input.is-invalid { border-color: rgba(255, 116, 122, .7); }
+.million-input-currency { color: var(--muted-2); font-size: 12px; font-weight: 700; }
+.million-input-value { width: 100%; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--text); font-size: 14px; font-weight: 800; outline: none; }
+.million-input-suffix { color: var(--muted-2); font-size: 12px; font-weight: 700; white-space: nowrap; }
+
+.hangar-sale-summary { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)) auto; align-items: stretch; gap: 1px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 11px; background: var(--line-soft); }
+.hangar-sale-field { display: grid; align-content: center; gap: 7px; min-width: 0; min-height: 96px; padding: 13px 16px; background: #0d1015; }
+.hangar-sale-field > span { color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.hangar-sale-field small { min-height: 13px; color: var(--muted-2); font-size: 9px; }
+.hangar-sale-field small button { margin-left: 6px; padding: 0; border: 0; background: transparent; color: var(--cyan); font: inherit; font-weight: 800; cursor: pointer; }
+.hangar-sale-summary .primary-action { min-width: 160px; margin: 13px; padding: 0 18px; white-space: nowrap; }
+@media (max-width: 860px) {
+  .hangar-sale-summary { grid-template-columns: minmax(0, 1fr); }
+  .hangar-sale-field { min-height: 82px; }
+  .hangar-sale-summary .primary-action { min-height: 44px; }
+  .cap-bars { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Capacity read-out: how much of the model's seat count and of its tonnage
+   this configuration actually spends. */
+.cap-bars { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px 14px; border-radius: 11px; background: #0c0f14; box-shadow: inset 0 0 0 1px var(--line-soft); }
+.cap-bar { display: grid; gap: 7px; min-width: 0; }
+.cap-bar-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.cap-bar-head span { color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.cap-bar-head strong { font-size: 12px; font-variant-numeric: tabular-nums; }
+.cap-bar-head strong em { margin-left: 6px; color: var(--muted-2); font-style: normal; font-weight: 700; }
+.cap-track { display: flex; height: 10px; overflow: hidden; border-radius: 6px; background: #1b2028; }
+.cap-track i { min-width: 0; transition: width .12s ease; }
+.cap-keys { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.cap-key { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
+.cap-key b { color: var(--text); font-variant-numeric: tabular-nums; }
+.cap-key::before { content: ""; width: 8px; height: 8px; border-radius: 3px; background: var(--tint); }
+.cap-key.is-seats::before { background: linear-gradient(90deg, var(--eco), var(--bus), var(--first)); }
+.is-eco { --tint: var(--eco); } .is-bus { --tint: var(--bus); } .is-first { --tint: var(--first); } .is-cargo { --tint: var(--cargo); }
+.cap-track i.is-eco, .cap-track i.is-bus, .cap-track i.is-first, .cap-track i.is-cargo { background: var(--tint); }
+.cap-over { grid-column: 1 / -1; color: var(--amber); font-size: 10px; }
+
+.hangar-seats { display: grid; gap: 12px; }
+.hangar-seat-row { display: grid; gap: 6px; }
+.hangar-seat-row-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hangar-seat-row-head span { display: inline-flex; align-items: center; gap: 6px; }
+.hangar-seat-row-head span::before { content: ""; width: 8px; height: 8px; border-radius: 3px; background: var(--tint); }
+.hangar-seat-ceiling { color: var(--muted-2); font-size: 10px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.hangar-seat-value { width: 90px; min-width: 0; height: 34px; font-size: 12px; text-align: right; }
+
+/* Track reads left to right: filled in the class colour, then the headroom
+   still available before the weight/seat cap bites, then dead space. */
+.hangar-seat-slider { appearance: none; -webkit-appearance: none; width: 100%; height: 8px; border-radius: 8px; background-color: #14181e; background-image: linear-gradient(var(--tint), var(--tint)), linear-gradient(#2b3340, #2b3340); background-repeat: no-repeat; background-size: var(--pct, 0%) 100%, var(--ceil, 0%) 100%; cursor: pointer; }
+.hangar-seat-slider::-webkit-slider-runnable-track { -webkit-appearance: none; height: 8px; background: transparent; }
+.hangar-seat-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: -4px; border-radius: 50%; background: var(--text); border: 2px solid var(--tint); cursor: pointer; }
+.hangar-seat-slider::-moz-range-track { height: 8px; border-radius: 8px; background: transparent; }
+.hangar-seat-slider::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--text); border: 2px solid var(--tint); cursor: pointer; }
+
+.hangar-days { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: #0e1116; }
+.hangar-days .danger-action { margin-left: auto; }
+.hangar-flights { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.hangar-flights li { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; padding: 0 12px; border-radius: 8px; background: #12161c; }
+.hangar-flights strong { font-size: 12px; letter-spacing: .04em; }
+.hangar-flights small { color: var(--muted-2); font-size: 11px; }
+
+.hangar-livery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
+.hangar-livery { display: grid; gap: 7px; padding: 9px; border: 1px solid var(--line-soft); border-radius: 11px; background: #12161c; text-align: left; }
+.hangar-livery:hover:not(:disabled) { border-color: #343c49; }
+.hangar-livery.is-current { border-color: rgba(86, 207, 146, .3); }
+.hangar-livery:disabled { cursor: default; }
+.hangar-livery .livery-image { height: 78px; }
+.hangar-livery strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.hangar-livery small { color: var(--muted-2); font-size: 10px; }
+
+.danger-action { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 14px; border: 1px solid rgba(255, 116, 122, .35); border-radius: 9px; background: rgba(255, 116, 122, .1); color: #f2a4a7; font-size: 10px; font-weight: 800; white-space: nowrap; }
+.danger-action:hover:not(:disabled) { background: rgba(255, 116, 122, .18); }
+.danger-action:disabled { opacity: .5; cursor: default; }
+.danger-action.is-soft { min-height: 38px; }
+
+.hangar-picker-foot { margin: 4px 0 0; padding: 9px 10px; border-top: 1px solid var(--line-soft); color: var(--muted-2); font-size: 10px; }
+.hangar-empty { margin: 0; color: var(--muted-2); font-size: 11px; padding: 10px 4px; }
+
+@media (max-width: 1180px) {
+  .hangar-layout { grid-template-columns: minmax(0, 1fr); }
+  .hangar-picker { position: static; max-height: none; }
+  .hangar-picker-list { max-height: 320px; }
+  .hangar-cards { grid-template-columns: minmax(0, 1fr); }
+  .hangar-head { grid-template-columns: 112px minmax(0, 1fr); }
+  .hangar-head-art { width: 112px; height: 76px; }
+  .hangar-head .icon-action { grid-column: 1 / -1; justify-self: start; }
+  .hangar-head-stats { grid-column: 1 / -1; }
+}
+
+/* ── Network / Pricing / Ops workspaces ─────────────────────────────────── */
+
+.stack-workspace { display: grid; gap: 18px; }
+.ops-layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(300px, .62fr); gap: 24px; align-items: start; }
+.ops-side { display: grid; gap: 18px; }
+
+.summary-stat.tone-amber strong { color: var(--amber); }
+.is-dim { color: var(--muted-2); }
+.value-good { color: var(--green); font-weight: 700; }
+
+/* One table shape for every tabular workspace; `.shm-table` predates it and
+   keeps its own column widths, so it is deliberately not folded in here. */
+.grid-table-wrap { max-height: min(66vh, 720px); overflow: auto; }
+.grid-table { width: 100%; min-width: 860px; border-collapse: collapse; }
+.grid-table th { position: sticky; top: 0; z-index: 3; height: 38px; padding: 0 15px; border-bottom: 1px solid var(--line); background: #12161c; color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.grid-table td { height: 54px; padding: 8px 15px; border-bottom: 1px solid var(--line-soft); color: #c8ced7; font-size: 11px; vertical-align: middle; }
+.grid-table tbody tr:last-child td { border-bottom: 0; }
+.grid-table tbody tr { transition: background .12s ease; }
+.grid-table tbody tr:hover { background: #171b22; }
+.grid-table td strong { display: block; color: var(--text); font-size: 12px; }
+.grid-table td small { display: block; margin-top: 3px; color: var(--muted-2); font-size: 10px; }
+.grid-table th.is-numeric, .grid-table td.is-numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.grid-table td.is-numeric svg { vertical-align: -1px; margin-right: 3px; }
+.grid-table tbody tr.is-dormant td { color: var(--muted-2); }
+.grid-table tbody tr.is-clickable { cursor: pointer; }
+.grid-table tbody tr.is-open { background: #171b22; }
+.grid-table tbody tr.is-open td { border-bottom-color: transparent; }
+.grid-table .is-rotated { transform: rotate(90deg); }
+.grid-table tbody tr.detail-row:hover, .grid-table tr.detail-row { background: #0e1116; }
+.grid-table tr.detail-row td { height: auto; padding: 0; }
+.inline-lock { margin-left: 5px; color: var(--muted-2); vertical-align: -1px; }
+
+.link-value { padding: 0; border: 0; background: transparent; color: var(--amber); font: inherit; font-variant-numeric: tabular-nums; text-decoration: underline; text-underline-offset: 3px; }
+
+.status-tag { display: inline-flex; align-items: center; height: 21px; padding: 0 8px; border-radius: 6px; background: #1b212a; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .03em; }
+.status-tag.is-completed { background: rgba(88, 196, 137, .12); color: var(--green); }
+.status-tag.is-bought { background: var(--amber-soft); color: var(--amber); }
+
+.route-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 18px 18px; }
+.route-chip { min-width: 168px; display: grid; gap: 2px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: #12161c; }
+.route-chip.is-owned { border-color: rgba(88, 196, 137, .28); }
+.route-chip strong { color: var(--text); font-size: 12px; }
+.route-chip small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.route-chip span { color: var(--muted-2); font-size: 10px; font-variant-numeric: tabular-nums; }
+.route-chip .route-demand { color: #7f8896; }
+.route-chip em { color: var(--amber); font-size: 9px; font-style: normal; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+
+.table-footnote { margin: 0; padding: 14px 18px 17px; border-top: 1px solid var(--line-soft); color: var(--muted-2); font-size: 10px; line-height: 1.5; }
+.table-footnote code { color: var(--muted); font-size: 10px; }
+.fatal-state.is-inline { margin: 18px; min-height: 96px; }
+
+@media (max-width: 1180px) {
+  .ops-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── Pricing plan bar ───────────────────────────────────────────────────── */
+
+.plan-bar { display: grid; gap: 12px; padding: 16px 22px 18px; }
+.plan-hint { margin: 0; color: var(--muted); font-size: 11px; }
+.plan-error { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid rgba(255, 116, 122, .2); border-radius: 9px; background: rgba(255, 116, 122, .07); color: #f2a4a7; font-size: 11px; }
+.plan-result { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid rgba(88, 196, 137, .22); border-radius: 9px; background: rgba(88, 196, 137, .07); color: var(--green); font-size: 11px; }
+.plan-dismiss { margin-left: auto; padding: 2px; border: 0; background: transparent; color: inherit; opacity: .65; }
+.plan-dismiss:hover { opacity: 1; }
+
+.plan-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 11px; background: #12161c; }
+.plan-counts { display: flex; flex-wrap: wrap; gap: 22px; }
+.plan-count { display: grid; gap: 4px; }
+.plan-count span { color: var(--muted-2); font-size: 9px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+.plan-count strong { font-size: 17px; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.plan-count.tone-amber strong { color: var(--amber); }
+.plan-count.tone-good strong { font-size: 13px; color: var(--green); }
+.plan-actions { display: flex; align-items: center; gap: 10px; }
+.plan-none { color: var(--muted-2); font-size: 11px; }
+
+.pct-field { display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: #0e1116; }
+.pct-field span { color: var(--muted-2); font-size: 11px; font-weight: 700; }
+.pct-field input { width: 54px; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.value-target { color: var(--amber) !important; font-weight: 700; }
+.grid-table tbody tr.is-planned-change { background: rgba(241, 174, 63, .05); }
+.grid-table tbody tr.is-planned-change:hover { background: rgba(241, 174, 63, .09); }
+.status-tag.is-dryrun { background: var(--amber-soft); color: var(--amber); }
+.status-tag.is-cooldown { background: #1b212a; color: var(--muted-2); }
+.status-tag.is-ok { background: rgba(88, 196, 137, .12); color: var(--green); }
+.status-tag.is-fail { background: rgba(255, 116, 122, .1); color: #f2a4a7; }

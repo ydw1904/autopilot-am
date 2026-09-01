@@ -3,7 +3,7 @@
 import pytest
 
 import api_server
-from api_server import SyncRequest, _mobile_items_to_fleet
+from api_server import SyncRequest, _mobile_items_to_fleet, _name_unknown_models
 
 
 def test_mobile_fleet_matches_warehouse_contract_and_learns_models():
@@ -41,6 +41,29 @@ def test_mobile_fleet_rejects_an_unknown_model_for_cdp_fallback():
         )
 
 
+def test_a_brand_new_model_is_named_from_its_profile_once():
+    items = [
+        {"id": 101, "al_id": 14, "h_id": 9480309},   # known from the fleet table
+        {"id": 190108575, "al_id": 207, "h_id": 10242059},  # first of its type
+        {"id": 190108576, "al_id": 207, "h_id": 10242059},  # same new model
+    ]
+    asked = []
+
+    def profile(aircraft_id):
+        asked.append(aircraft_id)
+        return {"model": {"id": 207, "name": "VC10"}}
+
+    model_by_id = {}
+    _name_unknown_models(items, model_by_id, {101: "A330-300"}, profile)
+
+    assert asked == [190108575]
+    assert model_by_id == {207: "VC10"}
+
+    fleet, _, _ = _mobile_items_to_fleet(
+        items, {9480309: "FRA", 10242059: "JRO"}, {101: "A330-300"}, model_by_id)
+    assert [ac["model"] for ac in fleet] == ["A330-300", "VC10", "VC10"]
+
+
 def test_single_hub_sync_ignores_incomplete_records_at_other_hubs():
     fleet, hubs, learned = _mobile_items_to_fleet(
         [
@@ -69,7 +92,8 @@ def test_sync_uses_mobile_without_touching_cdp(monkeypatch):
     monkeypatch.setattr(api_server, "_read_mobile_fleet", lambda hub: (fleet, ["FRA"]))
     monkeypatch.setattr(
         api_server, "_read_cdp_fleet",
-        lambda hub: pytest.fail("CDP fallback should not run after a successful mobile read"),
+        lambda hub, mobile_error=None: pytest.fail(
+            "CDP fallback should not run after a successful mobile read"),
     )
     _stub_sync_writes(monkeypatch)
 
@@ -88,12 +112,12 @@ def test_sync_falls_back_to_preserved_cdp_reader(monkeypatch):
     seen = []
     monkeypatch.setattr(
         api_server, "_read_cdp_fleet",
-        lambda hub: (seen.append(hub) or fleet, [hub]),
+        lambda hub, mobile_error=None: (seen.append((hub, str(mobile_error))) or fleet, [hub]),
     )
     _stub_sync_writes(monkeypatch)
 
     result = api_server.sync_fleet(SyncRequest(hub="fra"))
 
-    assert seen == ["FRA"]
+    assert seen == [("FRA", "mobile offline")]
     assert result["source"] == "cdp_fallback"
     assert "via browser fallback" in result["message"]

@@ -26,7 +26,7 @@ incremental bid — so the watcher takes a plane only when its individual arm
 toggle is on and the balance remains positive. It never enters a bidding war.
 
 Nothing spends money until a watch is armed. Missing paid-pack targets start
-armed; challenge and manual watches begin in observation mode.
+armed; ticket aircraft, challenge and manual watches begin in observation mode.
 
 Usage:
   code/shm_watcher.py add 4670077 --max 1.2b        # watch one livery
@@ -72,8 +72,17 @@ DEFAULT_MAX_BIDS_PER_DAY = 20
 DEFAULT_PURCHASE_FEE_PCT = 20.0
 DEFAULT_REQUEST_DELAY = 2.0
 PAID_PACK_SOURCE = "shop-pack:auto"
+# Travel-card aircraft are shop-exclusive like a pack, but they cost tickets
+# rather than money, so they are their own bucket: same automatic discovery,
+# no automatic arming.
+TICKET_SOURCE = "shop-ticket:auto"
+GOLD_SOURCE = "shop-gold:auto"
 CHALLENGE_SOURCE = "challenge:auto"
-AUTO_SOURCES = frozenset({PAID_PACK_SOURCE, CHALLENGE_SOURCE})
+SHOP_SOURCES = (PAID_PACK_SOURCE, TICKET_SOURCE, GOLD_SOURCE)
+AUTO_SOURCES = frozenset({PAID_PACK_SOURCE, TICKET_SOURCE, GOLD_SOURCE,
+                          CHALLENGE_SOURCE})
+_SHOP_MARKS = ",".join("?" * len(SHOP_SOURCES))
+_AUTO_MARKS = ",".join("?" * len(AUTO_SOURCES))
 
 SCHEMA = """
 -- One row per livery being watched. `model_id` is what makes the cheap
@@ -245,9 +254,24 @@ def has_armed_watches(conn) -> bool:
 
 
 def set_watch_armed(conn, skin_id: int, armed: bool) -> bool:
-    """Persist one watch's live-buy choice without changing its observation."""
-    cur = conn.execute("UPDATE shm_watch SET armed=? WHERE skin_id=?",
-                       (int(armed), skin_id))
+    """Persist one watch's live-buy choice without changing its observation.
+
+    Arming also re-opens a watch that had gone dormant. A livery already in the
+    hangar is exactly what you arm on purpose: the scarce ones (a retired
+    challenge skin, a one-off pack livery) are trade stock, and a second copy
+    buys several ordinary ones. `active_watches` only reads `active=1 AND
+    bought < want`, so wanting another copy means saying so in `want` — one
+    more than the count already taken.
+    """
+    if armed:
+        cur = conn.execute("""
+            UPDATE shm_watch
+               SET armed=1, active=1,
+                   want=CASE WHEN bought >= want THEN bought + 1 ELSE want END
+             WHERE skin_id=?
+        """, (skin_id,))
+    else:
+        cur = conn.execute("UPDATE shm_watch SET armed=0 WHERE skin_id=?", (skin_id,))
     conn.commit()
     return bool(cur.rowcount)
 
@@ -261,21 +285,43 @@ def set_watch_max_price(conn, skin_id: int, max_price: float | None) -> bool:
 
 
 def automatic_target_skins(conn) -> list[dict]:
-    """Special paid-pack and challenge liveries, including owned catalog rows."""
+    """Special shop-priced and challenge liveries, including owned catalog rows."""
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    sources = ["""
-        SELECT DISTINCT i.skin_id AS skin_id, ? AS source, 0 AS priority
+    # Anything the shop only parts with for a price: real-money packs, and the
+    # travel-card aircraft ('aircraft'/'tc', e.g. the Air Qilin Beijing 737s),
+    # which are livery-exclusive the same way a pack is. The currency is the
+    # test, not the template — free gifts ('gift or free', 'adv') arrive on
+    # their own and never need sniping.
+    shop = """
+        SELECT DISTINCT i.skin_id AS skin_id, ? AS source, ? AS priority
           FROM mobile_shop_offer_items i
           JOIN mobile_shop_offers o ON o.offer_id = i.offer_id
          WHERE i.skin_id IS NOT NULL
-           AND o.template = 'pack'
-           AND o.currency = 'realMoney'
-    """]
-    params: list[Any] = [PAID_PACK_SOURCE]
-    if "mobile_challenge_rewards" in tables:
+           AND o.currency = ?
+    """
+    sources = [shop, shop]
+    params: list[Any] = [PAID_PACK_SOURCE, 2, "realMoney",
+                         TICKET_SOURCE, 3, "tc"]
+    offer_columns = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(mobile_shop_offers)")}
+    if "am_gold_step" in offer_columns:
         sources.append("""
-            SELECT DISTINCT skin_id, ? AS source, 1 AS priority
+            SELECT DISTINCT i.skin_id AS skin_id, ? AS source, ? AS priority
+              FROM mobile_shop_offer_items i
+              JOIN mobile_shop_offers o ON o.offer_id = i.offer_id
+             WHERE i.skin_id IS NOT NULL
+               AND o.am_gold_step IS NOT NULL
+               AND o.currency = 'gift or free'
+        """)
+        params.extend((GOLD_SOURCE, 1))
+    if "mobile_challenge_rewards" in tables:
+        # Challenge outranks both shop feeds: a challenge livery is routinely
+        # bundled into an unrelated pack too (the Copa X777-9 rides the "x3
+        # progress" packs), and "Paid pack" then hides the only fact that has a
+        # deadline -- the ladder it is actually being awarded from.
+        sources.append("""
+            SELECT DISTINCT skin_id, ? AS source, 0 AS priority
               FROM mobile_challenge_rewards
              WHERE skin_id IS NOT NULL
         """)
@@ -303,10 +349,12 @@ def automatic_target_skins(conn) -> list[dict]:
 
 
 def sync_automatic_watches(conn, max_price: Optional[int] = None) -> dict:
-    """Sync paid-pack and challenge catalog rows into the watchlist.
+    """Sync shop-priced and challenge catalog rows into the watchlist.
 
-    Missing paid-pack targets start armed. Challenge and manual targets remain
-    observation-only until their individual arm toggle is enabled. Owned
+    Missing paid-pack targets start armed. Ticket aircraft, AM Gold rewards,
+    challenge and manual targets remain observation-only until their individual
+    arm toggle is enabled — these are still directly claimable or buyable, so
+    an uncapped market snipe is rarely the better deal. Owned
     automatic catalog rows stay visible but inactive, so the UI explains why a
     known paid livery is not a purchase target.
     """
@@ -322,34 +370,49 @@ def sync_automatic_watches(conn, max_price: Optional[int] = None) -> dict:
               int(row["owned"]), 0 if row["owned"] else 1, row["source"],
               int(row["source"] == PAID_PACK_SOURCE and not row["owned"])))
         added += cur.rowcount
+        # Feeds rotate: a pack livery that later shows up on a challenge ladder
+        # keeps the source it was first synced with unless the row is corrected.
+        # Manual and booster watches are never rewritten.
+        conn.execute(
+            f"UPDATE shm_watch SET source=? WHERE skin_id=? AND source!=? "
+            f"AND source IN ({_AUTO_MARKS})",
+            (row["source"], row["skin_id"], row["source"], *sorted(AUTO_SOURCES)))
 
     updated = 0
     if max_price is not None and target_ids:
         placeholders = ",".join("?" for _ in target_ids)
         updated = conn.execute(
             f"UPDATE shm_watch SET max_price=? "
-            f"WHERE source=? AND skin_id IN ({placeholders}) "
+            f"WHERE source IN ({_SHOP_MARKS}) AND skin_id IN ({placeholders}) "
             "AND COALESCE(max_price, -1) != ?",
-            (max_price, PAID_PACK_SOURCE, *sorted(target_ids), max_price),
+            (max_price, *SHOP_SOURCES, *sorted(target_ids), max_price),
         ).rowcount
 
     for row in targets:
         if row["owned"]:
-            conn.execute("""
+            # Owning one closes the standing order again — unless the operator
+            # armed it for a further copy, which is a deliberate "buy another
+            # of this rare one" that a routine sync must not quietly undo.
+            conn.execute(f"""
                 UPDATE shm_watch SET bought=want, active=0, armed=0
-                 WHERE skin_id=? AND source IN (?, ?)
-            """, (row["skin_id"], PAID_PACK_SOURCE, CHALLENGE_SOURCE))
+                 WHERE skin_id=? AND source IN ({_AUTO_MARKS})
+                   AND NOT (armed=1 AND want > bought)
+            """, (row["skin_id"], *sorted(AUTO_SOURCES)))
     managed = conn.execute(
-        "SELECT skin_id FROM shm_watch WHERE source IN (?, ?) AND active=1",
-        tuple(AUTO_SOURCES),
+        f"SELECT skin_id FROM shm_watch WHERE source IN ({_AUTO_MARKS}) "
+        "AND active=1",
+        tuple(sorted(AUTO_SOURCES)),
     ).fetchall()
     disabled = 0
     for row in managed:
         if int(row["skin_id"]) not in target_ids:
+            # Same exemption: an offer leaving the shop does not retire a watch
+            # the operator has armed for a copy it has not taken yet.
             disabled += conn.execute(
-                "UPDATE shm_watch SET active=0, armed=0 WHERE skin_id=? "
-                "AND source IN (?, ?)",
-                (row["skin_id"], PAID_PACK_SOURCE, CHALLENGE_SOURCE),
+                f"UPDATE shm_watch SET active=0, armed=0 WHERE skin_id=? "
+                f"AND source IN ({_AUTO_MARKS}) "
+                f"AND NOT (armed=1 AND want > bought)",
+                (row["skin_id"], *sorted(AUTO_SOURCES)),
             ).rowcount
     conn.commit()
     return {"targets": len(targets), "added": added, "updated": updated,
@@ -655,10 +718,12 @@ def buy(client: AMClient, conn, cand: Candidate, dry_run: bool = True,
         else:
             result["ok"] = True
         if result.get("ok"):
-            # Re-read rather than trust the POST: a buy-now that raced another
-            # buyer still answers, and the auction itself is the only witness.
+            # Verify against our own bidding list, not auction/{id}: a won
+            # auction is removed, so re-reading it answers "This auction does
+            # not exist" and confirmation could never succeed.
             try:
-                after = client.auction(cand.auction_id)
+                after = next((a for a in client.my_bidding()["auctions"]
+                              if a["id"] == cand.auction_id), None) or {}
                 winner = str(((after.get("winner") or {}).get("id") or ""))
                 confirmed = 1 if (after.get("isPurchased")
                                   and winner == str(client.s.player_id)) else 0
@@ -673,11 +738,14 @@ def buy(client: AMClient, conn, cand: Candidate, dry_run: bool = True,
         INSERT INTO shm_buys (auction_id, skin_id, model_id, skin_name,
                               bin_price, est_cost, fee_pct, dry_run,
                               confirmed, note)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (cand.auction_id, cand.watch.skin_id, cand.watch.model_id,
+        SELECT ?,?,?,?,?,?,?,?,?,?
+         WHERE ? = 0 OR NOT EXISTS (SELECT 1 FROM shm_buys b
+                                     WHERE b.auction_id = ? AND b.dry_run = 1)
+    """, (*(cand.auction_id, cand.watch.skin_id, cand.watch.model_id,
           cand.skin_name, cand.bin_price, cand.est_cost,
           round(cand.est_cost / cand.bin_price * 100 - 100, 2) if cand.bin_price else 0,
-          1 if dry_run else 0, confirmed, note or None))
+          1 if dry_run else 0, confirmed, note or None),
+          1 if dry_run else 0, cand.auction_id))
     if not dry_run and result.get("ok") and confirmed != 0:
         conn.execute("UPDATE shm_watch SET bought = bought + 1, "
                      "active = CASE WHEN bought + 1 >= want THEN 0 ELSE 1 END "

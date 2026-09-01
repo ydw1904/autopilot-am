@@ -10,23 +10,32 @@ you learn something durable about this codebase, edit *this* file.
 ## Project Overview
 
 Agent control plane for the browser game [Airlines Manager](https://www.airlines-manager.com):
-an **MCP server exposing 42 tools** over a live, logged-in game session, plus the
+an **MCP server exposing 45 tools** over a live, logged-in game session, plus the
 optimization engine and browser-automation layer it drives. Goal: maximize weekly
 revenue by selecting circuits (route sets), seat configs, schedules, and prices.
 
-Two API surfaces, one server: 25 **web/CDP** tools drive the browser game; 12
-**mobile** tools (`mobile_*`, `shm_*`) hit the mobile app's JSON API for features
-the browser lacks — the second-hand aircraft market and daily login rewards. The
-mobile tools authenticate with the mobile access_token, not the web session, and
-are otherwise independent of CDP (see "Mobile API surface" below).
+Two API surfaces, one server. The mobile app's JSON API covers features the
+browser lacks (the second-hand aircraft market, daily login rewards) **and**
+most of what the CDP tools scrape — hubs, routes, per-route pricing and demand,
+fleet, seat config, schedules (read). Where both exist the mobile path is
+primary and CDP is the fallback, because the JSON is structured, needs no
+browser, and reports refusals as errors instead of silent no-ops. The mobile
+tools authenticate with the mobile access_token, not the web session (see
+"Mobile API surface" below).
+
+**Still CDP-only:** buying routes and aircraft through the web flow, the
+demand refresh, and the raw-ideal pricing mode. (Flight schedules moved to the
+mobile API on 2026-08-27.) Each of those is written up with what has already been
+tried in [`tickets/013-mobile-api-remaining-gaps.md`](tickets/013-mobile-api-remaining-gaps.md)
+— read it before attacking any of them, especially the schedule writes.
 
 **Language:** Python 3.10+. Browser automation via Chrome DevTools Protocol (CDP,
 primary) with an optional OpenClaw backend in `scraping/`. The circuit beam search
 has a hot path in native **C++** (`code/native/beam_search.cpp`) behind a ctypes
-wrapper. The two UI surfaces are **NiceGUI** and a React/Vite browser app served by
-FastAPI. Python deps are declared with minimum versions in
+wrapper. The UI is a React/Vite browser app served by FastAPI. Python deps are
+declared with minimum versions in
 `code/requirements.txt` (`mcp`, `httpx`, `websocket-client`, `numpy`,
-`colorama`, `fastapi`, `uvicorn`, `nicegui`; `pytest` for the test suite).
+`colorama`, `fastapi`, `uvicorn`; `pytest` for the test suite).
 
 **Pure logic has a test suite:** `.venv/bin/python -m pytest code/tests/ -q`
 (offline, no Chrome, ~1s). It covers the pricing/flight-time formulas, the
@@ -34,7 +43,7 @@ schedule builder, and `db.py`. Anything that touches CDP is still verified
 manually by running scripts with `--dry-run` / `--phase1-only`, and by booting
 the MCP server (see [Verification](#verification)).
 
-## Four surfaces, one core
+## Three surfaces, one core
 
 Everything funnels through two shared layers — touch these and you touch everything:
 
@@ -46,7 +55,7 @@ Everything funnels through two shared layers — touch these and you touch every
 
 The three surfaces on top:
 
-1. **MCP server** (`code/mcp_server.py`) — 42 typed tools; the agent-facing control
+1. **MCP server** (`code/mcp_server.py`) — 45 typed tools; the agent-facing control
    plane. Live-state tools call CDP directly; heavier ops shell out to the CLI scripts;
    the mobile tools call the mobile HTTP API via `mobile_api.py`.
    **Mutating tools default to `dry_run=True`.**
@@ -56,9 +65,7 @@ The three surfaces on top:
    `masstool`) take `--json`: stdout carries exactly one JSON document and the
    human report moves to stderr, so the server parses a result instead of
    scraping ASCII tables. Without the flag the human report is unchanged.
-3. **NiceGUI** (`code/gui_app.py` + `code/gui/`) — a desktop control panel over the
-   same CLI/core code.
-4. **Browser app** (`code/api_server.py` + `web/src/`) — a React/TypeScript UI
+3. **Browser app** (`code/api_server.py` + `web/src/`) — a React/TypeScript UI
    compiled by Vite and served under `/app/` alongside the REST API. `run_web.sh`
    installs dependencies when needed, builds the frontend, then starts FastAPI.
    For development, `run_dev.sh` serves Vite on port 3000 with hot reload and
@@ -76,7 +83,7 @@ airlines-manager/
 ├── AGENTS.md / README.md / MCP_SETUP.md / CHANGELOG.md
 ├── .mcp.json                       ← Claude Code MCP registration
 └── code/
-    ├── mcp_server.py               ← MCP server: 42 tools (25 web/CDP + 17 mobile)
+    ├── mcp_server.py               ← MCP server: 45 tools (25 web/CDP + 20 mobile)
     ├── cdp.py                      ← shared CDP client  ← SHARED LAYER
     ├── db.py                       ← shared SQLite layer ← SHARED LAYER
     ├── circuit_planner.py          ← PRIMARY: Phase 1 + Phase 2 optimization
@@ -85,8 +92,8 @@ airlines-manager/
     │
     ├── circuit_route_buyer.py      ← buy routes (CDP, country-listing flow)
     ├── aircraft_buyer.py           ← buy aircraft (CDP); reads circuit config from DB
-    ├── circuit_scheduler.py        ← schedule flights for a circuit's aircraft (CDP)
-    ├── auto_pricer.py              ← set corrected ideal prices in bulk (CDP)
+    ├── circuit_scheduler.py        ← schedule a circuit's aircraft (mobile, CDP fallback)
+    ├── auto_pricer.py              ← set corrected ideal prices in bulk (CDP, fallback)
     │
     ├── aircraft_numberer.py        ← assign canonical <HUB>-C<NNN>-<MMM> names
     ├── aircraft_reconfigurator.py  ← align aircraft hub/seat config to circuit plan
@@ -95,13 +102,15 @@ airlines-manager/
     ├── mass_unscheduler.py         ← clear schedules for aircraft by prefix
     │
     ├── warehouse_sync.py           ← scrape fleet → DB `fleet` table
-    ├── masstool.py                 ← live route prices/remaining demand via pricingAjax
+    ├── masstool.py                 ← live route prices/remaining demand (mobile, CDP fallback)
     ├── scrape_line_ids.py          ← line_ids from /network/planning → DB
     ├── scrape_audit_line_ids.py    ← line_ids from /marketing/internalaudit → DB
     ├── scrape_internal_audits.py   ← refresh owned-route demand via /marketing/pricing
     │
     ├── mobile_api.py               ← MOBILE app JSON API client (httpx, access_token)
     ├── mobile_store.py             ← reference store for mobile ids (mobile_* tables)
+    ├── mobile_pricer.py            ← PRIMARY pricer: auto_pricer over the mobile API
+    ├── mobile_renamer.py           ← PRIMARY renamer: mass_renamer over the mobile API
     ├── mobile_reconfigurator.py    ← aircraft_reconfigurator over the mobile API
     ├── mobile_login.py             ← press OK/Login over adb when the session dies
     ├── booster_sync.py             ← booster drop tables + livery names/artwork → DB
@@ -109,12 +118,15 @@ airlines-manager/
     ├── purchase_date_sync.py       ← paced per-aircraft purchase-date backfill → DB
     ├── shm_watcher.py              ← watch the SHM for named liveries, buy on sight
     │
-    ├── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
-    └── gui/                        ← NiceGUI pages (fleet, liveries, planner, hub, library, mass,
-                                       warehouse, scraper, log) + state/workers/theme
+    └── scraping/                   ← demand-scrape core + CDP/OpenClaw backends
 ├── web/src/                         ← React browser UI; Vite output is web/dist/
 │   ├── components/MenuSelect.tsx ← the ONE dropdown; never use a native <select>
-│   └── components/TagPicker.tsx  ← tag combobox: free text + preset/known tags
+│   ├── components/TagPicker.tsx  ← tag combobox: free text + preset/known tags
+│   ├── components/Hangar.tsx     ← one aircraft, every write: name/hub/livery/
+│   │                                seats/market/scrap (mobile API)
+│   ├── components/Network.tsx    ← circuits + their routes + hub coverage (cache)
+│   ├── components/Pricing.tsx    ← live price vs the audit's recommendation
+│   └── components/Ops.tsx        ← delivery queue, dailies, cache freshness
 ```
 
 Generated state is **not** committed: the SQLite DB (`db/*.db`) and the `data/`
@@ -173,7 +185,13 @@ Modes: `ideal` (corrected, default), `percent --pct N`, `raw-ideal` (uncorrected
 
 ### `circuit_scheduler.py` — flight scheduler
 Reads circuit config from DB, resolves game ids for aircraft + routes, submits
-schedules via the planning AJAX API. Exposes `get_lines_at_hub()` (reused by MCP).
+schedules. Mobile-primary: `_mobile_hub_view()` reads the hub's aircraft and
+lines in two requests (`hub/masstool/{id}` + the fleet listing) and
+`clear_schedule` / `submit_flights` take either an `AMClient` or a CDP handle —
+so with a mobile session on disk the whole run needs no browser. Without one it
+falls back to the planning page and the `/network/planning/0/ajax` POST. On the
+mobile path `util` is only 0 or 100 (idle vs flying), which is all `--only-new`
+needs. Exposes `get_lines_at_hub()` (reused by MCP).
 
 ### Mobile API surface (`mobile_api.py`, `mobile_store.py`)
 The mobile app exposes a JSON API the browser game does **not**: the second-hand
@@ -215,6 +233,12 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   `shop_skins/model_skins/skin_catalog` (liveries), `reconfigure/assign_hub`
   (fleet config), `shop_offers/claim_offer` + `wheel_*` + `slot_*` (daily).
   No request signing.
+- **`sell_for_scrap()` is the one UNVERIFIED write.** `aircraft/sellOrStopRent`
+  is read off the APK metadata; the body was never captured, so `aircraftId` is
+  an educated guess and a wrong guess is simply refused (`status: 0`). That is
+  why it takes one id, has no batch form and no apply-to-all flag — an
+  unverified irreversible write must not be able to cascade. Capture a real
+  scrap before trusting it (ticket 013).
 - **Quirks baked in:** fleet paging is **1-based** (page 0 aliases page 1);
   empty POSTs (slot spins, put_up) need a zero-length form body or the server 204s;
   slot spins faster than the ~10s reel cooldown 204 but still burn a game (never
@@ -227,6 +251,20 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   (raw value) so a one-bid auction can't close under cost. Never
   `minAuctionSellPrice` — on a 747SP it's $88M against a $160M mint. Full table
   in `tools/mobile-capture/market_usage.md`.
+- **Repaint a mint before listing it — the livery IS the ceiling.** A fresh
+  747SP wears the manufacturer livery and caps at **$900M**; the owned Spirit
+  747SP livery (skin `4661635`) caps at **$1.209B**, +$309M per plane for free.
+  `AMClient.apply_skin` / the `apply_livery` MCP tool do it:
+  `POST shop/skin/apply` **form-encoded, snake_case** —
+  `apply_to_all="0"`, `skin_id`, `aircraft_ids[N]` one field per plane.
+  camelCase spellings are refused ("Invalid or missing parameter"); a JSON body
+  is never satisfied but names each missing field, which is how the shape was
+  recovered (2026-08-25). Owned livery ⇒ **0 AM coins** (20 planes, coins
+  unchanged). `apply_to_all="1"` would repaint the WHOLE fleet — never send it,
+  and never repaint a plane wearing an awarded challenge/event livery: those
+  cannot be re-applied. Related reads: `shop/skin/getAircraftsForId/{modelId}`
+  (your planes of that model + current skin), `shop/skin/getAircrafts/noPagination`
+  (models you own).
 - **The fee is progressive, and the official rules are written down.** Playrion's
   KB (<https://help.airlines-manager.com/knowledge-base/second-hand-market/?lang=en>)
   publishes the processing fee as `min(0.5, (BestBid / cataloguePrice) / 20)`,
@@ -242,6 +280,103 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   the auction feed, no mismatches), so one table serves both —
   `aircraft_buyer.AIRCRAFT_GAME_IDS`, keyed by canonical `aircraft_aliases` names.
   Re-read it off `/aircraft/buy/new/{haul}` if the game renumbers.
+- **Network, pricing and planning ride the same API, and the endpoints were
+  recovered from the APK's il2cpp metadata** (`strings` over
+  `assets/bin/Data/Managed/Metadata/global-metadata.dat` — the whole endpoint
+  table is one long literal run in there). What is verified live:
+  - `bfa/hub` — every hub in one call. Hub ids are the SAME id space as the
+    web (`player_hubs.hub_id`), but the payload names airports by internal id,
+    not IATA, so the IATA still comes from the DB.
+  - `bfa/route` — every owned line across all hubs in one call. Replaces the
+    `scrape_line_ids` / `scrape_audit_line_ids` DOM walks outright.
+  - `hub/{hubId}/lines/pricing?page=N` — the masstool replacement, and the
+    single most useful endpoint here: per route it carries `price`, `demand`,
+    `carriedPax`, `remainingDemand`, `lockedUntil` (the 24h price cooldown)
+    and the full `audit` (recommended price, peak demand, reliability).
+    **The audit's recommended price is already corrected** — `bus` equals
+    `floor(eco*1.33)` and `first` equals `floor(eco*2.3)`, the very values
+    `auto_pricer` has to derive because the web page displays them wrong. So
+    the mobile pricer aims at `audit.price` directly.
+  - `line/price` — sets one line's four prices (`lineId`, `priceEco`,
+    `priceBus`, `priceFirst`, `priceCargo`) and answers
+    `line.updatePrice.success`. This is the big win over the web surface,
+    where **every** scripted POST to `/marketing/pricing/<id>` answers 204 and
+    discards the change, forcing the AM+ masstool endpoint or a real mouse
+    click in a focused window.
+  - `line/price/simulation` — free pax simulation, same parameter names.
+  - `line/{id}`, `line/{id}/demand` — one line's audit profile, and remaining
+    demand per day of week.
+  - `audit/external/new/{destAirportId}/{hubId}` (POST) — demand for a route
+    the airline does NOT own, which is the whole point of the old
+    `/network/newline` country sweep. Answers `audit.demand` +
+    `audit.price` + `tax` in the same `eco/bus/first/cargo` shape as the
+    owned-line audit. **It spends cash, not `freeAudits` coupons.** Verified
+    2026-08-28: JNB-AAA cost $388,638, and 274 MPM audits cost $102,780,316;
+    coupons stayed at 3621. `mobile_route_auditor.py` drives the demand into
+    `routes.{eco,bus,fir,cargo}_demand` and requires `--allow-paid` in addition
+    to `--apply`.
+  - `bfa/world` — the game's own airport list, and the authoritative candidate
+    list for `routes` (the old HTML sweep was missing 879 of CGK's 2665).
+    An airport's country is **`cty`**; `ty` is the REGION, an id `countryList`
+    does not carry for big countries (LAX 229 = California, PEK 276, HKG 280 —
+    557 airports). Great-circle distance with a radius of **6372.46 km**
+    reproduces the game's own route distance to within 1 km (fitted on 10,953
+    known routes; 6371 is ~2 km short over a 10,000 km leg).
+  - `hub/masstool/{hubId}` — inactive lines and unassigned aircraft.
+  - `planning/{ignored}/{page}` — the weekly planning, 30 aircraft per page,
+    fleet-wide. The first path segment is ignored (it is not a hub or aircraft
+    filter, despite looking like one), and `planning/lines` ignores `?page`.
+  - `aircraft/{id}/flights/{day}/{page}` — one aircraft's flights for a
+    0-based day, without paging the whole fleet.
+- **Unpurchased-route audits use `bfa/world` plus
+  `audit/external/new/{destinationAirportId}/{originHubId}`.** The world
+  catalogue and its airport ids are verified live. The POST path and argument
+  order are recovered from `AuditCalls.ExternalNewRoute` in the APK.
+  `mobile_route_auditor.py` maps missing-demand, unowned rows already in
+  `routes`, commits each returned demand immediately, and previews by default
+  because the POST spends cash. A paid audit is never retried automatically
+  after a transport error because the server may already have charged it.
+  MCP exposes it as `audit_unpurchased_routes` with `dry_run=True` and
+  `allow_paid=False` by default.
+- **Schedule WRITES work (2026-08-27), and the id goes in the PATH.** What
+  made this look impossible was hunting a *bulk* endpoint; the app writes one
+  flight per call and the aircraft id is a path segment, not a form field:
+  - `POST planning/add/{aircraftId}` + form `lineId`, `takeOffTime` →
+    `network.addPlanning.success`. `planning/add/` **without** the id is a 404
+    (error 99), which is why the earlier probes read as dead ends.
+  - `GET planning/delete/{aircraftId}` → "The planning of the aircraft is now
+    deleted". A **GET that writes**: POST, PUT and DELETE all answer 405.
+  - `GET planning/lines/{aircraftId}` → that one aircraft's plannings
+    (`{id, lineId, takeOffTime, duration, dayKey}`), without paging the fleet.
+  `takeOffTime` is seconds since Monday 00:00 on the 15-minute grid — the same
+  value the web planning API takes. `AMClient.add_flight` / `clear_planning` /
+  `aircraft_planning` wrap them; `circuit_scheduler.py` is now mobile-primary
+  with the CDP path as fallback, chosen before anything is written.
+  **`planning/setMany` is still refused** and is not needed: every body shape
+  fails with `Invalid schedule` (errorCode 803), including the exact DTO the
+  APK describes (`{aircrafts:[{id, routes:[{id, tots:[…]}]}]}`) as a JSON body,
+  as `planning=`/`aircrafts=`/`planningData=` form fields, and as bracketed
+  form keys. Note `GET planning/setMany` falls through to the planning *read*
+  route and answers "Daily planning successfully generated" — that is a read,
+  not a write, so don't mistake it for success.
+- **The APK's il2cpp metadata gives you DTOs, not just endpoint strings.**
+  `global-metadata.dat` (v31) holds the type/field/method/parameter tables in
+  the clear; parsing them beats grepping `strings`, which returns one giant
+  alphabetised run. The header at offset 8 is 31 (offset,size) pairs; the ones
+  that matter are 2=identifier strings, 5=methods (36 B each), 10=parameters
+  (12 B), 11=fields (12 B), 19=typeDefinitions (88 B: 16 int32, then 8 uint16
+  counts). That is how `Api.PlanningCalls.AddPlanning(aircraftID, takeOffTime,
+  lineID)` and `Api.AircraftCalls.SellOrStopRent(aircraftId)` were read off —
+  the parameter names ARE the form field names on this API.
+- **Every request in the process is paced** (`mobile_api.PACER`): a
+  `MIN_REQUEST_GAP` of 0.7s with ±45% jitter so the cadence is not a
+  metronome, plus a rolling `MAX_REQUESTS_PER_MINUTE` ceiling of 45. It is
+  process-wide and lock-guarded, so a thread pool, two tools at once or a
+  runaway loop cannot burst — the failure mode that would make automated
+  traffic obvious. `AMClient(min_delay=…)` is a per-client floor **on top** of
+  it, not a replacement. Two processes (MCP server + `shm_watcher`) still pace
+  independently.
+
 - **`mobile_store.py`** — best-effort reference store (mobile_* tables in the shared
   DB) populated as the client reads: model specs, liveries (id, name, `source`,
   creator, duty free price) and the mobile fleet. `upsert_skin` is COALESCE-based
@@ -278,6 +413,15 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   `mobile_daily_status`, `mobile_daily_bonuses`, `mobile_daily_slot`,
   `mobile_session_renew`. Mutating ones
   default `dry_run=True`. `mobile_daily_slot` is intentionally slow (~9s/spin).
+- **Web tools that now run on mobile first**, falling back to CDP only when
+  there is no session: `get_balance`, `list_hubs`, `list_routes`,
+  `get_aircraft_at_hub`, `get_masstool_data`, `auto_price_routes` (all modes
+  but `raw-ideal`), `reconfigure_circuit_aircraft`, `mass_rename_aircraft` and
+  `number_circuit_aircraft`. The backend that ran is
+  reported as `backend` in the result. For the two mutating ones the choice is
+  made **before** the script runs (`_has_mobile_session`) rather than by
+  falling back on a non-zero exit — a partial failure also exits non-zero, and
+  re-running it over CDP would apply the work twice.
 
 ### `shm_watcher.py` — standing orders for specific liveries
 Watches the second-hand market for named liveries (a booster's limited-time
@@ -295,10 +439,14 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
   database-scoped file lock prevents two continuous watchers from running at
   once.
 - **Automatic targets come from the cached shop and challenge feeds.**
-  `sync-paid-packs` retains its old name but syncs special liveries in paid
-  `template=pack`, `currency=realMoney` offers as well as challenge rewards.
-  Paid-pack targets that are missing start armed; challenge and manual targets
-  begin observing. Owned automatic entries remain visible but inactive, which
+  `sync-paid-packs` retains its old name but syncs special liveries in every
+  offer the shop charges for: `currency=realMoney` packs (`shop-pack:auto`)
+  and `currency=tc` ticket aircraft (`shop-ticket:auto`), plus special free
+  skins on the AM Gold Crew reward track (`AMGoldStep`, `shop-gold:auto`) and
+  challenge rewards. Ordinary free gifts arrive on their own. Paid-pack targets
+  that are missing start armed; ticket, Gold Crew, challenge and manual targets
+  begin observing, because they are still directly claimable or buyable and an
+  uncapped snipe rarely beats that. Owned automatic entries remain visible but inactive, which
   explains why a known paid livery is not purchasable again. The SHM tab has a
   per-watch arm toggle that applies to any active row and does not stop its
   market observation.
@@ -306,6 +454,16 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
   bid** — so it takes an armed plane only when its BIN leaves a strictly
   positive live balance. It cannot be drawn into a price war, and a listing with no buy-now
   is skipped by design.
+- **Arming a dormant watch re-opens it for one more copy.**
+  `set_watch_armed(armed=True)` also sets `active=1` and raises `want` to
+  `bought + 1` when the row was satisfied, because `active_watches` reads
+  `active=1 AND bought < want` — arming the flag alone would change nothing.
+  `sync_automatic_watches` therefore exempts `armed=1 AND want > bought` from
+  both of its shut-down passes (owned-so-close-it, and offer-pulled-so-retire-
+  it): a routine sync must not undo a deliberate "buy me another of this rare
+  one". Disarming only clears the flag; the row then reads as an ordinary
+  observing watch until a sync closes it again, which is accurate and costs
+  nothing. The SHM tab's toggle is the front end of this.
 - **Guards, in order:** per-livery `max_price` (compared to the raw `binPrice`,
   the number on the market), the day's `maxBidByDay` headroom (server's
   `countOfBidding` vs the local ledger, whichever is higher), optional
@@ -318,12 +476,37 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
   ceiling.
 - `shm_watcher.py prices` reports what each watched livery has actually been
   listed at, which is how a `--max` gets picked from data rather than guessed.
-- **The browser app has a read-only SHM tab.** `/api/shm-monitor` reads only
-  the local watcher tables and reports recent activity, standing orders,
-  watched-listing matches, model coverage and the buy decision ledger. The
-  watch table includes the cached livery PNG and ownership count. The React tab
-  refreshes that local snapshot every 15 seconds; it never polls the game API
-  and exposes no arm or purchase control.
+- **The browser app has an SHM tab.** `/api/shm-monitor` reads only the local
+  watcher tables and reports recent activity, standing orders, watched-listing
+  matches, model coverage and the buy decision ledger. The React tab refreshes
+  that local snapshot every 15 seconds and never polls the game API; the only
+  writes it can make are the per-watch arm toggle and price cap
+  (`PATCH /api/shm-monitor/watches/{skin_id}`).
+  Reading the tab (`web/src/components/ShmMonitor.tsx`, filtering and sorting in
+  `shmFilters.ts`, which carries its own `bun` self-check):
+  - Liveries are identified by name and picture, never by the numeric ids. The
+    model comes off the label prefix (`737-700 - Virgo Blue`), and that same
+    label supplies the `model_id` → model-name map the sightings and coverage
+    feeds use.
+  - The source cell names the *specific* feed under its kind chip — which
+    booster, which challenge, which pack — from `db._shm_watch_origins`, which
+    reads the same four catalog tables as `get_livery_tags` but scoped to the
+    watched skins. A ticket aircraft is listed under the livery's own name, so
+    that one shows its travel-card price instead: the number that decides
+    whether sniping the market beats just paying for it.
+  - The standing-order column mirrors `active_watches` (`active=1 AND bought <
+    want`): a dormant row is greyed and captioned **Acquired** or **Retired**.
+    It keeps its arm toggle, because arming one is a real move — the scarce
+    liveries are trade stock, and a spare trades for several ordinary ones. See
+    the re-arm rule below.
+  - The three watch counters in the summary strip are counted off the rows, not
+    read from `summary`, so arming a dormant watch cannot leave them a poll
+    behind their own list.
+  - "Cheapest seen" is toned against the row's own cap, because the watcher only
+    buys at a listing's own BIN — a cap under the cheapest listing can never
+    fire. The audit trail's guard column names that same reason per decision
+    (`over cap`, `not armed`, `dormant`), and folds the ledger's repeated
+    verdicts on one listing into a single row with a `×N` count.
 - **`daily_routine.py`** — the freebies, once a day, tasks in random order with a
   `--jitter` start delay. Tasks: `currencies`, `slots`, `donate` (the last one via
   `alliance_donator`, so that task alone needs **Chrome up and logged in** — the
@@ -335,6 +518,30 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
   09:00 Asia/Shanghai = **01:00 UTC**, just after the game's daily reset; the
   jitter spreads the real start across 01:00–01:35 UTC. Log:
   `~/.airlines_manager/daily.log`.
+- **`mobile_pricer.py`** — the mobile twin of `auto_pricer.py`, and now the
+  primary pricer (same DB, same `--hub/--circuit/--routes/--max/--mode/--pct/
+  --dry-run/--json` CLI). Reads one hub with `hub/{id}/lines/pricing`, writes
+  with `line/price`, and skips lines whose `lockedUntil` is still in the
+  future instead of spending a request to discover the cooldown. The pure
+  maths is *imported* from `auto_pricer` (`fill_prices`, `fill_revenue`,
+  `CLASS_ORDER`), not reimplemented, so both paths price identically.
+  `--mode raw-ideal` has no mobile equivalent — the mobile audit price is
+  already the corrected one — so that mode stays on `auto_pricer`.
+  **Exercised live** 2026-08-25 (LAX/SEA priced to recommendation, read back).
+
+- **`mobile_renamer.py`** — the mobile twin of `mass_renamer.py`, and now the
+  primary renamer (same `--old/--new/--limit/--strip-suffix/--dry-run` CLI and
+  the same matching rules). There is **no rename endpoint** on the mobile API:
+  `aircraft/reconfigure` carries `name` and writes it, so a rename is that call
+  with the aircraft's **current seats echoed back verbatim**. A no-op
+  reconfigure is free — verified live, balance delta $0 — which is the whole
+  reason this works; passing wrong seats would both charge money and
+  reconfigure the plane. One request per rename against the web path's two (no
+  form token to fetch first). `aircraft_numberer.py` uses the same backend
+  (`_mobile_client()` → `_apply()` closure → CDP fallback); renaming is its
+  only in-game action, so its numbering/storage logic is untouched.
+  **Exercised live** 2026-08-25 (round-trip rename of one aircraft, restored).
+
 - **`mobile_reconfigurator.py`** — the mobile twin of `aircraft_reconfigurator.py`
   (same DB, same `<HUB>-C<NNN>` convention, same `--circuit/--dry-run` CLI).
   Endpoints, captured 2026-08-04: `POST aircraft/reconfigure`
@@ -434,12 +641,15 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
     travel-card "aircraft" offers each list their contents, and unlike the
     challenge a shop item states the livery's own `skin.type`, so its class is
     read rather than inferred. This is where paid-pack liveries (Aguachica
-    Airlines, ArgentinAir Vintage, AM Gold Crew) are named.
+    Airlines, ArgentinAir Vintage) and the 12-step AM Gold Crew subscription
+    rewards are named. Gold rewards carry `AMGoldStep=1..12`; September 2026
+    has special skins at step 6 (SpaceJet-X100, `4703861`) and step 12
+    (X321XLR, `4703857`).
   - **Half of what these two feeds hand out is not a livery at all.** 21 of the
     42 aircraft-bearing offers sell a model in its factory paint (`skin.type`
     0 → `source = 'manufacturer'`), and 13 of the Copa ladder's 22 liveries are
-    stock planes; the Copilot/Captain/Commander packs and the AM Gold pack of
-    the month are plane-only. Both passes print the split (`N special, M
+    stock planes; the Copilot/Captain/Commander packs are plane-only, while
+    the paid AM Gold pack varies by month and can carry a special livery. Both passes print the split (`N special, M
     factory paint`, and `plane only` per offer) and the album filters
     manufacturer paints out, so no chip ever claims a pack sells a paint
     scheme it doesn't.
@@ -449,6 +659,12 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
     columns beside `boosters`. `booster_sync --images` fetches artwork for
     their skins too. First run added 19 liveries (24 are reachable *only*
     through these two feeds: not in any booster, not sold in the duty free).
+  - **The album is a membership test, not everything in `mobile_skins`.**
+    `get_livery_collection` keeps a livery only if the airline wears it, or a
+    booster, challenge, shop offer or the SHM watchlist still hands it out. The
+    table itself also collects every duty free listing and every livery the
+    market watcher sights — thousands of rows of other people's paint — which
+    stay for their prices and never reach the album.
   - **Tags, not a source.** `db.get_livery_tags()` turns those tables into
     `{kind, label, title}` chips per livery and the collection endpoint ships
     them as `tags[]`. A livery routinely has several — the Copa challenge
@@ -615,6 +831,99 @@ in `FleetWorkspace.tsx` patches the affected rows from the PATCH response and
 re-reads `stats` on its own for the counts. For the same reason a refetch dims
 the rows already on screen (`.is-refetching`) instead of unmounting them.
 
+### Read-only workspaces — Network / Pricing / Ops
+
+Three tabs that give the remaining CLI tools a home in the browser app. All
+three are **read-only on purpose**: the writes they front (route buying,
+scheduling, repricing, claiming) have real preconditions — 24h cooldowns,
+demand constraints, CDP-only form submits — that the CLI scripts already
+encode, and duplicating them in the UI is how the two drift apart.
+
+- **Network** (`/api/network` → `db.get_network_snapshot`) — every circuit with
+  its seats, waves bought vs scheduled, assigned aircraft and per-route
+  ownership, plus route coverage per hub. Aircraft are matched to a circuit by
+  the `<HUB>-C<NNN>-<MMM>` name `aircraft_numberer.py` writes; the `fleet`
+  table has no circuit column, so that prefix *is* the join. Clicking an
+  aircraft count opens Fleet filtered to that circuit (`preset=name:<circuit>`).
+- **Pricing** (`/api/pricing/{hub}` read, `/api/pricing/{hub}/apply` write) —
+  one `masstool.fetch_hub` call per hub (mobile, CDP fallback), showing current
+  price against the audit's already corrected recommendation, unsold demand,
+  and the 24h lock. Sorted by the eco gap because eco carries the volume.
+  The write is `mobile_pricer.price_hub` — see below.
+- **Ops** (`/api/ops`) — the delivery waiting list (with a countdown against the
+  *server* clock, not the browser's), what daily rewards are still claimable,
+  and how stale each cached table is. The two mobile sections carry their own
+  `error` field rather than failing the whole response: a dead mobile session
+  must not hide the freshness table, which is exactly what you check when the
+  session dies.
+
+Tables in these tabs use the shared `.grid-table` CSS. `.shm-table` predates it
+and keeps its own fixed column widths.
+
+#### The pricing apply flow
+
+`POST /api/pricing/{hub}/apply` is a thin wrapper over `mobile_pricer.price_hub`
+— same modes (`ideal` / `percent` / `fill`), same document, same per-route
+`status` (`dry-run` / `skipped` / `cooldown` / `ok` / `fail`). Two guards exist
+only on the endpoint, because a stray POST is far easier to make than a stray
+shell command:
+
+- **`pct` is clamped to 25-200%.** A fat-fingered multiplier would not merely
+  misprice the hub, it would burn every route's 24h cooldown getting there.
+- **A live write (`dry_run=False`) must name its routes.** "Reprice the whole
+  hub" is therefore reachable only as a preview. The CLI keeps the unrestricted
+  path; the UI does not need it.
+
+The tab enforces preview-then-apply on top of that: the Apply button sends
+exactly the IATAs the dry run reported as `dry-run`, never the scope, so a
+write can only touch rows the operator actually saw. Changing hub, mode, `pct`,
+or scope discards the open plan rather than leaving an "apply 98 changes"
+button pointed at numbers nobody read. Applying takes two clicks (Apply →
+Confirm), the same weight the Hangar gives its destructive writes.
+
+### Hangar (browser UI) — `web/src/components/Hangar.tsx`
+
+The single-aircraft workbench: pick a plane on the left, and every write the
+mobile API can make against it sits on the right — rename, hub, livery, seats,
+market listing, scrap. It is deliberately **one aircraft at a time**; bulk
+renames and tags stay in Fleet Operations, and bulk market listings stay in
+`shm_sell_batch`, which already respects the 10-listing cap.
+
+The picker on the left is a *finder*, not a second fleet browser: it reads one
+page (`PICKER_LIMIT`, 60) and prints "Showing 60 of N" whenever the hub or
+search holds more, so the cap is never mistaken for the hub's real size. Its
+card owns the sticky height budget (`max-height: calc(100vh - 128px)`) and the
+list fills what is left — capping the *list* at a `vh` fraction instead ignores
+the controls above it and pushes the card's bottom edge below the fold, where
+`position: sticky` makes it unreachable.
+
+Backend: `/api/hangar/{id}` (+ `/liveries`, `/schedule`, and one POST per
+action) in `api_server.py`. All of them go through `_hangar_call`, which builds
+the mobile client and maps a refused write to an HTTP error, so a failure
+reaches the operator as text instead of a silent no-op. There is no CDP
+fallback here by design — the whole point is that these endpoints answer
+`status: 0` on refusal.
+
+Three rules the endpoints enforce, not the UI (the UI only warns first):
+
+- **A rename echoes the current seat map back**, which is what keeps it free.
+  The seats are re-read from the profile per call; never take them from a
+  cached row.
+- **Repainting over a non-manufacturer livery needs `confirm_overwrite`.** An
+  awarded challenge or event livery cannot be re-applied once painted over.
+- **Scrapping needs the aircraft's name typed back** in `confirm_name`, and it
+  drops the cached `fleet` row on success. The underlying write is the
+  unverified one (see the mobile API surface above).
+
+Clearing a schedule is the one hangar action still on CDP — the mobile planning
+write payload has never been captured (ticket 013, gap 1) — so it returns 503
+with that explanation when Chrome is not linked, rather than pretending the
+mobile path exists.
+
+Every successful write re-reads the profile and patches the cached `fleet` row
+(`_sync_fleet_row`), so a rename or hub move shows up in Fleet Operations
+without a full sync.
+
 ## Verification
 
 Pure logic is covered by pytest; everything that touches CDP or the live game is
@@ -633,7 +942,7 @@ python3 code/circuit_planner.py --hub HKG --aircraft B742 --circuits 2   # full 
 
 # MCP server boots and registers all tools
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
-  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 42 tools
+  print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"   # -> 45 tools
 
 # Mobile API surface (needs a valid ~/.airlines_manager/session.json)
 .venv/bin/python -c "import sys; sys.path.insert(0,'code'); import mcp_server; \

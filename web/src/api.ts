@@ -4,8 +4,16 @@ import {
   FleetAircraft,
   FleetPage,
   FleetStats,
+  HangarAircraft,
+  HangarFlight,
+  HangarLiveryOption,
   HaulTab,
   LiveryItem,
+  NetworkSnapshot,
+  OpsSnapshot,
+  PricingMode,
+  PricingPlan,
+  PricingSnapshot,
   ShmMonitorSnapshot,
 } from "./types";
 
@@ -78,6 +86,12 @@ export async function fetchFleet(params: FleetParams = {}): Promise<FleetAircraf
 
   const res = await fetch(`${BASE_URL}/api/fleet?${q.toString()}`);
   if (!res.ok) throw new Error("Failed to load fleet aircraft");
+  return res.json();
+}
+
+export async function fetchFleetNameSuggestions(prefix: string): Promise<string[]> {
+  const res = await fetch(`${BASE_URL}/api/fleet-name-suggestions?prefix=${encodeURIComponent(prefix)}`);
+  if (!res.ok) throw new Error("Failed to load aircraft name suggestions");
   return res.json();
 }
 
@@ -283,6 +297,126 @@ export async function assignToCircuit(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || "Assign circuit failed");
+  }
+  return res.json();
+}
+
+// ── Hangar: one aircraft, every write the mobile API can make against it ────
+
+async function hangarPost<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE_URL}/api/hangar/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Hangar action failed");
+  }
+  return res.json();
+}
+
+async function hangarGet<T>(path: string, what: string): Promise<T> {
+  const res = await fetch(`${BASE_URL}/api/hangar/${path}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to load ${what}`);
+  }
+  return res.json();
+}
+
+export function fetchHangarAircraft(aircraftId: number): Promise<HangarAircraft> {
+  return hangarGet(`${aircraftId}`, "the aircraft");
+}
+
+export function fetchHangarLiveries(aircraftId: number): Promise<{
+  aircraft_id: number;
+  current: { id: number | null; name: string | null };
+  liveries: HangarLiveryOption[];
+}> {
+  return hangarGet(`${aircraftId}/liveries`, "the livery options");
+}
+
+export function fetchHangarSchedule(aircraftId: number, day: number): Promise<{
+  aircraft_id: number;
+  day: number;
+  flights: HangarFlight[];
+}> {
+  return hangarGet(`${aircraftId}/schedule?day=${day}`, "the schedule");
+}
+
+export function renameHangarAircraft(aircraftId: number, name: string): Promise<HangarAircraft> {
+  return hangarPost(`${aircraftId}/name`, { name });
+}
+
+export function reconfigureHangarAircraft(
+  aircraftId: number,
+  seats: { eco: number; bus: number; first: number; payload: number },
+): Promise<HangarAircraft> {
+  return hangarPost(`${aircraftId}/seats`, seats);
+}
+
+export function moveHangarAircraft(aircraftId: number, hubIata: string): Promise<HangarAircraft> {
+  return hangarPost(`${aircraftId}/hub`, { hub_iata: hubIata });
+}
+
+export function paintHangarAircraft(
+  aircraftId: number,
+  skinId: number,
+  confirmOverwrite = false,
+): Promise<HangarAircraft> {
+  return hangarPost(`${aircraftId}/livery`, { skin_id: skinId, confirm_overwrite: confirmOverwrite });
+}
+
+export function listHangarAircraft(
+  aircraftId: number,
+  sale: { bin_price: number; price?: number; duration?: number },
+): Promise<{ auction_id: number; bin_price: number; fair_value: number; time_left_s: number }> {
+  return hangarPost(`${aircraftId}/sell`, sale);
+}
+
+export function scrapHangarAircraft(
+  aircraftId: number,
+  confirmName: string,
+): Promise<{ aircraft_id: number; name: string; scrapped_for: number | null; message: string }> {
+  return hangarPost(`${aircraftId}/scrap`, { confirm_name: confirmName });
+}
+
+export function unscheduleHangarAircraft(aircraftId: number): Promise<{ cleared: boolean }> {
+  return hangarPost(`${aircraftId}/unschedule`);
+}
+
+export async function fetchNetwork(): Promise<NetworkSnapshot> {
+  const res = await fetch(`${BASE_URL}/api/network`);
+  if (!res.ok) throw new Error("Failed to load the circuit network");
+  return res.json();
+}
+
+export async function fetchPricing(hub: string, backend?: "mobile" | "cdp"): Promise<PricingSnapshot> {
+  const query = backend ? `?backend=${backend}` : "";
+  const res = await fetch(`${BASE_URL}/api/pricing/${encodeURIComponent(hub)}${query}`);
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || "Failed to load live prices");
+  return res.json();
+}
+
+export async function fetchOps(): Promise<OpsSnapshot> {
+  const res = await fetch(`${BASE_URL}/api/ops`);
+  if (!res.ok) throw new Error("Failed to load operations status");
+  return res.json();
+}
+
+export async function applyPricing(
+  hub: string,
+  body: { mode: PricingMode; pct?: number; routes?: string[]; circuit?: string; dry_run: boolean },
+): Promise<PricingPlan> {
+  const res = await fetch(`${BASE_URL}/api/pricing/${encodeURIComponent(hub)}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => null))?.detail;
+    throw new Error(typeof detail === "string" ? detail : "Pricing run failed");
   }
   return res.json();
 }

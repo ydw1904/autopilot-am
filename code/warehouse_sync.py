@@ -12,7 +12,7 @@ Usage:
 Requirements: Chrome running with --remote-debugging-port=9222 --remote-allow-origins=*
 """
 
-import argparse, os, sys, time
+import argparse, os, sys
 
 from colorama import init, Fore, Style
 

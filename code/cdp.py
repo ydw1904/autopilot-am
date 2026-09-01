@@ -196,12 +196,21 @@ def wait_for_js(cdp, expression, timeout=15.0, interval=0.5):
 
 
 def get_am_tab():
-    """Find an existing Airlines Manager tab via the CDP HTTP endpoint."""
+    """Find an existing Airlines Manager tab via the CDP HTTP endpoint.
+
+    Chrome not running with the debug port open is the ordinary case, not an
+    error: it answers None, like a Chrome with no AM tab. Callers all branch on
+    a falsy tab already, and a raised ConnectError here used to escape past
+    those guards as a 500.
+    """
     # trust_env=False prevents httpx from routing localhost through any
     # configured HTTP/SOCKS proxy (e.g. Clash).
     with httpx.Client(timeout=10, trust_env=False) as client:
-        resp = client.get(f"{CDP_URL}/json")
-        resp.raise_for_status()
+        try:
+            resp = client.get(f"{CDP_URL}/json")
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            return None
         for tab in resp.json():
             if "airlines-manager.com" in tab.get("url", ""):
                 return tab

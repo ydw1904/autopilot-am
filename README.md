@@ -11,7 +11,7 @@ can reason in natural language — *"find the best 5 circuits out of HKG, buy th
 routes, schedule the planes, price every seat"* — and the server executes it against
 a live, logged-in game session.
 
-The interesting engineering is not the game. It's the **harness**: 42 typed tools
+The interesting engineering is not the game. It's the **harness**: 45 typed tools
 over a real, hostile web app (CSRF tokens, jQuery handlers, silent server-side
 rejections), with safety boundaries baked in so an autonomous agent can run the
 loop without breaking things.
@@ -68,7 +68,7 @@ code/launch_chrome.sh
 # 3. Verify the server boots and registers its tools
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
   print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"
-# -> 42 tools
+# -> 45 tools
 ```
 
 `.mcp.json` at the repo root already declares the server for Claude Code. Once Chrome
@@ -100,7 +100,7 @@ They start at login, restart after a crash, and write logs under
 `~/.airlines_manager/`. The watcher keeps its normal request pacing and
 single-instance database lock.
 
-### The 42 tools
+### The 45 tools
 
 Mutating tools default to `dry_run=True`. Two API surfaces: **web/CDP** (the browser
 game) and **mobile** (`mobile_*` / `shm_*`, the mobile app's JSON API for the
@@ -131,7 +131,7 @@ airlines-manager/
 ├── CHANGELOG.md         ← project evolution
 ├── .mcp.json            ← Claude Code MCP registration
 └── code/
-    ├── mcp_server.py            ← MCP server: 42 tools (the control plane)
+    ├── mcp_server.py            ← MCP server: 45 tools (the control plane)
     ├── cdp.py                   ← shared Chrome DevTools Protocol layer
     ├── db.py                    ← shared SQLite access layer
     ├── circuit_planner.py       ← primary optimizer (Phase 1 + Phase 2)
@@ -143,7 +143,6 @@ airlines-manager/
     ├── auto_pricer.py           ← per-route seat pricing
     ├── aircraft_numberer.py / aircraft_reconfigurator.py / mass_*.py  ← fleet ops
     ├── warehouse_sync.py / masstool.py / scrape_*.py  ← data sync
-    ├── gui_app.py + gui/        ← NiceGUI desktop control panel
     └── api_server.py            ← FastAPI server for the browser app and REST API
 ├── web/src/                     ← React/TypeScript browser app (Vite build)
 ```
@@ -265,8 +264,7 @@ Populated by the `scrape_*` / `warehouse_sync` / audit tools against a live sess
 ## Dependencies
 
 Python 3.10+. Pinned in [`code/requirements.txt`](code/requirements.txt):
-`mcp`, `httpx`, `websocket-client`, `numpy`, `colorama`, `fastapi`, `uvicorn`, and
-`nicegui` (legacy GUI only).
+`mcp`, `httpx`, `websocket-client`, `numpy`, `colorama`, `fastapi`, and `uvicorn`.
 The native beam search needs a C++ compiler (`code/native/build.sh`).
 
 ---

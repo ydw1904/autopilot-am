@@ -41,7 +41,7 @@ from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, js_args, BASE_URL  # noqa: E402
-from db import get_dest_country, get_player_hub_id, mark_route_owned  # noqa: E402
+from db import get_db, get_dest_country, get_player_hub_id, mark_route_owned  # noqa: E402
 from planning_page import (  # noqa: E402
     wait_for_js as _wait_for_js,
     wait_for_hub_buttons as _wait_for_hub_buttons,
@@ -57,7 +57,9 @@ from aircraft_aliases import (  # noqa: E402
 from circuit_route_buyer import (  # noqa: E402
     wait_for_listing, find_country_card, finalize_purchase,
 )
-from circuit_scheduler import clear_schedule, submit_flights  # noqa: E402
+from circuit_scheduler import (  # noqa: E402
+    clear_schedule, submit_flights, _mobile_client as _planning_client,
+)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -161,6 +163,20 @@ def _run_python_script(
     return result
 
 
+def _has_mobile_session() -> bool:
+    """True when a mobile token is on disk, so the mobile path can be primary.
+
+    Checked BEFORE running a mutating script rather than falling back after a
+    non-zero exit: a partial failure exits non-zero too, and re-running the
+    same work over CDP would apply it twice.
+    """
+    try:
+        from mobile_api import AMSession
+        return bool(AMSession.load().access_token)
+    except Exception:
+        return False
+
+
 def _lookup_player_hub_id(hub_iata: str) -> Optional[str]:
     """Resolve hub_iata -> player hub_id from the local SQLite DB."""
     hub_id = get_player_hub_id(hub_iata) if hub_iata else None
@@ -204,10 +220,7 @@ def _get_cdp():
         except Exception:
             _cdp = None
 
-    try:
-        am_tab = get_am_tab()
-    except Exception:
-        return None  # Chrome down / debugging port unreachable
+    am_tab = get_am_tab()  # None when Chrome is down or has no AM tab
     if not am_tab:
         return None
 
@@ -272,14 +285,19 @@ def get_balance() -> dict:
     Returns:
         dict with 'balance' (int, dollars), 'error' if failed.
     """
+    res = _mobile_call(lambda cl: {"ok": True, **cl.resources()}, store=False)
+    if res.get("ok") and res.get("dollar") is not None:
+        return {"balance": int(res["dollar"]), "backend": "mobile"}
+
     cdp = _get_cdp()
     if not cdp:
-        return {"error": "No Airlines Manager tab found in Chrome. Open AM and restart."}
+        return {"error": "No mobile session and no Airlines Manager tab in Chrome.",
+                "mobile_error": res.get("error")}
 
     balance = read_balance(cdp)
     if balance is None:
         return {"error": "Could not read balance. Make sure you're on a game page."}
-    return {"balance": balance}
+    return {"balance": balance, "backend": "cdp"}
 
 
 @mcp.tool()
@@ -290,9 +308,24 @@ def list_hubs() -> dict:
     Returns:
         dict with 'hubs' (list of {name, hub_id, iata}), 'count'.
     """
+    # bfa/hub answers every hub in one call, but names them by internal
+    # airport id, so the IATA comes from player_hubs (the same id space).
+    def _mobile(cl):
+        by_id = {int(r["hub_id"]): r["hub_iata"]
+                 for r in get_db().execute("SELECT hub_iata, hub_id FROM player_hubs")}
+        return {"ok": True, "hubs": [
+            {"hub_id": str(h["id"]), "iata": by_id.get(int(h["id"]), "?"),
+             "name": by_id.get(int(h["id"]), "?")}
+            for h in cl.hubs()]}
+
+    res = _mobile_call(_mobile, store=False)
+    if res.get("ok") and res.get("hubs"):
+        return {"hubs": res["hubs"], "count": len(res["hubs"]), "backend": "mobile"}
+
     cdp = _get_cdp()
     if not cdp:
-        return {"error": "No Airlines Manager tab found."}
+        return {"error": "No mobile session and no Airlines Manager tab in Chrome.",
+                "mobile_error": res.get("error"), "hubs": []}
 
     loaded = cdp.navigate_and_wait(
         f"{BASE_URL}/network/newline",
@@ -330,11 +363,28 @@ def list_routes(hub_iata: str) -> dict:
     Returns:
         dict with 'routes' (list of {dest_iata, raw, line_id}), 'hub_iata', 'count'.
     """
+    hub_iata = hub_iata.upper().strip()
+    hub_id = _lookup_player_hub_id(hub_iata)
+    if hub_id:
+        # One request per hub page, and the rows already carry the line id and
+        # the destination IATA the CDP path has to walk the planning DOM for.
+        def _mobile(cl):
+            return {"ok": True, "routes": [
+                {"dest_iata": (ln.get("aTwoName") or "").upper(),
+                 "raw": f"{ln.get('aOneName', '')}/{ln.get('aTwoName', '')}",
+                 "line_id": int(ln["id"])}
+                for ln in cl.hub_pricing(int(hub_id))]}
+
+        res = _mobile_call(_mobile, store=False)
+        if res.get("ok") and res.get("routes"):
+            return {"hub_iata": hub_iata, "routes": res["routes"],
+                    "count": len(res["routes"]), "backend": "mobile"}
+
     cdp = _get_cdp()
     if not cdp:
-        return {"error": "No Airlines Manager tab found."}
+        return {"error": "No mobile session and no Airlines Manager tab in Chrome.",
+                "hub_iata": hub_iata, "routes": []}
 
-    hub_iata = hub_iata.upper().strip()
     cdp.navigate(f"{BASE_URL}/network/planning")
     if not _wait_for_hub_buttons(cdp, timeout=15.0):
         return {"error": "Planning page did not load hub selector.", "hub_iata": hub_iata, "routes": []}
@@ -556,11 +606,36 @@ def get_aircraft_at_hub(hub_iata: str) -> dict:
         dict with 'aircraft' (list of {aircraft_id, model, name, utilization_pct}),
         'hub_iata', 'count'.
     """
+    hub_iata = hub_iata.upper().strip()
+    hub_id = _lookup_player_hub_id(hub_iata)
+    if hub_id:
+        # The fleet listing has no hub filter, so this pages the whole fleet —
+        # 500 per request, which is still far cheaper than driving the planning
+        # page, and it carries the seat config the DOM does not.
+        # The compact fleet record names the model only by id (`al_id`), so
+        # the name comes from mobile_models, which the mobile reads populate.
+        models = {r["model_id"]: r["name"] for r in
+                  get_db().execute("SELECT model_id, name FROM mobile_models")}
+
+        def _mobile(cl):
+            out = [{"aircraft_id": str(it["id"]), "name": (it.get("n") or "").strip(),
+                    "model": models.get(it.get("al_id"), ""),
+                    "seats": {"eco": it.get("se") or 0, "bus": it.get("sb") or 0,
+                              "first": it.get("sf") or 0, "cargo": it.get("sp") or 0}}
+                   for it in cl.fleet(per_page=500)
+                   if it.get("h_id") == int(hub_id)]
+            return {"ok": True, "aircraft": out}
+
+        res = _mobile_call(_mobile, store=False)
+        if res.get("ok"):
+            return {"hub_iata": hub_iata, "aircraft": res["aircraft"],
+                    "count": len(res["aircraft"]), "backend": "mobile"}
+
     cdp = _get_cdp()
     if not cdp:
-        return {"error": "No Airlines Manager tab found."}
+        return {"error": "No mobile session and no Airlines Manager tab in Chrome.",
+                "hub_iata": hub_iata, "aircraft": []}
 
-    hub_iata = hub_iata.upper().strip()
     cdp.navigate(f"{BASE_URL}/network/planning")
     if not _wait_for_hub_buttons(cdp, timeout=15.0):
         return {"error": "Planning page did not load hub selector." + _cdp_error_suffix(cdp),
@@ -580,9 +655,10 @@ def schedule_flight(
     flights: list,
     clear_first: bool = False,
 ) -> dict:
-    """Schedule flights for an aircraft via the pure API endpoint.
+    """Schedule flights for an aircraft.
 
-    This is a POST to /network/planning/0/ajax -- no UI interaction needed.
+    Mobile primary (planning/add per flight), CDP fallback (one POST to
+    /network/planning/0/ajax). No UI interaction either way.
     takeOffTime is in seconds from Monday 00:00, must be divisible by 900 (15min).
       Monday 00:00 = 0, Monday 06:00 = 21600, Tuesday 00:00 = 86400.
 
@@ -592,32 +668,38 @@ def schedule_flight(
         clear_first: If True, wipe existing schedule before adding.
 
     Returns:
-        dict with 'success', 'scheduled' count, or 'error'.
+        dict with 'success', 'scheduled' count, 'backend', or 'error'.
     """
-    cdp = _get_cdp()
-    if not cdp:
-        return {"error": "No Airlines Manager tab found."}
+    backend = _planning_client()
+    if backend is None:
+        backend = _get_cdp()
+        if not backend:
+            return {"error": "No mobile session and no Airlines Manager tab in Chrome."}
+        which = "cdp"
+    else:
+        which = "mobile"
 
     aircraft_id = str(aircraft_id)
 
     if clear_first:
-        res = clear_schedule(cdp, aircraft_id)
+        res = clear_schedule(backend, aircraft_id)
         if not res or not res.get("result"):
-            return {"success": False,
+            return {"success": False, "backend": which,
                     "error": f"Failed to clear existing schedule: {res}"}
 
-    result = submit_flights(cdp, aircraft_id, flights)
+    result = submit_flights(backend, aircraft_id, flights)
 
     if not result:
-        return {"error": "Scheduling request returned no response."}
+        return {"error": "Scheduling request returned no response.", "backend": which}
     if result.get("result"):
         return {
             "success": True,
             "aircraft_id": aircraft_id,
             "scheduled": len(flights),
+            "backend": which,
             "message": result.get("message", "Schedule updated."),
         }
-    return {"success": False, "error": result}
+    return {"success": False, "backend": which, "error": result}
 
 
 @mcp.tool()
@@ -950,8 +1032,15 @@ def auto_price_routes(
         args.append("--dry-run")
 
     args.append("--json")
-    result = _run_python_script("auto_pricer.py", args, timeout=900,
+    # mobile_pricer.py is the primary path: same flags, no Chrome, and it
+    # writes through line/price instead of the AM+ masstool endpoint the web
+    # form forces. 'raw-ideal' has no mobile equivalent — the mobile audit
+    # price is already the corrected one — so that mode stays on CDP.
+    use_mobile = mode != "raw-ideal" and _has_mobile_session()
+    script = "mobile_pricer.py" if use_mobile else "auto_pricer.py"
+    result = _run_python_script(script, args, timeout=900,
                                 parse_json=True)
+    result["backend"] = "mobile" if use_mobile else "cdp"
     result.update({
         "mode": mode,
         "pct": pct,
@@ -986,6 +1075,37 @@ def refresh_internal_audits(
         "dry_run": dry_run,
         "limit": limit,
     })
+    return result
+
+
+@mcp.tool()
+def audit_unpurchased_routes(
+    hub: str,
+    routes: Optional[List[str]] = None,
+    country: Optional[str] = None,
+    limit: Optional[int] = None,
+    dry_run: bool = True,
+    allow_paid: bool = False,
+) -> dict:
+    """Audit missing demand for unpurchased routes through the mobile API.
+
+    Live mode spends cash and writes each result to SQLite, so it also requires
+    allow_paid=True. Preview mode only lists the routes that would be audited.
+    """
+    args = ["--hub", hub.upper().strip()]
+    if routes:
+        args.extend(["--routes", *(iata.upper().strip() for iata in routes)])
+    if country:
+        args.extend(["--country", country.lower().strip()])
+    if limit is not None:
+        args.extend(["--limit", str(limit)])
+    if allow_paid:
+        args.append("--allow-paid")
+    if not dry_run:
+        args.append("--apply")
+    result = _run_python_script(
+        "mobile_route_auditor.py", args, timeout=3600, parse_json=True)
+    result.update({"backend": "mobile", "dry_run": dry_run})
     return result
 
 
@@ -1038,7 +1158,10 @@ def number_circuit_aircraft(circuit: str, dry_run: bool = True) -> dict:
     if dry_run:
         args.append("--dry-run")
 
+    # aircraft_numberer picks its own backend: renaming is its only in-game
+    # action, and the mobile API does it without a browser.
     result = _run_python_script("aircraft_numberer.py", args, timeout=900)
+    result["backend"] = "mobile" if _has_mobile_session() else "cdp"
     result.update({"circuit": circuit.upper().strip(), "dry_run": dry_run})
     return result
 
@@ -1058,7 +1181,13 @@ def reconfigure_circuit_aircraft(circuit: str, dry_run: bool = True) -> dict:
     if dry_run:
         args.append("--dry-run")
 
-    result = _run_python_script("aircraft_reconfigurator.py", args, timeout=900)
+    # Mobile first: same CLI, same DB, but seats and hub go over the JSON API,
+    # where a refused write raises instead of silently doing nothing.
+    use_mobile = _has_mobile_session()
+    result = _run_python_script(
+        "mobile_reconfigurator.py" if use_mobile else "aircraft_reconfigurator.py",
+        args, timeout=900)
+    result["backend"] = "mobile" if use_mobile else "cdp"
     result.update({"circuit": circuit.upper().strip(), "dry_run": dry_run})
     return result
 
@@ -1113,7 +1242,12 @@ def mass_rename_aircraft(
     if dry_run:
         args.append("--dry-run")
 
-    result = _run_python_script("mass_renamer.py", args, timeout=900)
+    # Mobile first: one request per rename (no per-aircraft form token), and
+    # echoing the current seats back makes the reconfigure a free no-op.
+    use_mobile = _has_mobile_session()
+    result = _run_python_script(
+        "mobile_renamer.py" if use_mobile else "mass_renamer.py", args, timeout=900)
+    result["backend"] = "mobile" if use_mobile else "cdp"
     result.update({
         "old": old.strip(),
         "new": new.strip(),
@@ -1307,6 +1441,29 @@ def mobile_balance() -> dict:
 
 
 @mcp.tool()
+def mobile_deliveries() -> dict:
+    """What is still in delivery — the app's waiting list, in one request.
+
+    Freshly-minted aircraft are NOT sellable until they leave this list, and
+    nothing on the aircraft record says so (`purchasedAt` reads an hour ahead
+    while a plane is undelivered). Aircraft entries give `aircraft_id`,
+    `finish_at` (the real deadline, same clock as `server_time`) and
+    `am_coins_to_skip`. Pass `claim_finished=True` to press the app's
+    "deliver all finished" button first.
+    """
+    def run(cl):
+        now, events = cl._events()
+        return {"ok": True, "server_time": now, "pending": len(events),
+                "events": [{"event_id": e.get("id"), "type": e.get("type"),
+                            "label": e.get("label"),
+                            "aircraft_id": e.get("objectid"),
+                            "finish_at": e.get("finishAt", {}).get("date"),
+                            "am_coins_to_skip": e.get("amount")}
+                           for e in events]}
+    return _mobile_call(run, store=False)
+
+
+@mcp.tool()
 def shm_market(contains: str = "", model_id: Optional[int] = None,
                pool_only: bool = False, limit: int = 20) -> dict:
     """Browse the second-hand market. Price stats + live listings for a model.
@@ -1478,6 +1635,46 @@ def shm_aircraft(aircraft_id: int) -> dict:
 
 
 @mcp.tool()
+def apply_livery(skin_id: int, aircraft_ids: List[int],
+                 dry_run: bool = True) -> dict:
+    """Repaint owned aircraft in a livery you already own (free, mobile API).
+
+    Raises the sell ceiling before an arbitrage listing: `binThreshold` is
+    per-livery, so a 747SP in Spirit 747SP paint (skin 4661635) caps at
+    $1.209B against $900M in the manufacturer livery. Find the ids you own via
+    the duty free (`purchased: true`) — an owned livery costs no AM coins to
+    apply, and applying does not touch `maxAuctionSellPrice`.
+
+    **Only ever repaint a manufacturer-livery plane.** Awarded challenge and
+    event liveries cannot be re-applied once painted over, so every target is
+    checked here and one wearing a non-manufacturer livery is skipped, not
+    repainted. Safety default: dry_run=True.
+    """
+    def run(cl):
+        targets, skipped = [], []
+        for ac in aircraft_ids:
+            cur = (cl.aircraft(int(ac)) or {}).get("skins") or {}
+            if "manufacturer livery" in (cur.get("name") or "").lower():
+                targets.append(int(ac))
+            else:
+                skipped.append({"aircraft_id": int(ac), "wears": cur.get("name"),
+                                "skin_id": cur.get("id")})
+        if dry_run:
+            return {"ok": True, "dry_run": True, "would_paint": targets,
+                    "skipped_non_manufacturer": skipped, "skin_id": skin_id}
+        if not targets:
+            return {"ok": False, "error": "no manufacturer-livery targets",
+                    "skipped_non_manufacturer": skipped}
+        res = cl.apply_skin(skin_id, targets)
+        after = cl.aircraft(targets[0]) or {}
+        return {"ok": True, "painted": targets, "skipped_non_manufacturer": skipped,
+                "message": res.get("message"),
+                "skin_now": (after.get("skins") or {}).get("name"),
+                "bin_threshold": after.get("binThreshold")}
+    return _mobile_call(run)
+
+
+@mcp.tool()
 def shm_sell(aircraft_id: int, bin_price: int, price: Optional[int] = None,
              duration: int = 11, dry_run: bool = True) -> dict:
     """List one owned aircraft on the second-hand market.
@@ -1524,7 +1721,8 @@ def shm_sell_batch(bin_price: int, ids: Optional[List[int]] = None,
     bin_price = that livery's `binThreshold`, price = `maxAuctionSellPrice`.
     """
     price = price if price is not None else bin_price
-    from mobile_api import MAX_ACTIVE_LISTINGS, AMAuctionLimit, AMRateLimited, AMError
+    from mobile_api import (MAX_ACTIVE_LISTINGS, AMAuctionLimit, AMRateLimited,
+                            AMError, AMNotDelivered)
 
     def run(cl):
         # Resolve candidates.
@@ -1538,6 +1736,20 @@ def shm_sell_batch(bin_price: int, ids: Optional[List[int]] = None,
                 if skin_id is not None and it.get("as_id") != skin_id:
                     continue
                 candidates.append({"id": it["id"], "n": it.get("n")})
+        # Claim first: a delivery that has passed its finishAt still sits in
+        # the queue, and its plane stays unsellable, until something presses
+        # "deliver all finished". That is what stalled the 2026-08-25 run —
+        # it only completed when a human opened the app. No-op when there is
+        # nothing finished to claim.
+        if not dry_run:
+            cl.deliver_finished()
+        # Drop anything still in delivery — put_up would answer `status=0
+        # message=0` and burn retries against an empty message. One read for
+        # the whole batch, before the slot cap, so undelivered planes do not
+        # eat listing slots in the plan.
+        pending = cl.pending_aircraft_ids()
+        not_delivered = [c["id"] for c in candidates if c["id"] in pending]
+        candidates = [c for c in candidates if c["id"] not in pending]
         # Cap to free listing slots.
         active = cl.my_listings_count() or 0
         free_slots = max(0, MAX_ACTIVE_LISTINGS - active)
@@ -1546,7 +1758,8 @@ def shm_sell_batch(bin_price: int, ids: Optional[List[int]] = None,
         if dry_run:
             return {"ok": True, "dry_run": True, "active_listings": active,
                     "free_slots": free_slots, "would_list": len(planned),
-                    "aircraft": planned, "bin_price": bin_price}
+                    "aircraft": planned, "not_delivered": not_delivered,
+                    "bin_price": bin_price}
         if free_slots == 0:
             return {"ok": False, "error": "Auction limit reached (10 active). "
                     "List more as current auctions conclude.",
@@ -1566,6 +1779,10 @@ def shm_sell_batch(bin_price: int, ids: Optional[List[int]] = None,
                 except AMAuctionLimit:
                     limit_hit = True
                     break
+                except AMNotDelivered:
+                    # Delivered between the batch pre-check and this put_up.
+                    not_delivered.append(c["id"])
+                    break
                 except AMError as e:
                     failed.append({"aircraft_id": c["id"], "error": str(e)})
                     break
@@ -1574,8 +1791,8 @@ def shm_sell_batch(bin_price: int, ids: Optional[List[int]] = None,
             if ok:
                 _time.sleep(min_delay + random.uniform(0, min_delay))
         return {"ok": True, "listed": len(listed), "auctions": listed,
-                "failed": failed, "auction_limit_reached": limit_hit,
-                "active_before": active}
+                "failed": failed, "not_delivered": not_delivered,
+                "auction_limit_reached": limit_hit, "active_before": active}
     # min_delay=0 on the client so the fleet scan is fast; the put_up posts are
     # paced explicitly in the loop above.
     return _mobile_call(run, min_delay=0.0)
@@ -1687,6 +1904,7 @@ def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
     default: dry_run=True.
     """
     from mobile_api import AMAuthError, AMError
+    import httpx
 
     def run(cl):
         rules = cl.slot_rules()
@@ -1702,7 +1920,10 @@ def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
                     "event": event}
         tally, jackpots, spun, ghosts = {}, 0, 0, 0
         expired = False
-        for i in range(n):
+        net_error = None
+        retries = 0                     # consecutive network failures
+        i = 0
+        while i < n:
             if i > 0:
                 _time.sleep(spin_delay + random.uniform(0, 2.0))
             try:
@@ -1713,7 +1934,31 @@ def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
                 # instead of losing it to an exception.
                 expired = True
                 break
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                # TCP/TLS never completed: the spin never reached the server,
+                # so no game was burned. Back off and retry the SAME spin.
+                retries += 1
+                if retries > 3:
+                    net_error = f"{type(e).__name__}: {e}"
+                    break
+                _time.sleep(30 * retries + random.uniform(0, 5))
+                continue
+            except httpx.HTTPError as e:
+                # e.g. ReadTimeout: the server may still have counted the
+                # spin, so do NOT retry it (a real retry re-burns a game).
+                # Count it as a ghost and move on; bail only on a persistent
+                # outage so the caller can retry the remainder later.
+                spun += 1
+                ghosts += 1
+                i += 1
+                retries += 1
+                if retries > 5:
+                    net_error = f"{type(e).__name__}: {e}"
+                    break
+                continue
+            retries = 0
             spun += 1
+            i += 1
             if not res:
                 ghosts += 1
                 continue
@@ -1726,6 +1971,12 @@ def mobile_daily_slot(max_spins: Optional[int] = None, spin_delay: float = 9.0,
                 break
         out = {"ok": True, "spun": spun, "unread": ghosts,
                "winnings": tally, "jackpots": jackpots}
+        if net_error:
+            # Partial haul: report what was spun, flag the rest as retriable.
+            out["ok"] = False
+            out["error"] = net_error
+            out["remaining_games_hint"] = ("Re-run to spin the rest of "
+                                           "today's free games.")
         if expired:
             out["auth_expired"] = True
             out["hint"] = ("Token expired mid-run — refresh the mobile session "

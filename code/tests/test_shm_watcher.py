@@ -176,15 +176,18 @@ def test_sync_automatic_watches_lists_owned_paid_liveries_but_only_arms_missing_
          (2, 20, "Factory Paint", "manufacturer"),
          (3, 30, "Owned Special", "playrion"),
          (4, 40, "Ad Special", "playrion"),
-         (5, 50, "Manual Special", "playrion")],
+         (5, 50, "Manual Special", "playrion"),
+         (6, 60, "Ticket Special", "playrion")],
     )
     conn.executemany(
         "INSERT INTO mobile_shop_offers VALUES (?,?,?)",
-        [(100, "pack", "realMoney"), (200, "gift", "adv")],
+        # 'aircraft'/'tc' is the ticket aircraft, livery-exclusive like a pack.
+        [(100, "pack", "realMoney"), (200, "gift", "adv"),
+         (300, "aircraft", "tc")],
     )
     conn.executemany(
         "INSERT INTO mobile_shop_offer_items VALUES (?,?)",
-        [(100, 1), (100, 2), (100, 3), (100, 5), (200, 4)],
+        [(100, 1), (100, 2), (100, 3), (100, 5), (200, 4), (300, 6)],
     )
     conn.execute("INSERT INTO mobile_aircraft VALUES (3)")
     conn.execute(
@@ -193,9 +196,9 @@ def test_sync_automatic_watches_lists_owned_paid_liveries_but_only_arms_missing_
 
     result = sw.sync_paid_pack_watches(conn)
 
-    assert result["targets"] == 3
-    assert result["models"] == 3
-    assert result["added"] == 2
+    assert result["targets"] == 4
+    assert result["models"] == 4
+    assert result["added"] == 3
     rows = {r["skin_id"]: r for r in conn.execute(
         "SELECT skin_id, source, max_price, active, armed FROM shm_watch").fetchall()}
     assert rows[1]["source"] == sw.PAID_PACK_SOURCE
@@ -205,14 +208,44 @@ def test_sync_automatic_watches_lists_owned_paid_liveries_but_only_arms_missing_
     assert rows[3]["armed"] == 0
     assert rows[5]["source"] == "manual"
     assert rows[5]["max_price"] == 123
+    # A ticket aircraft is watched but never auto-armed: it is still on sale
+    # for travel cards, so an uncapped market buy is rarely the better deal.
+    assert rows[6]["source"] == sw.TICKET_SOURCE
+    assert rows[6]["armed"] == 0
     assert 2 not in rows and 4 not in rows
 
     updated = sw.sync_paid_pack_watches(conn, max_price=456)
     assert updated["added"] == 0
-    assert updated["updated"] == 2
+    assert updated["updated"] == 3
     caps = dict(conn.execute(
         "SELECT skin_id, max_price FROM shm_watch").fetchall())
-    assert caps == {1: 456, 3: 456, 5: 123}
+    assert caps == {1: 456, 3: 456, 5: 123, 6: 456}
+
+
+def test_sync_automatic_watches_observes_special_am_gold_rewards_only(conn):
+    add_catalog_tables(conn)
+    conn.execute("ALTER TABLE mobile_shop_offers ADD COLUMN am_gold_step INTEGER")
+    conn.executemany(
+        "INSERT INTO mobile_skins VALUES (?,?,?,?)",
+        [(7, 70, "SpaceJet-X100 - AM Gold Crew", "playrion"),
+         (8, 80, "X380Plus - (Manufacturer livery)", "manufacturer")],
+    )
+    conn.executemany(
+        "INSERT INTO mobile_shop_offers "
+        "(offer_id, template, currency, am_gold_step) VALUES (?,?,?,?)",
+        [(700, "gift", "gift or free", 6),
+         (800, "gift", "gift or free", 8)],
+    )
+    conn.executemany("INSERT INTO mobile_shop_offer_items VALUES (?,?)",
+                     [(700, 7), (800, 8)])
+
+    result = sw.sync_automatic_watches(conn)
+
+    assert result["targets"] == 1
+    row = dict(conn.execute(
+        "SELECT skin_id, source, active, armed FROM shm_watch").fetchone())
+    assert row == {"skin_id": 7, "source": sw.GOLD_SOURCE,
+                   "active": 1, "armed": 0}
 
 
 def test_sync_automatic_watches_marks_acquired_managed_rows_inactive(conn):
@@ -239,6 +272,70 @@ def test_sync_automatic_watches_marks_acquired_managed_rows_inactive(conn):
     assert states == {1: (0, 1), 2: (1, 0)}
 
 
+def test_arming_an_acquired_watch_reopens_it_for_one_more_copy(conn):
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, source, want, bought, active, armed) "
+        "VALUES (1, 10, 'Rare', ?, 1, 1, 0, 0)", (sw.PAID_PACK_SOURCE,))
+
+    assert sw.set_watch_armed(conn, 1, True)
+
+    row = dict(conn.execute(
+        "SELECT active, armed, want, bought FROM shm_watch WHERE skin_id=1").fetchone())
+    assert row == {"active": 1, "armed": 1, "want": 2, "bought": 1}
+    # And the watcher's own selection now sees it again.
+    assert [w.skin_id for w in sw.active_watches(conn)] == [1]
+
+
+def test_arming_a_live_watch_leaves_its_target_count_alone(conn):
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, source, want, bought, active, armed) "
+        "VALUES (2, 20, 'Wanted', 'manual', 3, 1, 1, 0)")
+
+    sw.set_watch_armed(conn, 2, True)
+
+    row = dict(conn.execute(
+        "SELECT active, armed, want FROM shm_watch WHERE skin_id=2").fetchone())
+    assert row == {"active": 1, "armed": 1, "want": 3}
+
+
+def test_a_sync_does_not_undo_a_watch_armed_for_another_copy(conn):
+    add_catalog_tables(conn)
+    conn.executemany(
+        "INSERT INTO mobile_skins VALUES (?,?,?,?)",
+        [(1, 10, "Rearmed", "playrion"), (2, 20, "Settled", "playrion")],
+    )
+    conn.execute("INSERT INTO mobile_shop_offers VALUES (100, 'pack', 'realMoney')")
+    conn.executemany("INSERT INTO mobile_shop_offer_items VALUES (100, ?)", [(1,), (2,)])
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, source, want, bought, active, armed) "
+        "VALUES (1, 10, 'Rearmed', ?, 2, 1, 1, 1), (2, 20, 'Settled', ?, 1, 1, 0, 0)",
+        (sw.PAID_PACK_SOURCE, sw.PAID_PACK_SOURCE),
+    )
+    conn.executemany("INSERT INTO fleet VALUES (?)", [(1,), (2,)])
+
+    sw.sync_paid_pack_watches(conn)
+
+    states = {r["skin_id"]: (r["active"], r["armed"], r["want"], r["bought"])
+              for r in conn.execute(
+                  "SELECT skin_id, active, armed, want, bought FROM shm_watch")}
+    assert states == {1: (1, 1, 2, 1), 2: (0, 0, 1, 1)}
+
+
+def test_a_pulled_offer_still_retires_a_watch_that_is_only_observing(conn):
+    add_catalog_tables(conn)
+    conn.execute("INSERT INTO mobile_skins VALUES (9, 90, 'Gone', 'playrion')")
+    conn.execute(
+        "INSERT INTO shm_watch (skin_id, model_id, label, source, want, bought, active, armed) "
+        "VALUES (9, 90, 'Gone', ?, 1, 0, 1, 0)", (sw.PAID_PACK_SOURCE,))
+
+    result = sw.sync_paid_pack_watches(conn)
+
+    assert result["disabled"] == 1
+    row = dict(conn.execute(
+        "SELECT active, armed FROM shm_watch WHERE skin_id=9").fetchone())
+    assert row == {"active": 0, "armed": 0}
+
+
 def test_sync_automatic_watches_adds_challenge_rows_as_observe_only(conn):
     add_catalog_tables(conn)
     conn.execute("CREATE TABLE mobile_challenge_rewards (skin_id INTEGER)")
@@ -249,6 +346,25 @@ def test_sync_automatic_watches_adds_challenge_rows_as_observe_only(conn):
 
     row = conn.execute("SELECT source, armed, active FROM shm_watch WHERE skin_id=7").fetchone()
     assert dict(row) == {"source": sw.CHALLENGE_SOURCE, "armed": 0, "active": 1}
+
+
+def test_challenge_beats_a_pack_bundle_and_corrects_a_drifted_source(conn):
+    """The Copa X777-9 case: awarded by a challenge, also inside a paid pack."""
+    add_catalog_tables(conn)
+    conn.execute("CREATE TABLE mobile_challenge_rewards (skin_id INTEGER)")
+    conn.execute("INSERT INTO mobile_skins VALUES (7, 70, 'X777-9 - Challenge Copa', 'playrion')")
+    conn.execute("INSERT INTO mobile_shop_offers VALUES (100, 'pack', 'realMoney')")
+    conn.execute("INSERT INTO mobile_shop_offer_items VALUES (100, 7)")
+
+    # Synced before the challenge started: the pack is the only feed that has it.
+    sw.sync_automatic_watches(conn)
+    assert conn.execute("SELECT source FROM shm_watch WHERE skin_id=7"
+                        ).fetchone()["source"] == sw.PAID_PACK_SOURCE
+
+    conn.execute("INSERT INTO mobile_challenge_rewards VALUES (7)")
+    sw.sync_automatic_watches(conn)
+    assert conn.execute("SELECT source FROM shm_watch WHERE skin_id=7"
+                        ).fetchone()["source"] == sw.CHALLENGE_SOURCE
 
 
 # ── limits ──────────────────────────────────────────────────────────────────
@@ -351,8 +467,9 @@ def test_paid_pack_only_mode_buys_pack_and_observes_other_sources(conn):
         def bid(self, auction_id, amount):
             self.bids.append((auction_id, amount))
 
-        def auction(self, auction_id):
-            return {"isPurchased": True, "winner": {"id": 42}}
+        def my_bidding(self):
+            return {"auctions": [{"id": 101, "isPurchased": True,
+                                  "winner": {"id": 42}}]}
 
     client = Client()
     limits = sw.Limits(
@@ -391,8 +508,9 @@ def test_armed_watch_can_buy_without_a_cap_when_balance_stays_positive(conn):
         def bid(self, auction_id, amount):
             assert (auction_id, amount) == (101, 500)
 
-        def auction(self, auction_id):
-            return {"isPurchased": True, "winner": {"id": 42}}
+        def my_bidding(self):
+            return {"auctions": [{"id": 101, "isPurchased": True,
+                                  "winner": {"id": 42}}]}
 
     result = sw.act_on_listings(
         Client(), conn, [listing(101, 1, 500, model_id=10)],

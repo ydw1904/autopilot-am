@@ -77,6 +77,7 @@ def _migrate(conn):
         if name not in fleet_cols:
             conn.execute(f"ALTER TABLE fleet ADD COLUMN {name} {sql_type}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fleet_skin ON fleet(skin_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fleet_name_nocase ON fleet(name COLLATE NOCASE)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS aircraft_tags ("
         "aircraft_id INTEGER NOT NULL, "
@@ -1064,6 +1065,19 @@ def get_fleet_aircraft_page(*, query=None, limit=50, offset=0, **filters) -> dic
     }
 
 
+def get_fleet_name_suggestions(prefix, limit=30) -> list[str]:
+    """Return a small indexed prefix match for the hangar rename field."""
+    prefix = str(prefix or "").strip()
+    if len(prefix) < 2:
+        return []
+    rows = get_db().execute(
+        "SELECT name FROM fleet WHERE name >= ? COLLATE NOCASE AND name < ? COLLATE NOCASE "
+        "GROUP BY name COLLATE NOCASE ORDER BY name COLLATE NOCASE LIMIT ?",
+        (prefix, prefix + "\uffff", max(1, min(int(limit), 50))),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
 def get_command_center_snapshot(*, browser_connected=False, mobile_configured=False) -> dict:
     """Aggregate the operational state needed by the browser command center."""
     db = get_db()
@@ -1207,6 +1221,13 @@ def get_command_center_snapshot(*, browser_connected=False, mobile_configured=Fa
     }
 
 
+# The watcher's own `source` markers (shm_watcher.PAID_PACK_SOURCE and friends);
+# spelled out here so this read-only layer never has to import the watcher.
+PACK_WATCH_SOURCE = "shop-pack:auto"
+TICKET_WATCH_SOURCE = "shop-ticket:auto"
+GOLD_WATCH_SOURCE = "shop-gold:auto"
+CHALLENGE_WATCH_SOURCE = "challenge:auto"
+
 # Owned liveries sink to the bottom, paid packs float to the top: the list is
 # a shopping queue, and a skin already in the hangar is the lowest priority.
 ORDER_WATCHES = """
@@ -1214,6 +1235,109 @@ ORDER_WATCHES = """
     CASE WHEN source = 'shop-pack:auto' THEN 0 ELSE 1 END,
     label
 """
+
+
+def _shm_watch_origins(db, watches: list[dict]) -> None:
+    """Fill each watch's `origin` / `origin_detail` in place.
+
+    A watch's `source` only names the *kind* of feed it came from, and
+    "Booster" alone is useless when the question is which set a scarce livery
+    belongs to. These are the same four feeds `get_livery_tags` reads, scoped
+    to the watched skins and resolved to the one that actually put this row on
+    the list.
+    """
+    skin_ids = [w["skin_id"] for w in watches]
+    if not skin_ids:
+        return
+    marks = ",".join("?" for _ in skin_ids)
+
+    def query(sql):
+        try:
+            return db.execute(sql, skin_ids).fetchall()
+        except sqlite3.Error:       # a DB synced before these tables existed
+            return []
+
+    # skin_id -> {booster_id: name}: the source carries the id the watch was
+    # synced from, and a livery can drop from more than one set.
+    boosters: dict[int, dict[int, str]] = {}
+    for row in query(f"""
+        SELECT c.skin_id, c.booster_id, b.name
+          FROM mobile_booster_cards c
+          JOIN mobile_boosters b ON b.booster_id = c.booster_id
+         WHERE c.skin_id IN ({marks}) AND b.name IS NOT NULL"""):
+        boosters.setdefault(row["skin_id"], {})[row["booster_id"]] = row["name"]
+
+    challenges: dict[int, str] = {}
+    for row in query(f"""
+        SELECT DISTINCT r.skin_id, ch.title
+          FROM mobile_challenge_rewards r
+          JOIN mobile_challenges ch ON ch.challenge_id = r.challenge_id
+         WHERE r.skin_id IN ({marks}) AND ch.title IS NOT NULL"""):
+        challenges.setdefault(row["skin_id"], row["title"])
+
+    # Cheapest first: one livery is routinely bundled into several offers, and
+    # the cheapest is the one that answers "what would this cost me instead".
+    offers: dict[tuple[int, str], list[dict]] = {}
+    for row in query(f"""
+        SELECT i.skin_id, o.title, o.currency,
+               COALESCE(o.promo_cost, o.cost) AS cost, o.cost AS list_cost
+          FROM mobile_shop_offer_items i
+          JOIN mobile_shop_offers o ON o.offer_id = i.offer_id
+         WHERE i.skin_id IN ({marks}) AND o.title IS NOT NULL
+         ORDER BY cost IS NULL, cost"""):
+        offers.setdefault((row["skin_id"], row["currency"] or ""), []).append(dict(row))
+
+    def shop_origin(skin_id, currency, label):
+        rows = offers.get((skin_id, currency), [])
+        if not rows:
+            return None
+        title, cost = rows[0]["title"], rows[0]["cost"]
+        # The travel-card aircraft sit at -50% most of the time, so the price
+        # that decides anything is the promo one; the list price is kept next
+        # to it because it comes back when the promo lapses.
+        off = _promo_pct(cost, rows[0]["list_cost"])
+        price = ("" if not cost else
+                 f"{int(cost):,} travel cards" + (f" (-{off}%)" if off else "")
+                 if currency == "tc" else f"{cost} real money")
+        also = (f" (also in {len(rows) - 1} more offer{'s' if len(rows) > 2 else ''})"
+                if len(rows) > 1 else "")
+        detail = f"Shop: {title}" + (f" for {price}" if price else "") + also
+        # A ticket aircraft is sold under the livery's own name, so repeating it
+        # says nothing; its price is the number that decides whether sniping the
+        # market beats simply paying the travel cards. Say "shop" out loud --
+        # a bare "73,100 travel cards" next to a "Ticket aircraft" chip reads
+        # as some count the row carries rather than what the game charges.
+        same = title.strip().lower() == (label or "").strip().lower()
+        return (f"Shop: {price}" if same and price else title, detail)
+
+    for watch in watches:
+        skin_id, source = watch["skin_id"], watch["source"] or ""
+        origin = None
+        if source.startswith("booster:"):
+            sets = boosters.get(skin_id, {})
+            wanted = source.split(":", 1)[1]
+            name = sets.get(int(wanted)) if wanted.isdigit() else None
+            name = name or (sorted(sets.values())[0] if sets else None)
+            if name:
+                origin = (name, f"Drops from the {name} booster")
+        elif source == CHALLENGE_WATCH_SOURCE:
+            title = challenges.get(skin_id)
+            if title:
+                origin = (_challenge_label(title), f"Awarded by {title}")
+            else:
+                # A retired challenge keeps no ladder, but the game names the
+                # livery "<model> - Challenge <event>" for good.
+                match = re.search(r"\bChallenge\b\s*(.+)$", watch["label"] or "", re.I)
+                event = match.group(1).strip() if match else ""
+                if event:
+                    origin = (event, f"Awarded by the {event} challenge (now retired)")
+        elif source == PACK_WATCH_SOURCE:
+            origin = shop_origin(skin_id, "realMoney", watch["label"])
+        elif source == TICKET_WATCH_SOURCE:
+            origin = shop_origin(skin_id, "tc", watch["label"])
+        elif source == GOLD_WATCH_SOURCE:
+            origin = shop_origin(skin_id, "gift or free", watch["label"])
+        watch["origin"], watch["origin_detail"] = origin or (None, None)
 
 
 def get_shm_monitor_snapshot() -> dict:
@@ -1334,6 +1458,7 @@ def get_shm_monitor_snapshot() -> dict:
 
     for watch in watches:
         watch["is_owned"] = bool(watch["owned_count"])
+    _shm_watch_origins(db, watches)
 
     model_checks = []
     if has_checks:
@@ -1571,12 +1696,27 @@ _SHOP_TAGS = {
 }
 
 
-def _shop_tag(template: str | None, currency: str | None) -> tuple[str, str]:
+def _promo_pct(cost, list_cost) -> int:
+    """Discount as whole percent, or 0 when the offer is at list price.
+
+    Derived rather than stored: the feed's own `promo.value` carries an
+    `isBasedOnValue` flag that changes what it means, while the two prices
+    never lie.
+    """
+    if not cost or not list_cost or cost >= list_cost:
+        return 0
+    return round((1 - cost / list_cost) * 100)
+
+
+def _shop_tag(template: str | None, currency: str | None,
+              am_gold_step=None) -> tuple[str, str]:
     """Tag for a shop offer, falling back to its currency alone.
 
     The (template, currency) pairs above are what the live feed uses today; a
     new pairing should still land somewhere sensible rather than vanish.
     """
+    if am_gold_step and currency == "gift or free":
+        return ("shop_gift", f"AM Gold · Step {int(am_gold_step)}")
     hit = _SHOP_TAGS.get((template or "", currency or ""))
     if hit:
         return hit
@@ -1630,16 +1770,24 @@ def get_livery_tags() -> dict[int, list[dict]]:
         add(r["skin_id"], "challenge", _challenge_label(r["title"]),
             f"Awarded by {r['title']}")
 
-    for r in query("""
+    offer_columns = {r["name"] for r in
+                     db.execute("PRAGMA table_info(mobile_shop_offers)")}
+    gold_step = "o.am_gold_step" if "am_gold_step" in offer_columns else "NULL"
+    for r in query(f"""
         SELECT DISTINCT i.skin_id AS skin_id, o.title AS title,
-               o.template AS template, o.currency AS currency, o.cost AS cost
+               o.template AS template, o.currency AS currency,
+               {gold_step} AS am_gold_step,
+               COALESCE(o.promo_cost, o.cost) AS cost, o.cost AS list_cost
           FROM mobile_shop_offer_items i
           JOIN mobile_shop_offers o ON o.offer_id = i.offer_id
          WHERE i.skin_id IS NOT NULL"""):
-        kind, label = _shop_tag(r["template"], r["currency"])
+        kind, label = _shop_tag(r["template"], r["currency"], r["am_gold_step"])
         price = ""
         if r["cost"]:
-            price = (f" for {int(r['cost']):,} travel cards" if r["currency"] == "tc"
+            off = _promo_pct(r["cost"], r["list_cost"])
+            price = (f" for {int(r['cost']):,} travel cards"
+                     + (f" (-{off}%, normally {int(r['list_cost']):,})" if off else "")
+                     if r["currency"] == "tc"
                      else f" for {r['cost']} (real money)"
                      if r["currency"] == "realMoney" else f" for {r['cost']}")
         add(r["skin_id"], kind, label, f"Shop: {r['title']}{price}")
@@ -1692,8 +1840,16 @@ def get_livery_collection(
     model_query: str | None = None,
     search_query: str | None = None,
 ) -> list[dict]:
-    """Return all special/custom liveries (excluding manufacturer liveries by default),
-    indicating ownership and listing owned aircraft names.
+    """Return the album: special/custom liveries the airline owns or can still be
+    handed, indicating ownership and listing owned aircraft names. Manufacturer
+    liveries are excluded by default.
+
+    A livery qualifies by being worn by one of the airline's aircraft, or by
+    appearing in a booster drop table, a challenge ladder, a shop offer, or the
+    SHM watchlist. `mobile_skins` also collects every livery the duty free
+    lists and every one the market watcher sights, which is thousands of rows
+    of other people's paint; those stay in the table for their prices and never
+    enter the album.
 
     User-created liveries (source='market', e.g. 'LH-A388') are player-designed
     skins sold on the market rather than official Playrion drops. They carry an
@@ -1731,6 +1887,22 @@ def get_livery_collection(
 
     if not include_user_created:
         sql += " AND (s.source IS NULL OR s.source != 'market')"
+
+    # The album is the collection: liveries the airline owns, or that a feed
+    # still hands out. Everything else in `mobile_skins` is catalogue noise —
+    # a duty free listing, or a stranger's plane the SHM watcher happened to
+    # sight — worth keeping for its price history, but not part of an album.
+    sql += """ AND (
+        EXISTS (SELECT 1 FROM fleet f WHERE f.skin_id = s.skin_id)
+        OR EXISTS (SELECT 1 FROM mobile_aircraft m WHERE m.skin_id = s.skin_id)
+        OR EXISTS (SELECT 1 FROM mobile_booster_cards c WHERE c.skin_id = s.skin_id)
+        OR EXISTS (SELECT 1 FROM mobile_challenge_rewards r WHERE r.skin_id = s.skin_id)
+        OR EXISTS (SELECT 1 FROM mobile_shop_offer_items i WHERE i.skin_id = s.skin_id)"""
+    # A DB the watcher has never run against has no watchlist to consult.
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                  "AND name='shm_watch'").fetchone():
+        sql += " OR EXISTS (SELECT 1 FROM shm_watch w WHERE w.skin_id = s.skin_id)"
+    sql += ")"
 
     if model_query:
         q = model_query.strip().lower()
@@ -1842,3 +2014,130 @@ def get_skin_image_bytes(skin_id: int, size: str = "big") -> bytes | None:
         (int(skin_id),),
     ).fetchone()
     return bytes(row["png"]) if row and row["png"] else None
+
+
+def get_network_snapshot() -> dict:
+    """Circuits, their routes, and route-ownership coverage — all from cache.
+
+    Aircraft are matched to a circuit by the canonical `<HUB>-C<NNN>-<MMM>`
+    name `aircraft_numberer.py` assigns, which is the only link the DB has:
+    the fleet table stores no circuit column.
+    """
+    db = get_db()
+    tables = {row["name"] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "circuits" not in tables:
+        return {"totals": {}, "circuits": [], "hubs": []}
+
+    routes_by_circuit: dict[str, list] = {}
+    for row in db.execute(
+            "SELECT cr.circuit_name, cr.dest_iata, cr.dest_name, cr.distance_km, "
+            "cr.flight_time_rt, cr.route_order, cr.eco_demand, cr.bus_demand, "
+            "cr.fir_demand, cr.cargo_demand, c.hub_iata, "
+            "COALESCE(r.is_owned, 0) AS is_owned, r.line_id "
+            "FROM circuit_routes cr JOIN circuits c ON c.name = cr.circuit_name "
+            "LEFT JOIN routes r ON r.hub_iata = c.hub_iata AND r.dest_iata = cr.dest_iata "
+            "ORDER BY cr.circuit_name, cr.route_order").fetchall():
+        item = dict(row)
+        item["is_owned"] = bool(item["is_owned"])
+        routes_by_circuit.setdefault(item.pop("circuit_name"), []).append(item)
+
+    fleet_by_circuit = {row["circuit"]: dict(row) for row in db.execute(
+        "SELECT c.name AS circuit, COUNT(f.aircraft_id) AS aircraft, "
+        "COALESCE(AVG(f.utilization), 0) AS avg_utilization, "
+        "COALESCE(SUM(CASE WHEN f.utilization <= 0 THEN 1 ELSE 0 END), 0) AS idle "
+        "FROM circuits c JOIN fleet f ON f.name LIKE c.name || '-%' "
+        "GROUP BY c.name").fetchall()}
+
+    circuits = []
+    for row in db.execute("SELECT * FROM circuits ORDER BY weekly_rev DESC, name").fetchall():
+        circuit = dict(row)
+        routes = routes_by_circuit.get(circuit["name"], [])
+        fleet = fleet_by_circuit.get(circuit["name"], {})
+        circuits.append({
+            "name": circuit["name"],
+            "hub_iata": circuit["hub_iata"],
+            "aircraft_model": circuit["aircraft_model"],
+            "status": circuit["status"] or "planned",
+            "total_hours": circuit["total_hours"] or 0,
+            "waves": circuit["waves"] or 0,
+            "waves_bought": circuit["waves_bought"] or 0,
+            "waves_scheduled": circuit["waves_scheduled"] or 0,
+            "seats": {"eco": circuit["eco_seats"] or 0, "bus": circuit["bus_seats"] or 0,
+                      "fir": circuit["fir_seats"] or 0, "cargo": circuit["cargo_seats"] or 0},
+            "daily_rev": circuit["daily_rev"] or 0,
+            "weekly_rev": circuit["weekly_rev"] or 0,
+            "investment": circuit["investment"] or 0,
+            "route_investment": circuit["route_investment"] or 0,
+            "updated_at": circuit["updated_at"],
+            "aircraft": fleet.get("aircraft", 0),
+            "idle_aircraft": fleet.get("idle", 0),
+            "avg_utilization": round(fleet.get("avg_utilization", 0) or 0, 1),
+            "routes_owned": sum(1 for r in routes if r["is_owned"]),
+            "routes": routes,
+        })
+
+    hub_routes = {row["hub_iata"]: dict(row) for row in db.execute(
+        "SELECT hub_iata, COUNT(*) AS routes_known, "
+        "COALESCE(SUM(is_owned), 0) AS routes_owned FROM routes GROUP BY hub_iata"
+    ).fetchall()} if "routes" in tables else {}
+
+    hubs = []
+    for hub_iata in sorted({c["hub_iata"] for c in circuits} | set(hub_routes)):
+        mine = [c for c in circuits if c["hub_iata"] == hub_iata]
+        counts = hub_routes.get(hub_iata, {})
+        hubs.append({
+            "hub_iata": hub_iata,
+            "circuits": len(mine),
+            "operating": sum(1 for c in mine if c["status"] == "completed"),
+            "aircraft": sum(c["aircraft"] for c in mine),
+            "weekly_rev": sum(c["weekly_rev"] for c in mine if c["status"] == "completed"),
+            "routes_known": counts.get("routes_known", 0),
+            "routes_owned": counts.get("routes_owned", 0),
+        })
+    hubs.sort(key=lambda h: (h["weekly_rev"], h["circuits"]), reverse=True)
+
+    operating = [c for c in circuits if c["status"] == "completed"]
+    return {
+        "totals": {
+            "circuits": len(circuits),
+            "operating": len(operating),
+            "planned": len(circuits) - len(operating),
+            "operating_weekly_rev": sum(c["weekly_rev"] for c in operating),
+            "planned_weekly_rev": sum(c["weekly_rev"] for c in circuits if c["status"] != "completed"),
+            "routes_owned": sum(h["routes_owned"] for h in hubs),
+            "routes_known": sum(h["routes_known"] for h in hubs),
+            # A bought wave with no schedule is capital producing nothing, so
+            # it is the one gap worth counting at the top of the page.
+            "unscheduled_waves": sum(max(0, c["waves_bought"] - c["waves_scheduled"]) for c in circuits),
+        },
+        "circuits": circuits,
+        "hubs": hubs,
+    }
+
+
+def get_ops_freshness() -> list:
+    """How stale each cached dataset is, newest-write per table."""
+    sources = [
+        ("Fleet", "fleet", "MAX(updated_at)"),
+        ("Routes", "routes", "MAX(created_at)"),
+        ("Liveries", "mobile_skins", "MAX(last_seen)"),
+        ("Booster tables", "mobile_boosters", "MAX(last_seen)"),
+        ("Shop offers", "mobile_shop_offers", "MAX(last_seen)"),
+        ("Market sightings", "shm_sightings", "MAX(last_seen)"),
+    ]
+    db = get_db()
+    tables = {row["name"] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    out = []
+    for label, table, expr in sources:
+        if table not in tables:
+            continue
+        try:
+            row = db.execute(
+                f"SELECT {expr} AS newest, COUNT(*) AS rows FROM {table}").fetchone()
+        except Exception:                                       # noqa: BLE001
+            continue
+        out.append({"label": label, "table": table,
+                    "newest": row["newest"], "rows": row["rows"]})
+    return out

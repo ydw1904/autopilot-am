@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   Activity,
   ArrowUp,
+  CircleDollarSign,
   Gauge,
   Palette,
   Plane,
@@ -11,11 +12,12 @@ import {
   Route,
   Settings2,
   Sparkles,
+  Warehouse,
 } from "lucide-react";
 import { CommandCenterSnapshot } from "../types";
 import { launchBrowser } from "../api";
 
-export type AppView = "command" | "fleet" | "liveries" | "shm";
+export type AppView = "command" | "network" | "pricing" | "fleet" | "hangar" | "liveries" | "shm" | "ops";
 
 interface AppShellProps {
   activeView: AppView;
@@ -28,16 +30,24 @@ interface AppShellProps {
 
 const navigation = [
   { id: "command" as const, label: "Command", icon: Gauge },
+  { id: "network" as const, label: "Network", icon: Route },
+  { id: "pricing" as const, label: "Pricing", icon: CircleDollarSign },
   { id: "fleet" as const, label: "Fleet", icon: Plane },
+  { id: "hangar" as const, label: "Hangar", icon: Warehouse },
   { id: "liveries" as const, label: "Liveries", icon: Palette },
   { id: "shm" as const, label: "SHM", icon: Radar },
+  { id: "ops" as const, label: "Ops", icon: Activity },
 ];
 
 const pageCopy: Record<AppView, { title: string; subtitle: string }> = {
   command: { title: "Command Center", subtitle: "Portfolio readiness and execution queue" },
+  network: { title: "Network", subtitle: "Circuits, their routes, and where coverage is missing" },
+  pricing: { title: "Pricing", subtitle: "Live route prices against the game's own recommendation" },
   fleet: { title: "Fleet Operations", subtitle: "Inspect and organize every aircraft from one workspace" },
+  hangar: { title: "Hangar", subtitle: "Rename, repaint, reconfigure, move, sell or scrap one aircraft" },
   liveries: { title: "Livery Collection", subtitle: "Track every special paint scheme across the fleet" },
   shm: { title: "SHM Watcher", subtitle: "Track market coverage, sightings, and purchase decisions" },
+  ops: { title: "Operations", subtitle: "Delivery queue, daily rewards, and cache freshness" },
 };
 
 export function AppShell({
@@ -106,8 +116,6 @@ export function AppShell({
         </nav>
 
         <div className="rail-future" aria-label="Upcoming workspaces">
-          <Route size={17} />
-          <Activity size={17} />
           <Settings2 size={17} />
         </div>
       </aside>

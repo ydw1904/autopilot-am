@@ -53,6 +53,24 @@ def fleet_conn(tmp_path, monkeypatch):
                (4245917, 19, 'LH-A388', '/common/images/painterPublic/skins/big/p-9358830-1-673deb3894c28.png', 'market');
     """)
 
+    # An album livery qualifies by being worn or by a feed still handing it
+    # out: Blossom is a challenge reward, LH-A388 is worn by a mobile-only
+    # plane, and the duty free row below qualifies by neither.
+    c.execute("""
+        INSERT INTO mobile_challenge_rewards
+              (challenge_id, objective_id, track, reward_id, skin_id)
+        VALUES (1, 1, 'free', 1, 4621811);
+    """)
+    c.execute("INSERT INTO mobile_aircraft (aircraft_id, skin_id, name) "
+              "VALUES (900, 4245917, 'MOBILE-ONLY-01');")
+    c.execute("""
+        INSERT INTO mobile_skins (skin_id, model_id, name, picture_path, source,
+                                  price_amcoins)
+        VALUES (7001, 19, 'A350-1000 - Carbone',
+                '/common/images/Aircrafts/skins/big/a350-1000-carbone.png',
+                'playrion', 50);
+    """)
+
     # Insert dummy image blob for skin 4638064
     fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest"
     c.execute("INSERT INTO mobile_skin_images (skin_id, size, png, byte_len) VALUES (?, ?, ?, ?)",
@@ -107,6 +125,10 @@ def test_get_fleet_aircraft_filters(fleet_conn):
     # Filter by name query
     c001_planes = dbmod.get_fleet_aircraft(name_query="C001")
     assert len(c001_planes) == 2
+
+    # Rename autocomplete is an indexed prefix lookup, not a full fleet read.
+    assert dbmod.get_fleet_name_suggestions("MPM-", limit=1) == ["MPM-C002-001"]
+    assert dbmod.get_fleet_name_suggestions("M%") == []
 
 
 def test_get_fleet_aircraft_page_reports_total_and_searches_across_fields(fleet_conn):
@@ -239,6 +261,14 @@ def test_get_livery_collection_excludes_manufacturer(fleet_conn):
     assert 4621811 in skin_ids
 
 
+def test_get_livery_collection_omits_liveries_no_feed_hands_out(fleet_conn):
+    # A duty free listing nobody owns is catalogue noise, not part of the album.
+    collection = dbmod.get_livery_collection(include_manufacturer=False)
+    assert 7001 not in [s["skin_id"] for s in collection]
+    assert dbmod.get_db().execute(
+        "SELECT COUNT(*) FROM mobile_skins WHERE skin_id = 7001").fetchone()[0] == 1
+
+
 def test_get_livery_collection_ownership_and_aircraft_names(fleet_conn):
     collection = dbmod.get_livery_collection(include_manufacturer=False)
     turkish = next(s for s in collection if s["skin_id"] == 4638064)
@@ -317,6 +347,45 @@ def test_livery_tags_name_each_feed_and_leave_factory_paint_out(fleet_conn):
     # filters out, so nothing claims that pack sells a paint scheme.
     manufacturer_tags = dbmod.get_livery_tags()[2]
     assert [t["kind"] for t in manufacturer_tags] == ["shop_pack"]
+
+
+def test_am_gold_reward_keeps_its_step_and_gets_a_distinct_tag(fleet_conn):
+    store = mobile_store.MobileStore(fleet_conn)
+    store.record_shop_offer({
+        "id": 25185, "title": "SpaceJet-X100 - AM Gold Crew",
+        "template": "gift", "purchaseCost": 0,
+        "purchaseCurrency": "gift or free", "AMGoldStep": 6,
+        "content": [{"effectType": "aircraft", "aircraftModelId": 180,
+                     "skin": {"id": 4703861, "type": 1,
+                              "name": "SpaceJet-X100 - AM Gold Crew"}}],
+    })
+    store.commit()
+
+    step = fleet_conn.execute(
+        "SELECT am_gold_step FROM mobile_shop_offers WHERE offer_id=25185"
+    ).fetchone()[0]
+    tag = dbmod.get_livery_tags()[4703861][0]
+    assert step == 6
+    assert tag["kind"] == "shop_gift"
+    assert tag["label"] == "AM Gold · Step 6"
+
+
+def test_livery_tag_quotes_the_promo_price_not_the_list_price(fleet_conn):
+    """The travel-card aircraft sit at -50% most of the time (`promo` in the
+    shop feed), and the list price overstates what the shop charges by 2x."""
+    store = mobile_store.MobileStore(fleet_conn)
+    store.record_shop_offer({
+        "id": 7003, "title": "737-700 - Air Qilin Beijing",
+        "template": "aircraft", "purchaseCost": 73100, "purchaseCurrency": "tc",
+        "promo": {"value": 50, "isBasedOnValue": False, "purchaseCost": 36500},
+        "content": [{"effectType": "aircraft",
+                     "label": "737-700 - Air Qilin Beijing",
+                     "skin": {"id": 4518373, "type": 1}}],
+    })
+    store.commit()
+
+    tag = dbmod.get_livery_tags()[4518373][0]
+    assert "36,500 travel cards (-50%, normally 73,100)" in tag["title"]
 
 
 def test_get_skin_image_bytes(fleet_conn):

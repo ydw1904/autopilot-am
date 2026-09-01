@@ -13,8 +13,7 @@ Usage:
     python3 circuit_renamer.py --old MPM-C003 --new X381 --db-only
 """
 
-import argparse, json, os, re, sys, time
-from urllib.parse import quote
+import argparse, os, re, sys, time
 
 from cdp import CDP, get_am_tab  # noqa: E402
 

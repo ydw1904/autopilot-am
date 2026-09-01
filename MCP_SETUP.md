@@ -21,7 +21,7 @@ Verify the server boots and registers its tools:
 ```bash
 .venv/bin/python -c "import asyncio,sys; sys.path.insert(0,'code'); import mcp_server; \
 print(len(asyncio.run(mcp_server.mcp.list_tools())), 'tools')"
-# -> 42 tools
+# -> 45 tools
 ```
 
 ## 2. Chrome with remote debugging
@@ -115,7 +115,7 @@ no tab is on airlines-manager.com.
 
 ## Tools at a glance
 
-42 tools. The mutating ones default to `dry_run=True`.
+45 tools. The mutating ones default to `dry_run=True`.
 
 - **Read / live CDP:** `get_balance`, `list_hubs`, `list_routes`, `resolve_aircraft`,
   `get_aircraft_at_hub`, `list_aircraft_for_sale`, `get_page_text`,

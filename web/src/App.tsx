@@ -1,13 +1,17 @@
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchCommandCenter } from "./api";
 import { AppShell, AppView } from "./components/AppShell";
 import { CommandCenter } from "./components/CommandCenter";
 import { FleetWorkspace } from "./components/FleetWorkspace";
+import { Hangar } from "./components/Hangar";
 import { LiveryCollection } from "./components/LiveryCollection";
+import { Network } from "./components/Network";
+import { Ops } from "./components/Ops";
+import { Pricing } from "./components/Pricing";
 import { ShmMonitor } from "./components/ShmMonitor";
 import { CommandCenterSnapshot } from "./types";
 
-const ROUTES: AppView[] = ["command", "fleet", "liveries", "shm"];
+const ROUTES: AppView[] = ["command", "network", "pricing", "fleet", "hangar", "liveries", "shm", "ops"];
 
 function readLocation(): { view: AppView; preset?: string } {
   const raw = window.location.hash.replace(/^#/, "");
@@ -82,6 +86,12 @@ export function App() {
     >
       {view === "command" ? (
         <CommandCenter snapshot={snapshot} loading={loading} error={error} onNavigate={navigate} />
+      ) : view === "network" ? (
+        <Network refreshToken={refreshToken} onOpenFleet={(preset) => navigate("fleet", preset)} />
+      ) : view === "pricing" ? (
+        <Pricing snapshot={snapshot} refreshToken={refreshToken} />
+      ) : view === "ops" ? (
+        <Ops refreshToken={refreshToken} />
       ) : view === "fleet" ? (
         <FleetWorkspace
           snapshot={snapshot}
@@ -89,6 +99,14 @@ export function App() {
           refreshToken={refreshToken}
           onDataChanged={dataChanged}
           onOpenLivery={(skinId) => navigate("liveries", `skin:${skinId}`)}
+          onOpenAircraft={(aircraftId) => navigate("hangar", `ac:${aircraftId}`)}
+        />
+      ) : view === "hangar" ? (
+        <Hangar
+          snapshot={snapshot}
+          initialPreset={fleetPreset}
+          refreshToken={refreshToken}
+          onDataChanged={dataChanged}
         />
       ) : view === "liveries" ? (
         <LiveryCollection

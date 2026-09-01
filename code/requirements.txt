@@ -20,13 +20,9 @@ numpy>=2.4.0
 # Terminal colors (circuit_scheduler and friends)
 colorama>=0.4.6
 
-# Browser app server. These are already transitive dependencies of NiceGUI, but
-# are declared directly because api_server.py imports them.
+# Browser app server
 fastapi>=0.115.0
 uvicorn>=0.30.0
-
-# Legacy GUI only (gui_app.py); the MCP server and CLI scripts do not need it
-nicegui>=2.0
 
 # Optional accelerators (planner falls back gracefully without them)
 # numba>=0.60   # JIT fallback for beam search when code/native isn't built

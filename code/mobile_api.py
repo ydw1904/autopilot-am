@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -32,6 +34,49 @@ SESSION_PATH = Path.home() / ".airlines_manager" / "session.json"
 # threads (the purchase-date backfill runs a small pool), and the refresh
 # token rotates on every grant.
 _RENEW_LOCK = threading.Lock()
+
+# ── request pacing ───────────────────────────────────────────────────────
+# The server sees one client per account, and the one thing a real phone
+# never does is fire hundreds of calls in a second. Every request in this
+# process funnels through a single pacer — a minimum gap with jitter so the
+# cadence is not a metronome, plus a rolling per-minute ceiling — so no
+# caller (a thread pool, two tools at once, a runaway loop) can burst.
+# The costs that matter are dozens of requests, not thousands.
+MIN_REQUEST_GAP = 0.7          # seconds between any two requests, pre-jitter
+REQUEST_JITTER = 0.45          # ± fraction of the gap
+MAX_REQUESTS_PER_MINUTE = 45
+
+
+class _Pacer:
+    """Process-wide request spacer, shared by every AMClient."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._last = 0.0
+        self._recent = deque()
+
+    def wait(self, min_gap: float = 0.0) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._recent and now - self._recent[0] > 60.0:
+                    self._recent.popleft()
+                gap = max(MIN_REQUEST_GAP, min_gap)
+                gap *= 1.0 + random.uniform(-REQUEST_JITTER, REQUEST_JITTER)
+                sleep = (self._last + gap) - now
+                if len(self._recent) >= MAX_REQUESTS_PER_MINUTE:
+                    sleep = max(sleep, 60.0 - (now - self._recent[0]) + 0.01)
+                if sleep <= 0:
+                    self._last = now
+                    self._recent.append(now)
+                    return
+            time.sleep(sleep)
+
+
+# ponytail: one global pacer, so a burst is impossible per process but two
+# processes (MCP server + shm_watcher) still pace independently. Move the
+# state into the DB if that ever matters.
+PACER = _Pacer()
 
 # Match the app so traffic looks identical to a real client.
 USER_AGENT = "UnityPlayer/2022.3.67f2 (UnityWebRequest/1.0, libcurl/8.10.1-DEV)"
@@ -110,6 +155,15 @@ class AMRateLimited(AMError):
 
 class AMAuctionLimit(AMError):
     """SHM auction limit (10 active listings) reached."""
+
+
+class AMNotDelivered(AMError):
+    """Aircraft is still in the delivery queue — not sellable yet.
+
+    The server's entire answer for this case is `status=0 message=0`, which is
+    indistinguishable from any other refusal, so this is raised only after the
+    delivery queue confirms it.
+    """
 
 
 def _token_request(data: dict, auth_base: str = AUTH_BASE) -> dict:
@@ -319,7 +373,6 @@ class AMClient:
                      "X-Unity-Version": UNITY_VERSION,
                      "X-Requested-With": "XMLHttpRequest"})
         self.last_resources: Optional[dict] = None
-        self._last_call = 0.0
 
     def close(self):
         try:
@@ -361,10 +414,8 @@ class AMClient:
                       params: Optional[dict] = None,
                       data: Optional[dict] = None,
                       allow_empty: bool = False) -> dict:
-        if self.min_delay:
-            wait = self.min_delay - (time.monotonic() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
+        # min_delay is a per-client floor on top of the process-wide pacer.
+        PACER.wait(self.min_delay)
         params = dict(params or {})
         params["access_token"] = self.s.access_token
         url = self._url(endpoint)
@@ -376,7 +427,6 @@ class AMClient:
                 headers={"Content-Type": "application/x-www-form-urlencoded"})
         else:
             resp = self.http.request(method, url, params=params, data=data)
-        self._last_call = time.monotonic()
 
         # 204 / empty: a rate-limited action (slot/put_up under cooldown).
         if resp.status_code == 204 or not resp.content:
@@ -461,6 +511,199 @@ class AMClient:
             self.store.observe_aircraft_profile(profile)
             self.store.commit()
         return profile
+
+    # ── network: hubs, routes, pricing, planning ────────────────────────
+    # These are the mobile equivalents of the pages the CDP tools scrape.
+    # Every one of them answers structured JSON that already carries what the
+    # HTML had to be regexed for, so the mobile path is both cleaner and
+    # cheaper: one call per hub instead of one page fetch per route.
+    def hubs(self) -> list:
+        """Every hub the airline owns. `id` is the same hub id the web uses."""
+        return self._request("GET", "bfa/hub").get("hubList", [])
+
+    def routes(self) -> list:
+        """Every owned line, as compact {id, h(ub), dis(tance), a1, a2} records.
+
+        One call replaces the whole `scrape_line_ids` / `scrape_audit_line_ids`
+        DOM walk — and it covers all hubs at once, not the selected one.
+        The airport fields are the game's internal airport ids, not IATA; join
+        to `hub_pricing` (which names airports) when IATA is what you need.
+        """
+        return self._request("GET", "bfa/route").get("lineList", [])
+
+    def world(self) -> dict:
+        """Airport, country and continent reference data."""
+        return self._request("GET", "bfa/world")
+
+    def external_route_audit(self, destination_airport_id: int,
+                             origin_hub_id: int) -> dict:
+        """Buy an unpurchased-route audit with cash."""
+        return self._request(
+            "POST",
+            f"audit/external/new/{int(destination_airport_id)}/{int(origin_hub_id)}",
+        ).get("audit", {})
+
+    def internal_line_audit(self, line_id: int) -> dict:
+        """Fresh audit for an OWNED line. Spends one `freeAudits` coupon.
+
+        Verified live, the coupon pool went 3820 -> 3819 and the cash balance
+        did not move. With the pool empty the game bills the line's
+        `audit.cost` instead (the hub pricing page carries it per line), so
+        check `audit_budget` first.
+        The fresh audit resets `audit.reliability` to 0 and leaves
+        `audit.price` unchanged; `audit.demand` is what moves.
+        """
+        return self._request(
+            "POST", f"audit/internal/new/{int(line_id)}").get("audit", {})
+
+    def line(self, line_id: int) -> dict:
+        """One line's profile: distance, purchase price and its audit."""
+        return self._request("GET", f"line/{int(line_id)}").get("line", {})
+
+    def open_line_candidates(self, hub_id: int, country_id: int) -> list:
+        """Airports at `country_id` this hub can still open a route to.
+
+        `country_id` is the numeric `bfa/world` countryList id, NOT the two
+        letter code (the code answers "error 99"). Routes already owned are
+        absent from the list, which is what makes it a cheap ownership check.
+        Each entry carries `price.final`, the `audit` demand block and
+        `restrictPurchaseUntil`, so a dry run needs no second call.
+        """
+        return self._request(
+            "GET", f"line/open/{int(hub_id)}/{int(country_id)}").get("list", [])
+
+    def open_line(self, hub_id: int, iata: str) -> dict:
+        """Buy one route. Spends cash.
+
+        Keyed by IATA, not airport id ("Invalid or missing parameter"), and
+        needs no country: the country only ever mattered to the web listing
+        page. Re-buying answers "You cannot buy this route, because you
+        already own it", so this is safe to retry.
+        """
+        return self._request("POST", "line/open",
+                             data={"hubId": int(hub_id), "iata": iata.upper()})
+
+    def line_demand(self, line_id: int) -> list:
+        """Remaining demand per day of week for one line."""
+        return self._request("GET",
+                             f"line/{int(line_id)}/demand").get("demandByDay", [])
+
+    def hub_pricing_page(self, hub_id: int, page: int = 1) -> dict:
+        """One page of a hub's routes with prices, demand and audit.
+
+        The masstool replacement. Each line carries `price`, `demand`,
+        `carriedPax`, `remainingDemand`, `lockedUntil` (the 24h price cooldown)
+        and `audit.price` — and the audit's bus/first are already the corrected
+        values the web tool has to derive from eco (verified: bus == eco*1.33,
+        first == eco*2.3, floored).
+        """
+        return self._request("GET", f"hub/{int(hub_id)}/lines/pricing",
+                             params={"page": int(page)})
+
+    def hub_pricing(self, hub_id: int, max_pages: int = 20) -> list:
+        """Every route at a hub, paging through hub_pricing_page."""
+        out, page = [], 1
+        while page <= max_pages:
+            body = self.hub_pricing_page(hub_id, page)
+            out.extend(body.get("lines", []))
+            paging = body.get("paging") or {}
+            if page >= int(paging.get("pageCount") or 1):
+                break
+            page += 1
+        return out
+
+    def hub_masstool(self, hub_id: int) -> dict:
+        """The hub's mass-tool view: inactive lines and unassigned aircraft."""
+        return self._request("GET", f"hub/masstool/{int(hub_id)}").get("hub", {})
+
+    def simulate_price(self, line_id: int, *, eco: int, bus: int,
+                       first: int, cargo: int) -> dict:
+        """Free price simulation: pax that would fly at these prices."""
+        body = self._request("POST", "line/price/simulation",
+                             data={"lineId": int(line_id),
+                                   "priceEco": int(eco), "priceBus": int(bus),
+                                   "priceFirst": int(first),
+                                   "priceCargo": int(cargo)})
+        return body.get("simulation", body)
+
+    def set_price(self, line_id: int, *, eco: int, bus: int,
+                  first: int, cargo: int) -> dict:
+        """Set one line's four prices, and start its 24h cooldown.
+
+        The clean replacement for the web path, which cannot POST the pricing
+        form at all (204, silently discarded) and has to go through the AM+
+        masstool's bulk endpoint or a real mouse click. Here a rejected write
+        raises instead of quietly doing nothing, so no read-back is needed —
+        though `lockedUntil` on the next `hub_pricing` still confirms it.
+        """
+        body = self._request("POST", "line/price",
+                             data={"lineId": int(line_id),
+                                   "priceEco": int(eco), "priceBus": int(bus),
+                                   "priceFirst": int(first),
+                                   "priceCargo": int(cargo)})
+        return body.get("line", body)
+
+    def planning_page(self, page: int = 1) -> dict:
+        """One page of the fleet-wide weekly planning (30 aircraft per page).
+
+        Each aircraft comes back as {id, name, model, plannings:[{id,
+        takeOffTime, duration, line:{id,name}}]}. The listing is fleet-wide and
+        has no hub filter — `planning/{x}/{page}` ignores its first path arg —
+        so use `aircraft_flights` when you want one aircraft.
+
+        Read-only: the mobile schedule WRITE payload is not known yet (see
+        AGENTS.md), so `circuit_scheduler.py` still writes schedules over CDP.
+        """
+        body = self._request("GET", f"planning/0/{int(page)}")
+        return {"aircrafts": (body.get("planning") or {}).get("aircrafts", []),
+                "paging": body.get("paging", {})}
+
+    def aircraft_planning(self, aircraft_id: int) -> list:
+        """One aircraft's weekly planning: [{id, lineId, takeOffTime, …}].
+
+        `planning/lines/{aircraftId}` — one aircraft in one request, where the
+        fleet-wide `planning_page` would page through 30 at a time. `id` is the
+        planning (flight) id, `takeOffTime` seconds since Monday 00:00.
+        """
+        body = self._request("GET", f"planning/lines/{int(aircraft_id)}")
+        return (body.get("aircraft") or {}).get("plannings", [])
+
+    def add_flight(self, aircraft_id: int, line_id: int,
+                   take_off_time: int) -> dict:
+        """Schedule ONE weekly flight. Answers `network.addPlanning.success`.
+
+        The write half of the planning API, recovered from the APK's il2cpp
+        metadata (`Api.PlanningCalls.AddPlanning(aircraftID, takeOffTime,
+        lineID)`) and verified live on 2026-08-27. The aircraft id is a PATH
+        segment and the rest is the form body — `planning/add/` without it is a
+        404, which is what made the endpoint look unusable before.
+
+        `take_off_time` is seconds since Monday 00:00 UTC, on the game's
+        15-minute grid, exactly like the web planning API's `takeOffTime`.
+
+        Note `planning/setMany` is NOT this endpoint's bulk form: it refuses
+        every body shape tried, including the DTO the metadata describes
+        (`{aircrafts:[{id, routes:[{id, tots:[…]}]}]}`), so flights go in one
+        at a time.
+        """
+        return self._request("POST", f"planning/add/{int(aircraft_id)}",
+                             data={"lineId": int(line_id),
+                                   "takeOffTime": int(take_off_time)})
+
+    def clear_planning(self, aircraft_id: int) -> dict:
+        """Delete every scheduled flight for one aircraft.
+
+        A **GET** despite being a write: `planning/delete/{aircraftId}` answers
+        405 to POST, PUT and DELETE alike. Verified live 2026-08-27.
+        """
+        return self._request("GET", f"planning/delete/{int(aircraft_id)}")
+
+    def aircraft_flights(self, aircraft_id: int, day: int = 0,
+                         page: int = 1) -> list:
+        """One aircraft's scheduled flights for a day (`day` is 0-based)."""
+        body = self._request(
+            "GET", f"aircraft/{int(aircraft_id)}/flights/{int(day)}/{int(page)}")
+        return (body.get("aircraftFlightsData") or {}).get("flights", [])
 
     def auctions(self, sort: str = "timeMinus",
                  pool_only: bool = False,
@@ -682,8 +925,10 @@ class AMClient:
                         "seatsBus":74,"seatsFirst":31,"payload":12}]
 
         With the model license owned the AM-coin cost is waived (money only).
-        Response `events[].objectid` carries the new aircraft ids. New planes
-        have a 30-min delivery but are sellable by id immediately.
+        Response `events[].objectid` carries the new aircraft ids — the same
+        ids that then sit in the delivery queue (`pending_events()`). New
+        planes are NOT sellable until they leave it; `wait_for_delivery()`
+        blocks on that.
         """
         aircrafts = [{"aircraftId": int(model_id),
                       "hubId": int(hub_id),
@@ -709,18 +954,121 @@ class AMClient:
                 ids.append(int(oid))
         return ids
 
+    # ── delivery queue ──────────────────────────────────────────────────
+    def pending_events(self) -> list:
+        """Everything still in delivery — one request, whatever the fleet size.
+
+        This is the app's waiting list (`MenuRoot/WaitingList`): aircraft
+        purchases and rentals, maintenance, IATA training, research, hub
+        unfreeze. An aircraft entry carries `objectid` (the new aircraft id),
+        `finishAt` (the deadline) and, once an ad or AM-coin speed-up has moved
+        it, `initialEndDate` (the original deadline).
+
+        Use `finishAt`, never the aircraft profile's `purchasedAt`: while a
+        plane is undelivered that field reads exactly one hour ahead of the
+        server's own clock, and it is rewritten to the real delivery moment
+        once the plane lands. Observed 2026-08-26: minted 02:20:39, `finishAt`
+        02:50:39 (30 min), `purchasedAt` 03:20:39 against a server clock of
+        02:21.
+        """
+        return self._events()[1]
+
+    def _events(self) -> tuple:
+        """(server clock, event list) — both off the one `event` read.
+
+        The clock comes back as a fixed-width "YYYY-MM-DD HH:MM:SS.ffffff"
+        string in the same UTC frame as every `finishAt`, so callers compare
+        them as strings and skip parsing entirely.
+        """
+        body = self._request("GET", "event")
+        return body.get("irlDateTime", {}).get("date", ""), body.get("list", [])
+
+    def pending_aircraft_ids(self) -> set:
+        """Aircraft ids still in delivery, off one `pending_events()` read."""
+        return {int(e["objectid"]) for e in self.pending_events()
+                if e.get("type") == "aircraft" and e.get("objectid") is not None}
+
+    def is_delivered(self, aircraft_id: int) -> bool:
+        """True once `aircraft_id` has left the delivery queue (= sellable).
+
+        One request and no fleet paging. Prefer `pending_aircraft_ids()` when
+        asking about several planes so the batch costs one read, not N.
+        """
+        return int(aircraft_id) not in self.pending_aircraft_ids()
+
+    def deliver_finished(self) -> dict:
+        """The app's "deliver all finished" button (`event/validateended`).
+
+        **Mandatory, not a convenience.** A delivery that has passed its
+        `finishAt` stays in the queue and its plane stays unsellable until this
+        is called — verified 2026-08-26: an event sat 5 minutes past `finishAt`
+        untouched, and cleared the instant this fired. That is what stalled the
+        2026-08-25 mint run; it finished only because a human opened the app,
+        which fires the same call.
+
+        Answers `incomingEvent.validateall.success` with the cleared `eventIds`.
+        Harmless when nothing is finished, so callers can fire it blind.
+
+        Note it also sets the plane's `purchasedAt` to the moment of the claim,
+        not to `finishAt` — an unclaimed plane is not merely unsellable, it is
+        not yet fully bought.
+        """
+        return self._request("POST", "event/validateended", allow_empty=True)
+
+    def wait_for_delivery(self, aircraft_ids, *, timeout: float = 5400,
+                          poll: float = 30) -> list:
+        """Block until every id has left the delivery queue. Returns the stragglers.
+
+        The queue does not drain by itself: an entry past its `finishAt` sits
+        there until claimed, so this fires `deliver_finished()` when it sees
+        one. Claims at most once per event id, so a genuinely stuck entry
+        cannot turn into a `validateended` spin.
+        """
+        want = {int(i) for i in aircraft_ids}
+        deadline = time.time() + timeout
+        claimed = set()           # event ids already claimed for, so a stuck
+                                  # entry cannot spin us on validateended
+        while time.time() < deadline:
+            now, events = self._events()
+            still = want & {int(e["objectid"]) for e in events
+                            if e.get("type") == "aircraft"
+                            and e.get("objectid") is not None}
+            if not still:
+                return []
+            overdue = {e["id"] for e in events
+                       if int(e.get("objectid", -1)) in still
+                       and e.get("finishAt", {}).get("date", "9999") <= now}
+            if overdue - claimed:
+                claimed |= overdue
+                self.deliver_finished()
+                continue          # re-read rather than sleeping on stale state
+            time.sleep(poll)
+        return sorted(want & self.pending_aircraft_ids())
+
     def put_up(self, aircraft_id: int, price: int, bin_price: int,
                duration: int = 11) -> dict:
         """List an owned aircraft on the second-hand market (auction).
 
         Raises AMAuctionLimit if the 10-listing cap is reached, AMRateLimited
-        (204) if posted under the cooldown — a 204 does NOT list the plane.
+        (204) if posted under the cooldown — a 204 does NOT list the plane,
+        AMNotDelivered if the plane is still in its delivery queue.
         """
-        body = self._request("POST", "auction/aircraft/put_up",
-                             data={"price": int(price),
-                                   "binPrice": int(bin_price),
-                                   "duration": int(duration),
-                                   "aircraftId": int(aircraft_id)})
+        try:
+            body = self._request("POST", "auction/aircraft/put_up",
+                                 data={"price": int(price),
+                                       "binPrice": int(bin_price),
+                                       "duration": int(duration),
+                                       "aircraftId": int(aircraft_id)})
+        except AMAuctionLimit:
+            raise
+        except AMError as e:
+            # `status=0 message=0` is the whole refusal, so it names nothing on
+            # its own. Confirm against the delivery queue before blaming delivery.
+            if "message=0" in str(e) and not self.is_delivered(aircraft_id):
+                raise AMNotDelivered(
+                    f"aircraft {aircraft_id} is still in delivery — "
+                    "wait for it to leave pending_events()") from e
+            raise
         return body.get("auction", body)
 
     def bid(self, auction_id: int, amount: int) -> dict:
@@ -729,6 +1077,26 @@ class AMClient:
                              data={"auctionId": int(auction_id),
                                    "bid": int(amount)})
         return body.get("auction", body)
+
+    def sell_for_scrap(self, aircraft_id: int) -> dict:
+        """Sell one owned aircraft back to the game at its `sellPrice`.
+
+        Irreversible, and **the request shape is unverified**. The endpoint name
+        is read off the APK metadata (`aircraft/sellOrStopRent` — the app uses
+        one route for scrapping a bought plane and for ending a rental); the
+        body was never captured off the wire, so `aircraftId` is an educated
+        guess in the spelling every other `aircraft/*` write uses. A wrong guess
+        is refused (`status: 0`, which `_request` raises) rather than acted on.
+
+        That is also why this takes ONE id and has no batch form and no
+        apply-to-all flag: an unverified write must not be able to cascade.
+        Capture a real scrap before trusting it — see ticket 013 and
+        tools/mobile-capture/bluestacks_mitm_runbook.md.
+        """
+        # ponytail: unverified body shape (single id only, cannot cascade);
+        # replace with the captured payload once one exists.
+        return self._request("POST", "aircraft/sellOrStopRent",
+                             data={"aircraftId": int(aircraft_id)})
 
     def reconfigure(self, aircraft_id: int, *, name: str,
                     eco: int, bus: int, first: int, payload: int) -> dict:
@@ -768,6 +1136,46 @@ class AMClient:
         return self._request("POST", f"aircraft/{int(aircraft_id)}/assignHub",
                              data={"hubId": int(hub_id),
                                    "aircraftID": int(aircraft_id)})
+
+    def apply_skin(self, skin_id: int, aircraft_ids) -> dict:
+        """Repaint owned aircraft in a livery the player owns. Answers "skin applied".
+
+        Contract (recovered by probing, 2026-08-25 — the endpoint validates
+        field by field and NAMES the missing one, which is how the shape was
+        found):
+
+            POST shop/skin/apply   (form-encoded)
+                apply_to_all      "0"
+                skin_id           the livery id (`model_skins`, `purchased`)
+                aircraft_ids[N]   one field per aircraft, 0-based index
+
+        Every camelCase spelling (`skinId`, `aircraftIds`) is refused with
+        "Invalid or missing parameter" — this route is snake_case, unlike the
+        rest of the API. A JSON body is parsed but never satisfied, so it only
+        serves as an oracle for the field names.
+
+        **`apply_to_all` is hard-coded to "0" and no caller may set it.** A "1"
+        repaints the WHOLE fleet, and an awarded challenge or event livery
+        cannot be re-applied once overwritten — the same hazard the web
+        reconfigurator's checked-skin guard exists for. For that reason this
+        refuses to run without an explicit id list.
+
+        Free when the livery is already owned (verified: 20 planes, AM coins
+        unchanged). What it buys is the sell ceiling: `binThreshold` is
+        per-livery, so a 747SP goes 900,000,000 in the manufacturer paint to
+        1,209,000,000 in Spirit 747SP — the whole point of repainting an
+        arbitrage batch before listing it. `maxAuctionSellPrice` (the starting
+        bid cap) is unchanged by the livery.
+
+        `shop/skin/remove` is the counterpart and is NOT wrapped here: removing
+        a livery you cannot re-apply is a one-way loss.
+        """
+        ids = [int(a) for a in aircraft_ids]
+        if not ids:
+            raise ValueError("apply_skin needs an explicit aircraft id list")
+        data = {"apply_to_all": "0", "skin_id": int(skin_id)}
+        data.update({f"aircraft_ids[{i}]": ac for i, ac in enumerate(ids)})
+        return self._request("POST", "shop/skin/apply", data=data)
 
     # ── daily: free shop currency ───────────────────────────────────────
     def shop_offers(self) -> list:

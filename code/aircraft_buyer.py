@@ -38,7 +38,7 @@ Requirements:
   - httpx and websocket-client pip packages
 """
 
-import argparse, contextlib, json, math, re, sys, time
+import argparse, contextlib, json, sys, time
 
 from cdp import CDP, get_am_tab, connect_cdp, js_args, get_balance, BASE_URL  # noqa: F401
 from db import get_db, close_db

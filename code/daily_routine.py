@@ -62,6 +62,20 @@ def _is_auth_error(result: dict) -> bool:
     return False
 
 
+# Substrings marking a transient network failure worth a retry: TLS handshake
+# timeouts, connection resets, read timeouts. Auth errors are handled
+# separately above; anything else (game refusals) is final.
+TRANSIENT_MARKERS = ("timeout", "connect", "network", "reset", "temporar")
+TRANSIENT_RETRIES = 2
+
+
+def _is_transient_error(result: dict) -> bool:
+    if result.get("ok") is not False:
+        return False
+    msg = str(result.get("error", "")).lower()
+    return any(m in msg for m in TRANSIENT_MARKERS)
+
+
 # ── tasks ───────────────────────────────────────────────────────────────────
 # Each takes (dry_run) and returns the tool's result dict. Keep them free-only.
 
@@ -76,7 +90,6 @@ def task_slots(dry_run: bool) -> dict:
     The milestone gift (a livery) is what makes the ~20 minutes of spinning
     worth it, so outside an event window this is a deliberate no-op.
     """
-    import mcp_server
     probe = _tool("mobile_daily_slot")(dry_run=True)
     if not probe.get("ok"):
         return probe
@@ -148,6 +161,20 @@ def run_task(name: str, dry_run: bool, fh=None) -> dict:
                 result = TASKS[name](dry_run)
             except Exception as e:
                 result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    attempt = 0
+    while _is_transient_error(result) and attempt < TRANSIENT_RETRIES \
+            and not dry_run:
+        # Transient network failure (e.g. a TLS handshake timeout mid-spin).
+        # All tasks are idempotent or resumable, so a retry is safe.
+        attempt += 1
+        wait = 120 * attempt
+        log(f"   transient network error -- retry {attempt}/"
+            f"{TRANSIENT_RETRIES} in {wait}s", fh)
+        time.sleep(wait)
+        try:
+            result = TASKS[name](dry_run)
+        except Exception as e:
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
     log(f"   {json.dumps(result)[:400]}", fh)
     return result
 

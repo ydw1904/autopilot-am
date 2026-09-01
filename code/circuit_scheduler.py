@@ -22,15 +22,15 @@ Requirements: Chrome running with --remote-debugging-port=9222 --remote-allow-or
               httpx, websocket-client, colorama pip packages
 """
 
-import argparse, contextlib, json, math, re, sys, time
+import argparse, contextlib, json, math, re, sys
 from urllib.parse import quote
 
 from colorama import init, Fore, Style
 
 from cdp import CDP, get_am_tab, connect_cdp, BASE_URL  # noqa: F401
-from db import get_db, close_db
-# Re-exported for callers that import these through circuit_scheduler
-# (gui/warehouse.py etc.).
+from db import get_db, close_db, get_player_hub_id
+from mobile_api import AMClient, AMError, AMSession
+# Re-exported for callers that import these through circuit_scheduler.
 from planning_page import (  # noqa: F401
     navigate_to_planning, select_hub, get_aircraft_at_hub, get_lines_at_hub,
 )
@@ -587,29 +587,49 @@ def _schedule(args, p):
         }
 
     # ── Live scheduling ─────────────────────────────────────────────────
-    print(f"{Fore.CYAN}Connecting to Chrome...")
-    cdp = connect_cdp()
+    # Mobile is primary: it reads the hub and writes the planning over plain
+    # HTTP, so no Chrome. The backend is chosen BEFORE anything is written —
+    # a partial failure exits non-zero too, so falling back afterwards would
+    # apply half the schedule twice.
+    cdp = None
+    backend = _mobile_client()
+    hub_aircraft = mobile_lines = None
+    if backend is not None:
+        print(f"{Fore.CYAN}Reading hub {hub_iata} over the mobile API...")
+        try:
+            view = _mobile_hub_view(backend, hub_iata)
+        except AMError as e:
+            print(f"{Fore.YELLOW}Mobile read failed ({e}) — falling back to Chrome")
+            view = None
+        if view is None:
+            backend = None
+        else:
+            hub_aircraft, mobile_lines = view
 
-    # Step 1: Navigate to planning page
-    print(f"{Fore.CYAN}Navigating to planning page...")
-    if not navigate_to_planning(cdp):
-        print(f"{Fore.YELLOW}Planning page may not have loaded fully, continuing...")
+    if backend is None:
+        print(f"{Fore.CYAN}Connecting to Chrome...")
+        cdp = backend = connect_cdp()
 
-    # Step 2: Select hub
-    print(f"{Fore.CYAN}Selecting hub {hub_iata}...")
-    if not select_hub(cdp, hub_iata):
-        print(f"{Fore.RED}ERROR: Cannot select hub {hub_iata}", file=sys.stderr)
-        cdp.close()
-        close_db()
-        sys.exit(1)
+        # Step 1: Navigate to planning page
+        print(f"{Fore.CYAN}Navigating to planning page...")
+        if not navigate_to_planning(cdp):
+            print(f"{Fore.YELLOW}Planning page may not have loaded fully, continuing...")
 
-    # Step 3: Read aircraft at this hub
-    hub_aircraft = get_aircraft_at_hub(cdp, hub_iata)
+        # Step 2: Select hub
+        print(f"{Fore.CYAN}Selecting hub {hub_iata}...")
+        if not select_hub(cdp, hub_iata):
+            print(f"{Fore.RED}ERROR: Cannot select hub {hub_iata}", file=sys.stderr)
+            cdp.close()
+            close_db()
+            sys.exit(1)
+
+        # Step 3: Read aircraft at this hub
+        hub_aircraft = get_aircraft_at_hub(cdp, hub_iata)
+
     if not hub_aircraft:
-        print(f"{Fore.RED}ERROR: No aircraft found at hub {hub_iata} on planning page",
-              file=sys.stderr)
-        print(f"  Make sure the correct hub is selected.", file=sys.stderr)
-        cdp.close()
+        print(f"{Fore.RED}ERROR: No aircraft found at hub {hub_iata}", file=sys.stderr)
+        if cdp:
+            cdp.close()
         close_db()
         sys.exit(1)
     print(f"  {len(hub_aircraft)} aircraft at hub:")
@@ -628,14 +648,16 @@ def _schedule(args, p):
         hub_lines = [{"lineId": lid, "dest": dest, "name": ""}
                      for dest, lid in db_line_map.items()]
     else:
-        hub_lines = get_lines_at_hub(cdp, hub_iata)
+        hub_lines = (mobile_lines if cdp is None
+                     else get_lines_at_hub(cdp, hub_iata))
         if not hub_lines:
-            print(f"{Fore.RED}ERROR: No lines found at hub {hub_iata} on planning page",
+            print(f"{Fore.RED}ERROR: No lines found at hub {hub_iata}",
                   file=sys.stderr)
-            cdp.close()
+            if cdp:
+                cdp.close()
             close_db()
             sys.exit(1)
-        # Write scraped line_ids back to DB
+        # Write the line_ids we just read back to DB
         _write_line_ids_to_db(hub_iata, hub_lines, db)
     print(f"  {len(hub_lines)} lines at hub")
     # Show a few lines for debugging
@@ -734,14 +756,15 @@ def _schedule(args, p):
             for f in flights:
                 print(f"      {fmt_time(f['takeOffTime']):>12}  ->  line {f['lineId']}")
 
-            clear_result = clear_schedule(cdp, ac_id)
+            clear_result = clear_schedule(backend, ac_id)
             if clear_result and clear_result.get("result"):
                 print(f"    {Fore.GREEN}Cleared")
             elif clear_result:
                 print(f"    {Fore.YELLOW}Clear: {clear_result.get('message', clear_result)}")
-            cdp.wait(0.3)
+            if cdp:
+                cdp.wait(0.3)
 
-            result = submit_flights(cdp, ac_id, flights)
+            result = submit_flights(backend, ac_id, flights)
             if result and result.get("result"):
                 print(f"    {Fore.GREEN}SUCCESS")
                 successes += 1
@@ -752,7 +775,8 @@ def _schedule(args, p):
                 print(f"    {Fore.RED}FAILED: {msg}")
                 error_count += 1
                 res["errors"].append(f"{label}: {msg}")
-            cdp.wait(0.5)
+            if cdp:
+                cdp.wait(0.5)
 
         # Update DB progress: total scheduled = preserved + new successes
         scheduled_total = preserved + successes
@@ -770,9 +794,11 @@ def _schedule(args, p):
           f"{Fore.YELLOW}Skipped: {skipped_count}{Style.RESET_ALL}")
     print(f"{'=' * 62}\n")
 
-    cdp.close()
+    if cdp:
+        cdp.close()
     close_db()
-    return {"hub": hub_iata, "dry_run": False, "circuits": results}
+    return {"hub": hub_iata, "dry_run": False, "circuits": results,
+            "backend": "cdp" if cdp else "mobile"}
 
 
 if __name__ == "__main__":

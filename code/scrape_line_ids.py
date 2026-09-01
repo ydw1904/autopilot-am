@@ -13,10 +13,10 @@ Usage:
 Requires Chrome with --remote-debugging-port=9222 and a logged-in AM tab.
 """
 
-import argparse, os, sys, time
+import argparse, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdp import CDP, get_am_tab, BASE_URL
+from cdp import CDP, get_am_tab
 from db import get_db, close_db, load_player_hubs
 from planning_page import navigate_to_planning, select_hub, get_lines_at_hub
 

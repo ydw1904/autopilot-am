@@ -14,7 +14,7 @@ Usage:
 Requires Chrome with --remote-debugging-port=9222 and a logged-in AM tab.
 """
 
-import argparse, json, os, re, sys, time
+import argparse, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab, BASE_URL

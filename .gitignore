@@ -20,7 +20,7 @@ venv/
 .LSOverride
 
 # SQLite databases (local data)
-db/*.db
+db/
 **/*.db
 
 # Scraped / generated data
