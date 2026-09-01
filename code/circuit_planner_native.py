@@ -1,8 +1,7 @@
-"""ctypes wrapper around the C++ beam-search dylib (code/native/).
+"""ctypes wrapper around the Rust planner dylib (code/native/).
 
-Drop-in replacement for the old Rust/pyo3 ``circuit_planner_native``
-extension: same module name, same ``search_circuits_native`` signature,
-same return shape ``[(score, total_time, [route_idx, ...]), ...]``.
+The plain C ABI keeps the same ``search_circuits_native`` signature and
+return shape ``[(score, total_time, [route_idx, ...]), ...]``.
 
 Build the dylib with code/native/build.sh; if it is missing, importing
 this module raises ImportError and circuit_planner.py falls back to the
@@ -39,7 +38,20 @@ _lib.search_circuits_native.argtypes = [
     _c_double_p, _c_double_p, _c_int32_p, _c_int32_p,
 ]
 
-_MAX_ROUTES = 192  # bitset capacity in beam_search.cpp
+try:
+    _optimize_circuit = _lib.optimize_circuit_native
+except AttributeError as exc:
+    raise ImportError(
+        f"{_LIB_PATH} is stale; rebuild it with code/native/build.sh") from exc
+_optimize_circuit.restype = ctypes.c_int
+_optimize_circuit.argtypes = [
+    _c_double_p, _c_double_p, ctypes.c_int64,
+    ctypes.c_double, ctypes.c_double, ctypes.c_int64,
+    ctypes.c_double, ctypes.c_double,
+    _c_int32_p, _c_int64_p, _c_double_p,
+]
+
+_MAX_ROUTES = 192  # bitset capacity in beam_search.rs
 
 
 def _dptr(arr):
@@ -64,6 +76,8 @@ def search_circuits_native(demands, prices, flight_times, eco_demands,
     if top_n <= 0:
         raise ValueError("top_n must be positive")
     m = len(top_indices)
+    if np.any(top_indices < 0) or np.any(top_indices >= m):
+        raise ValueError(f"top_indices entries must be between 0 and {m - 1}")
     for name, arr in (("demands", demands), ("prices", prices)):
         if arr.shape != (m, 4):
             raise ValueError(f"{name} must have shape ({m}, 4), got {arr.shape}")
@@ -96,3 +110,32 @@ def search_circuits_native(demands, prices, flight_times, eco_demands,
                                       i * _MAX_ROUTES + out_counts[i]]])
         for i in range(n)
     ]
+
+
+def optimize_circuit_native(demands, prices, max_pax, max_ton, max_waves,
+                            overshoot_pct=0.0, wave_slack=0.02):
+    demands = np.ascontiguousarray(demands, dtype=np.float64)
+    prices = np.ascontiguousarray(prices, dtype=np.float64)
+    if demands.ndim != 2 or demands.shape[1] != 4 or demands.shape[0] == 0:
+        raise ValueError(f"demands must have shape (N, 4), got {demands.shape}")
+    if prices.shape != demands.shape:
+        raise ValueError(f"prices must have shape {demands.shape}, got {prices.shape}")
+
+    out_config = np.empty(4, dtype=np.int32)
+    out_waves = np.empty(1, dtype=np.int64)
+    out_revenue = np.empty(1, dtype=np.float64)
+    found = _optimize_circuit(
+        _dptr(demands), _dptr(prices), len(demands),
+        float(max_pax), float(max_ton), int(max_waves),
+        float(overshoot_pct), float(wave_slack),
+        out_config.ctypes.data_as(_c_int32_p),
+        out_waves.ctypes.data_as(_c_int64_p), _dptr(out_revenue),
+    )
+    if not found:
+        return None, 1, -1
+    revenue = float(out_revenue[0])
+    if revenue.is_integer():
+        revenue = int(revenue)
+    return ({"eco": int(out_config[0]), "bus": int(out_config[1]),
+             "fir": int(out_config[2]), "cargo": int(out_config[3])},
+            int(out_waves[0]), revenue)

@@ -27,9 +27,11 @@ except ImportError:
     njit = None
 
 try:
-    from circuit_planner_native import search_circuits_native
+    from circuit_planner_native import (optimize_circuit_native,
+                                        search_circuits_native)
     _HAS_NATIVE = True
 except ImportError:
+    optimize_circuit_native = None
     search_circuits_native = None
     _HAS_NATIVE = False
 
@@ -217,7 +219,7 @@ def quick_revenue_estimate(routes_list, ac, comfort, speed, max_waves=20,
 
 # Array-based scorer shared by the Python beam search. Plain Python by
 # default; JIT-compiled below when numba is installed (same semantics,
-# and identical to eval_config in native/beam_search.cpp — keep in lockstep).
+# and identical to eval_config in native/beam_search.rs; keep in lockstep).
 def _eval_cfg_nb(eco, bus, fir, cargo, demands, prices,
                  max_pax, max_ton, max_waves, overshoot_pct):
     if eco + bus + fir + cargo == 0:
@@ -338,7 +340,7 @@ def _search_circuits_native(routes, ac, comfort, speed, top_n, beam_width,
                              max_steps, max_routes, max_waves, match,
                              overshoot_pct=0.0):
     routes_ranked = sorted(enumerate(routes), key=lambda x: -x[1]["eco_d"])
-    # The C++ RouteSet is a fixed 3xuint64 bitset: indices >= 192 would write
+    # The Rust RouteSet is a fixed 3xuint64 bitset: indices >= 192 would write
     # out of bounds. Clamp the user-controllable --max-routes here.
     top = routes_ranked[:min(max_routes, 192)]
     M = len(top)
@@ -512,8 +514,39 @@ def search_circuits(routes, ac, comfort, speed, top_n=3, beam_width=1200,
 #  PHASE 2 — Full Seat Config + Revenue Optimization
 # ═══════════════════════════════════════════════════════════════════
 
-def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
-                     overshoot_pct=0.0, wave_slack=0.02):
+def _circuit_breakdown(routes_list, best_cfg, best_waves):
+    breakdown = []
+    if not best_cfg or best_waves <= 0:
+        return breakdown
+    for rd in routes_list:
+        route_info = {"iata": rd["iata"], "dist": rd["dist"], "classes": []}
+        route_rev = 0
+        for cls_name, seats, price_key, dem_key in [
+            ("eco", best_cfg["eco"], "p_eco", "eco_d"),
+            ("bus", best_cfg["bus"], "p_bus", "bus_d"),
+            ("fir", best_cfg["fir"], "p_fir", "fir_d"),
+            ("cargo", best_cfg["cargo"], "p_cargo", "cargo_d"),
+        ]:
+            cap = 2 * seats * best_waves
+            dem = rd[dem_key]
+            price = rd[price_key]
+            ss = supersim_price(price, cap, dem)
+            filled = min(cap, dem)
+            cls_rev = filled * ss
+            route_rev += cls_rev
+            route_info["classes"].append({
+                "name": cls_name, "seats": seats, "cap": cap,
+                "dem": dem, "price": price, "ss_price": ss,
+                "filled": filled, "rev": cls_rev, "remaining": dem - cap,
+            })
+        route_info["rev"] = route_rev
+        breakdown.append(route_info)
+    return breakdown
+
+
+def _optimize_circuit_python(routes_list, ac, comfort=500, speed=700,
+                             max_waves=20, overshoot_pct=0.0,
+                             wave_slack=0.02):
     """Phase 2 optimizer.
 
     ``overshoot_pct`` controls how much over-supply is permitted on bus/fir/
@@ -672,35 +705,36 @@ def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
             fine_tune(cfg_pick)
     best_cfg, best_waves, best_rev = pick()
 
-    # Build breakdown
-    breakdown = []
-    if best_cfg and best_waves > 0:
-        for rd in routes_list:
-            route_info = {"iata": rd["iata"], "dist": rd["dist"], "classes": []}
-            route_rev = 0
-            for cls_name, seats, price_key, dem_key in [
-                ("eco", best_cfg["eco"], "p_eco", "eco_d"),
-                ("bus", best_cfg["bus"], "p_bus", "bus_d"),
-                ("fir", best_cfg["fir"], "p_fir", "fir_d"),
-                ("cargo", best_cfg["cargo"], "p_cargo", "cargo_d"),
-            ]:
-                cap = 2 * seats * best_waves
-                dem = rd[dem_key]
-                price = rd[price_key]
-                ss = supersim_price(price, cap, dem)
-                filled = min(cap, dem)
-                cls_rev = filled * ss
-                route_rev += cls_rev
-                rem = dem - cap
-                route_info["classes"].append({
-                    "name": cls_name, "seats": seats, "cap": cap,
-                    "dem": dem, "price": price, "ss_price": ss,
-                    "filled": filled, "rev": cls_rev, "remaining": rem,
-                })
-            route_info["rev"] = route_rev
-            breakdown.append(route_info)
+    return (best_cfg, best_waves, best_rev,
+            _circuit_breakdown(routes_list, best_cfg, best_waves))
 
-    return best_cfg, best_waves, best_rev, breakdown
+
+def optimize_circuit(routes_list, ac, comfort=500, speed=700, max_waves=20,
+                     overshoot_pct=0.0, wave_slack=0.02):
+    """Optimize the shared seat config in Rust, with a Python fallback."""
+    if optimize_circuit_native is None:
+        return _optimize_circuit_python(
+            routes_list, ac, comfort, speed, max_waves,
+            overshoot_pct, wave_slack)
+
+    for rd in routes_list:
+        rd["p_eco"] = ideal_eco(rd["dist"], comfort)
+        rd["p_bus"] = ideal_bus(rd["dist"], comfort)
+        rd["p_fir"] = ideal_fir(rd["dist"], comfort)
+        rd["p_cargo"] = ideal_cargo(rd["dist"], speed)
+    demands = np.array([
+        [rd["eco_d"], rd["bus_d"], rd["fir_d"], rd["cargo_d"]]
+        for rd in routes_list
+    ], dtype=np.float64)
+    prices = np.array([
+        [rd["p_eco"], rd["p_bus"], rd["p_fir"], rd["p_cargo"]]
+        for rd in routes_list
+    ], dtype=np.float64)
+    best_cfg, best_waves, best_rev = optimize_circuit_native(
+        demands, prices, ac["pax"], ac["tonnage"], max_waves,
+        overshoot_pct, wave_slack)
+    return (best_cfg, best_waves, best_rev,
+            _circuit_breakdown(routes_list, best_cfg, best_waves))
 
 
 # ═══════════════════════════════════════════════════════════════════

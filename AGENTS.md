@@ -30,9 +30,10 @@ tried in [`tickets/013-mobile-api-remaining-gaps.md`](tickets/013-mobile-api-rem
 — read it before attacking any of them, especially the schedule writes.
 
 **Language:** Python 3.10+. Browser automation via Chrome DevTools Protocol (CDP,
-primary) with an optional OpenClaw backend in `scraping/`. The circuit beam search
-has a hot path in native **C++** (`code/native/beam_search.cpp`) behind a ctypes
-wrapper. The UI is a React/Vite browser app served by FastAPI. Python deps are
+primary) with an optional OpenClaw backend in `scraping/`. Both circuit optimization
+phases run in native **Rust** (`code/native/beam_search.rs`) behind a ctypes wrapper,
+with Python fallbacks. The UI is a React/Vite browser app served by FastAPI. Python
+deps are
 declared with minimum versions in
 `code/requirements.txt` (`mcp`, `httpx`, `websocket-client`, `numpy`,
 `colorama`, `fastapi`, `uvicorn`; `pytest` for the test suite).
@@ -87,8 +88,8 @@ airlines-manager/
     ├── cdp.py                      ← shared CDP client  ← SHARED LAYER
     ├── db.py                       ← shared SQLite layer ← SHARED LAYER
     ├── circuit_planner.py          ← PRIMARY: Phase 1 + Phase 2 optimization
-    ├── circuit_planner_native.py   ← ctypes wrapper for the C++ beam search
-    ├── native/beam_search.cpp      ← native beam search; build with native/build.sh
+    ├── circuit_planner_native.py   ← ctypes wrapper for both Rust optimizer phases
+    ├── native/beam_search.rs       ← native optimizer; build with native/build.sh
     │
     ├── circuit_route_buyer.py      ← buy routes (CDP, country-listing flow)
     ├── aircraft_buyer.py           ← buy aircraft (CDP); reads circuit config from DB
@@ -154,17 +155,19 @@ directory are local. The repo ships the code that produces and consumes them.
 ### `circuit_planner.py` — primary optimizer
 Two phases. **Phase 1** (`search_circuits`): beam search over route combinations,
 each scored by `quick_revenue_estimate()`; filtered by a demand-balance ratio
-(`--match`). The hot loop is delegated to the native C++ search via
-`circuit_planner_native.search_circuits_native` when the dylib is built. **Phase 2**
-(`optimize_circuit`): coarse + fine grid search over `(eco,bus,fir,cargo)` seats and
-wave count, using SuperSim pricing. Pricing helpers (`ideal_eco/bus/fir/cargo`,
+(`--match`). The hot loop is delegated to
+`circuit_planner_native.search_circuits_native` when the Rust dylib is built. **Phase 2**
+(`optimize_circuit`): native coarse + fine grid search over `(eco,bus,fir,cargo)`
+seats and wave count, using SuperSim pricing. Pricing helpers (`ideal_eco/bus/fir/cargo`,
 `supersim_price`, `daily_turnover`) and the `ALIASES` map live here.
 
-### `circuit_planner_native.py` + `native/beam_search.cpp`
-ctypes wrapper + native beam search. Drop-in for the older Rust/pyo3 extension: same
-module name, same `search_circuits_native` signature, same return shape
-`[(score, total_time, [route_idx, …]), …]`. Build with `code/native/build.sh`
-(needs `-ffp-contract=off` to match Python float math).
+### `circuit_planner_native.py` + `native/beam_search.rs`
+Dependency-free Rust `cdylib` behind a plain C ABI. Phase 1 keeps the
+`search_circuits_native` signature and return shape
+`[(score, total_time, [route_idx, …]), …]`; Phase 2 returns the best seat config,
+wave count and revenue while Python builds the public per-route breakdown. Build
+with `code/native/build.sh`. The exact-output tests compare serialized bytes against
+the former C++ Phase 1 and Python Phase 2 oracles.
 
 ### `circuit_route_buyer.py` — route purchaser (CDP)
 Default flow drives the game's country-listing page and submits the real form with
@@ -963,7 +966,7 @@ sqlite3 db/am_aircraft.db "SELECT s.source, COUNT(f.aircraft_id) FROM fleet f \
   JOIN mobile_skins s ON s.skin_id=f.skin_id GROUP BY 1"
 ```
 
-Rebuild the native search after editing `native/beam_search.cpp`:
+Rebuild the native optimizer after editing `native/beam_search.rs`:
 `bash code/native/build.sh` (the planner falls back to pure Python if the dylib is
 absent).
 

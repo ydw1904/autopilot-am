@@ -21,7 +21,7 @@ loop without breaking things.
         │  MCP / JSON-RPC over stdio
         ▼
    mcp_server.py ──┬── live game I/O ──► cdp.py ──► Chrome (CDP WebSocket) ──► airlines-manager.com
-                   └── planning/math ──► circuit_planner.py ──► beam_search (native C++) + db.py (SQLite)
+                   └── planning/math ──► circuit_planner.py ──► native Rust optimizer + db.py (SQLite)
 ```
 
 ---
@@ -44,8 +44,8 @@ loop without breaking things.
   headless login flow.
 - **A real optimizer underneath.** Route/seat/wave selection is a genuine constrained
   optimization problem (mixed-integer, coupled seat configs across a circuit). The
-  planner uses beam search with a hot path implemented in **native C++** behind a
-  ctypes wrapper. See [Optimization engine](#optimization-engine).
+  planner runs both optimization phases in **native Rust** behind a ctypes wrapper.
+  See [Optimization engine](#optimization-engine).
 
 This is a personal agent I actually use to run the game as a production task. It started as a CLI optimizer and grew a GUI and then an MCP server as
 the workflow got more autonomous (see `CHANGELOG.md` / git history).
@@ -135,8 +135,8 @@ airlines-manager/
     ├── cdp.py                   ← shared Chrome DevTools Protocol layer
     ├── db.py                    ← shared SQLite access layer
     ├── circuit_planner.py       ← primary optimizer (Phase 1 + Phase 2)
-    ├── circuit_planner_native.py← ctypes wrapper for the C++ beam search
-    ├── native/beam_search.cpp   ← native beam search (build.sh → .dylib/.so)
+    ├── circuit_planner_native.py← ctypes wrapper for the Rust optimizer
+    ├── native/beam_search.rs    ← native Phase 1 + Phase 2 optimizer
     ├── circuit_route_buyer.py   ← route purchaser (CDP, country-listing flow)
     ├── aircraft_buyer.py        ← aircraft purchaser (CDP)
     ├── circuit_scheduler.py     ← flight scheduler
@@ -159,8 +159,8 @@ constrained-optimization problem. Two phases:
 
 - **Phase 1 — circuit selection.** Beam search over route combinations to find sets of
   routes ("circuits") that maximize weekly demand captured within a 168-hour game week,
-  subject to aircraft range/category and a demand-balance filter. Hot path is native C++.
-- **Phase 2 — seat config + revenue.** Grid search over the seat split
+  subject to aircraft range/category and a demand-balance filter. Hot path is native Rust.
+- **Phase 2 — seat config + revenue.** Native Rust grid search over the seat split
   (eco/bus/first/cargo) and wave count to maximize weekly revenue, accounting for the
   game's undersupply pricing bonus and the fact that **seat config is shared across all
   routes in a circuit** (one low-demand class on one route caps that class everywhere).
@@ -265,7 +265,7 @@ Populated by the `scrape_*` / `warehouse_sync` / audit tools against a live sess
 
 Python 3.10+. Pinned in [`code/requirements.txt`](code/requirements.txt):
 `mcp`, `httpx`, `websocket-client`, `numpy`, `colorama`, `fastapi`, and `uvicorn`.
-The native beam search needs a C++ compiler (`code/native/build.sh`).
+The native optimizer needs `rustc` (`code/native/build.sh`) and fetches no crates.
 
 ---
 
