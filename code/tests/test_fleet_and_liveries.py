@@ -126,9 +126,15 @@ def test_get_fleet_aircraft_filters(fleet_conn):
     c001_planes = dbmod.get_fleet_aircraft(name_query="C001")
     assert len(c001_planes) == 2
 
-    # Rename autocomplete is an indexed prefix lookup, not a full fleet read.
+    # Rename autocomplete matches anywhere in the name — livery-series names
+    # are rarely at the front — with prefix hits sorted first.
     assert dbmod.get_fleet_name_suggestions("MPM-", limit=1) == ["MPM-C002-001"]
+    assert dbmod.get_fleet_name_suggestions("C002") == ["MPM-C002-001"]
+    assert dbmod.get_fleet_name_suggestions("idle") == ["MPM-IDLE-01"]
+    assert dbmod.get_fleet_name_suggestions("-C001-") == ["FRA-C001-001", "FRA-C001-002"]
+    # Wildcards in the typed text stay literal.
     assert dbmod.get_fleet_name_suggestions("M%") == []
+    assert dbmod.get_fleet_name_suggestions("C0_2") == []
 
 
 def test_get_fleet_aircraft_page_reports_total_and_searches_across_fields(fleet_conn):
@@ -531,3 +537,47 @@ def test_hub_country_code_prefers_the_hubs_catalog(fleet_conn):
     assert dbmod.get_hub_country_code("XXX") == "pt"   # catalog-only hub
     assert dbmod.get_hub_country_code("MPM") == "mz"   # catalog wins, normalized
     assert dbmod.get_hub_country_code("FRA") == "de"   # not in catalog -> fallback
+
+
+def test_am_coin_aircraft_is_not_a_shop_gift(fleet_conn):
+    """`aircraft`/`amc` is the C-coin aircraft offer, not a giveaway."""
+    store = mobile_store.MobileStore(fleet_conn)
+    store.record_shop_offer({
+        "id": 25411, "title": "X737-MAX7 - Tennis 2026", "template": "aircraft",
+        "purchaseCost": 1000, "purchaseCurrency": "amc",
+        "content": [{"effectType": "aircraft", "aircraftModelId": 181,
+                     "skin": {"id": 4649478, "type": 1,
+                              "name": "X737-MAX7 - Tennis 2026"}}],
+    })
+    store.commit()
+
+    tag = dbmod.get_livery_tags()[4649478][0]
+    assert tag["kind"] == "shop_amc"
+    assert tag["label"] == "AM coins"
+    assert "1,000 AM coins" in tag["title"]
+
+
+def test_suggest_aircraft_name_continues_the_livery_series(fleet_conn):
+    # The Turkish Airways family is named "B742-TURKISH-NN"; a second model
+    # wearing the same livery gets the same slug behind its own ICAO prefix.
+    fleet_conn.execute("UPDATE fleet SET name = 'B742-TURKISH-04' WHERE aircraft_id = 103")
+    fleet_conn.commit()
+    assert dbmod.suggest_aircraft_name(
+        "747-200B", "B742", "737-400 - Challenge Turkish Airways") == "B742-TURKISH-05"
+    assert dbmod.suggest_aircraft_name(
+        "A330-300", "A333", "737-400 - Challenge Turkish Airways") == "A333-TURKISH-01"
+
+    # No plane named after this livery yet: slug falls back to the livery text.
+    assert dbmod.suggest_aircraft_name(
+        "747-200B", "B742", "747-200B - Challenge Xmas 2025") == "B742-XMAS2025-01"
+
+    # House liveries are named after the circuit, not the skin: no series.
+    assert dbmod.suggest_aircraft_name(
+        "A330-300", "A333", "A330-300 - (Manufacturer livery)") is None
+
+    # The game's own default name wears the series shape but is not a series:
+    # "SHOP-A330-800" is a tag plus the model, and must not become the slug.
+    fleet_conn.execute("UPDATE fleet SET name = 'SHOP-747-200B' WHERE aircraft_id = 104")
+    fleet_conn.commit()
+    assert dbmod.suggest_aircraft_name(
+        "747-200B", "B742", "737-400 - Challenge Turkish Airways") == "B742-TURKISH-05"

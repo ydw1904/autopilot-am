@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 export type MenuIcon = React.ComponentType<{ size?: number }>;
 
@@ -92,7 +93,7 @@ export function MenuSelect({ label, value, onChange, options, groups, icon: Fall
 
   return (
     <div className={`menu-select${open ? " is-open" : ""}${className ? ` ${className}` : ""}`} ref={rootRef}>
-      <button
+      <Button
         type="button"
         className="menu-select-trigger"
         aria-haspopup="listbox"
@@ -113,7 +114,7 @@ export function MenuSelect({ label, value, onChange, options, groups, icon: Fall
           {current.hint && <em>{current.hint}</em>}
         </span>
         <ChevronDown size={16} className="menu-select-chevron" />
-      </button>
+      </Button>
 
       {open && (
         <div
@@ -131,7 +132,7 @@ export function MenuSelect({ label, value, onChange, options, groups, icon: Fall
                 const Icon = option.icon;
                 const index = flat.indexOf(option);
                 return (
-                  <button
+                  <Button
                     type="button"
                     key={option.value}
                     role="option"
@@ -146,7 +147,7 @@ export function MenuSelect({ label, value, onChange, options, groups, icon: Fall
                       {option.hint && <em>{option.hint}</em>}
                     </span>
                     {option.value === value && <Check size={16} className="menu-select-check" />}
-                  </button>
+                  </Button>
                 );
               })}
             </div>

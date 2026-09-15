@@ -5,7 +5,8 @@ import pytest
 from mobile_api import AMClient
 from mobile_route_auditor import (audit_budget, audit_lines, audit_routes,
                                   candidates, demand_from_audit,
-                                  great_circle_km, sync_world_rows)
+                                  great_circle_km, sync_owned_lines,
+                                  sync_world_rows)
 
 
 def make_db():
@@ -129,3 +130,27 @@ def test_world_sync_adds_missing_rows_and_repairs_scraped_country_and_name():
     # Idempotent: a second pass is a no-op, so it is safe to run before a sweep.
     assert sync_world_rows(db, WORLD, "CGK") == {
         "rows_added": 0, "countries_fixed": 0, "names_filled": 0}
+
+
+def test_sync_owned_lines_marks_ownership_without_clobbering_demand():
+    """The free pricing read is enough to claim a hub's lines.
+
+    A line the game has never audited carries no `audit`, and its demand must
+    survive untouched — the point of this pass is ownership and line ids, not
+    replacing demand with nothing.
+    """
+    db = make_db()
+    result = sync_owned_lines(db, "LAX", [
+        {"aTwoName": "JFK", "id": 111,
+         "audit": {"demand": {"eco": 5000, "bus": 900, "first": 250, "cargo": 600}}},
+        {"aTwoName": "LHR", "id": 222},                # never audited in-game
+        {"aTwoName": "ZZZ", "id": 333},                # no routes row at all
+    ])
+
+    assert result["owned"] == 2 and result["no_row"] == ["ZZZ"]
+    rows = {r["dest_iata"]: r for r in db.execute("SELECT * FROM routes")}
+    assert (rows["JFK"]["is_owned"], rows["JFK"]["line_id"]) == (1, 111)
+    assert rows["JFK"]["eco_demand"] == 5000
+    assert (rows["LHR"]["is_owned"], rows["LHR"]["line_id"]) == (1, 222)
+    assert rows["LHR"]["eco_demand"] == 4000       # kept, not nulled
+    assert rows["SEA"]["line_id"] is None          # untouched: not in the payload

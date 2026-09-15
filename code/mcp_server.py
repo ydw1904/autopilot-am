@@ -874,6 +874,7 @@ def buy_aircraft(
     cargo: Optional[int] = None,
     quantity: Optional[int] = None,
     name: Optional[str] = None,
+    configs: Optional[list] = None,
     alliance: bool = False,
     dry_run: bool = True,
     list_only: bool = False,
@@ -881,6 +882,11 @@ def buy_aircraft(
     """Run the aircraft buyer script.
 
     Safety default: dry_run=True because this spends in-game money.
+    `configs` buys several configurations of the same model in ONE purchase,
+    e.g. [{"bus": 32, "qty": 98}, {"bus": 55, "qty": 1}]: each entry may set
+    eco/bus/first/cargo/qty/hub/name and inherits the top-level values for
+    whatever it omits. The 99-per-purchase ceiling covers the SUM of the
+    entries' quantities.
     alliance=True buys via "Purchase through Alliance" (alliance fixed discount
     plus members assistance fronted by the treasury) instead of paying in full
     personally; the personal path takes the game's own variable bulk discount.
@@ -931,6 +937,11 @@ def buy_aircraft(
         args.extend(["--quantity", str(quantity)])
     if name:
         args.extend(["--name", name])
+    for cfg in (configs or []):
+        if not isinstance(cfg, dict) or not cfg:
+            return {"error": f"configs entries must be non-empty dicts, got {cfg!r}"}
+        args.extend(["--config",
+                     ",".join(f"{k}={v}" for k, v in cfg.items())])
     if alliance:
         args.append("--alliance")
     if dry_run:
@@ -943,6 +954,7 @@ def buy_aircraft(
         "circuit": circuit,
         "model": model,
         "hub": hub.upper().strip() if hub else None,
+        "configs": configs,
         "alliance": alliance,
         "dry_run": dry_run,
     })

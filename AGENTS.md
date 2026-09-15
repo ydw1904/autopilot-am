@@ -14,8 +14,9 @@ and `GEMINI.md` are one-line pointers back here. Learn something durable? Edit
 3. **Two shared layers, no copies.** All CDP work goes through `code/cdp.py`, all
    DB work through `code/db.py`. Never add a second CDP client or DB-path definition.
 4. **Mobile API is primary, CDP is the fallback.** The mobile JSON API reports
-   refusals as errors; the web forms fail silently. Still CDP-only: buying routes
-   and aircraft, the demand refresh, `raw-ideal` pricing, `route_details.py`.
+   refusals as errors; the web forms fail silently. Still CDP-only: the bulk
+   aircraft buyer, the demand refresh, `raw-ideal` pricing, `route_details.py`.
+   Single routes buy fine over mobile `line/open` (verified 2026-09-15).
    See [`tickets/013-mobile-api-remaining-gaps.md`](tickets/013-mobile-api-remaining-gaps.md)
    for what has already been tried on the remaining gaps.
 5. **Route purchase uses the country-listing `form.submit()` flow, never `fetch()`.**
@@ -33,8 +34,11 @@ and `GEMINI.md` are one-line pointers back here. Learn something durable? Edit
    apply-to-all. Do not give it a cascade.
 10. **All mobile traffic is paced** (`mobile_api.PACER`, process-wide). Don't
     parallelize sweeps to go faster; conspicuous traffic is the failure mode.
-11. **No native `<select>` in `web/src/`.** Every dropdown is `<MenuSelect>`; there
-    are no `<select>` elements left, so a new one is always a mistake.
+11. **Use the local shadcn/ui primitives in every web workspace.** Import buttons,
+    inputs, checkboxes, and tables from `web/src/components/ui/`. Keep closed-set
+    dropdowns behind `<MenuSelect>`; never add a native `<select>`. Reuse the
+    shared pieces listed at the top of [`docs/web-ui.md`](docs/web-ui.md) before
+    writing a toolbar, formatter, empty state, or fetch effect by hand.
 12. **Never break `.venv/bin/python -m pytest code/tests/ -q`.** Offline, ~3s, and
     it is the only automatic check this repo has.
 
@@ -69,6 +73,7 @@ Generated state (`db/*.db`, `data/`) is **not** committed.
 | [`docs/architecture.md`](docs/architecture.md) | project overview, the three surfaces, directory layout, key game concepts (circuits, waves, SuperSim pricing, demand constraint), the SQLite data model |
 | [`docs/modules.md`](docs/modules.md) | `circuit_planner`, the native optimizer, the route/aircraft buyers, `route_details`, `auto_pricer`, `circuit_scheduler`, the fleet/data-sync scripts, `alliance_donator` |
 | [`docs/mobile-api.md`](docs/mobile-api.md) | the mobile JSON API: sessions and token renewal, every verified endpoint, schedule writes, SHM economics, the APK il2cpp metadata trick, request pacing, which web tools now run mobile-first |
+| [`docs/challenge-tal.md`](docs/challenge-tal.md) | the TAL Journey km challenge (Sep 15-28 2026): route maths, the store/ladder claim endpoints, `challenge_tal.py` hourly autopilot and how to move it to another machine |
 | [`docs/shm-and-syncs.md`](docs/shm-and-syncs.md) | `shm_watcher` standing orders and guards, `daily_routine`, the mobile twins (`mobile_pricer` / `mobile_renamer` / `mobile_reconfigurator`), `booster_sync`, `skin_name_sync`, `purchase_date_sync`, `mobile_login`, the mitmproxy capture pipeline |
 | [`docs/web-ui.md`](docs/web-ui.md) | `MenuSelect`, `TagPicker`, the read-only Network / Circuits / Pricing / Ops workspaces, the pricing apply flow, the aircraft editor |
 | [`docs/verification.md`](docs/verification.md) | the full verification command set and common tasks (add an aircraft, add a hub, change pricing, add an MCP tool) |

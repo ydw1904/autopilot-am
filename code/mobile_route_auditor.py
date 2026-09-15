@@ -212,6 +212,33 @@ def audit_lines(db, client, hub, hub_id, lines):
     return {"updated": updated, "failed": failed, "stopped": stopped}
 
 
+def sync_owned_lines(db, hub, lines):
+    """Mark a hub's owned lines in `routes` from the free pricing read.
+
+    Costs nothing: every line in the pricing payload already carries its last
+    audit, so a hub that has never been swept locally gets its ownership, line
+    ids and demand without a coupon. `audit_lines` is only for *refreshing*
+    those demand figures, which is what actually costs one coupon per line.
+    COALESCE keeps whatever demand a row already has when a line has never
+    been audited in-game at all.
+    """
+    owned, no_row = [], []
+    for line in lines:
+        iata = (line.get("aTwoName") or "").upper()
+        demand = ((line.get("audit") or {}).get("demand")) or {}
+        changed = db.execute(
+            "UPDATE routes SET is_owned=1, line_id=?, "
+            "eco_demand=COALESCE(?, eco_demand), bus_demand=COALESCE(?, bus_demand), "
+            "fir_demand=COALESCE(?, fir_demand), cargo_demand=COALESCE(?, cargo_demand) "
+            "WHERE hub_iata=? AND dest_iata=?",
+            (line.get("id"), demand.get("eco"), demand.get("bus"),
+             demand.get("first"), demand.get("cargo"), hub, iata),
+        ).rowcount
+        (owned if changed else no_row).append(iata)
+    db.commit()
+    return {"owned": len(owned), "routes": owned, "no_row": no_row}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hub", required=True)
@@ -220,6 +247,9 @@ def main():
     parser.add_argument("--limit", type=int)
     parser.add_argument("--sync-rows", action="store_true",
                         help="add missing destinations + fix country codes first")
+    parser.add_argument("--sync-owned", action="store_true",
+                        help="mark owned lines + their existing audit demand "
+                             "(free: no coupons, no cash)")
     parser.add_argument("--internal", action="store_true",
                         help="refresh OWNED lines instead (one coupon each)")
     parser.add_argument("--apply", action="store_true",
@@ -239,6 +269,12 @@ def main():
     if args.sync_rows:
         client = AMClient(AMSession.load())
         result["sync"] = sync_world_rows(db, retry_once(client.world), hub)
+    if args.sync_owned:
+        if hub_id is None:
+            raise SystemExit(f"No player hub id stored for {hub}")
+        client = client or AMClient(AMSession.load())
+        result["sync_owned"] = sync_owned_lines(
+            db, hub, retry_once(client.hub_pricing, hub_id))
     if args.internal:
         if hub_id is None:
             raise SystemExit(f"No player hub id stored for {hub}")

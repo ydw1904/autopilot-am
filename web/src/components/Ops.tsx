@@ -1,6 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import {
-  AlertTriangle,
   CheckCircle2,
   Clock3,
   Database,
@@ -9,30 +8,22 @@ import {
   Plane,
 } from "lucide-react";
 import { fetchOps } from "../api";
-import { OpsSnapshot } from "../types";
+import { dateTime, integer, parseGameDate } from "../format";
+import { EmptyState, ErrorState, LoadingState } from "./PageStates";
+import { useApi } from "../useApi";
+import { SectionHeader } from "./SectionHeader";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface OpsProps {
   refreshToken: number;
 }
 
-const integer = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
-
-function parseUtc(value: string | null): Date | null {
-  if (!value) return null;
-  const date = new Date(`${value.replace(" ", "T").split(".")[0]}Z`);
-  return Number.isNaN(date.valueOf()) ? null : date;
-}
-
-function formatWhen(value: string | null): string {
-  const date = parseUtc(value);
-  return date ? date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Never";
-}
 
 /** "in 42 min" / "ready" against the server's own clock, not the browser's —
  *  the two drift, and a delivery that reads "ready" early is a wasted poll. */
 function countdown(finishAt: string | null, serverTime: string | null): string {
-  const finish = parseUtc(finishAt);
-  const now = parseUtc(serverTime) ?? new Date();
+  const finish = parseGameDate(finishAt);
+  const now = parseGameDate(serverTime) ?? new Date();
   if (!finish) return "—";
   const minutes = Math.round((finish.getTime() - now.getTime()) / 60000);
   if (minutes <= 0) return "ready to claim";
@@ -41,26 +32,15 @@ function countdown(finishAt: string | null, serverTime: string | null): string {
 }
 
 function ageHours(value: string | null): number | null {
-  const date = parseUtc(value);
+  const date = parseGameDate(value);
   return date ? (Date.now() - date.getTime()) / 3600000 : null;
 }
 
 export function Ops({ refreshToken }: OpsProps) {
-  const [snapshot, setSnapshot] = useState<OpsSnapshot | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { data: snapshot, error } = useApi(fetchOps, [refreshToken]);
 
-  useEffect(() => {
-    let live = true;
-    fetchOps()
-      .then((data) => live && setSnapshot(data))
-      .catch((reason) => live && setError(reason instanceof Error ? reason.message : "Operations load failed"));
-    return () => { live = false; };
-  }, [refreshToken]);
-
-  if (error) {
-    return <div className="fatal-state"><AlertTriangle size={22} /><div><strong>Operations unavailable</strong><p>{error}</p></div></div>;
-  }
-  if (!snapshot) return <div className="command-skeleton"><div className="skeleton-block is-wide" /><div className="skeleton-block is-tall" /></div>;
+  if (error) return <ErrorState title="Operations unavailable" message={error} />;
+  if (!snapshot) return <LoadingState />;
 
   const { deliveries, daily, freshness } = snapshot;
   const aircraftPending = deliveries.events.filter((event) => event.type === "aircraft").length;
@@ -68,35 +48,29 @@ export function Ops({ refreshToken }: OpsProps) {
   return (
     <div className="ops-layout">
       <section className="flat-section">
-        <div className="section-title-row">
-          <div>
-            <p className="section-kicker">Waiting list</p>
-            <h2>Deliveries in flight</h2>
-          </div>
-          <span className="section-count">{deliveries.events.length} pending</span>
-        </div>
+        <SectionHeader kicker="Waiting list" title="Deliveries in flight" count={<>{deliveries.events.length} pending</>} />
 
         {deliveries.error ? (
-          <div className="fatal-state is-inline"><AlertTriangle size={20} /><div><strong>Mobile session unavailable</strong><p>{deliveries.error}</p></div></div>
+          <ErrorState inline title="Mobile session unavailable" message={deliveries.error} />
         ) : deliveries.events.length ? (
           <div className="grid-table-wrap">
-            <table className="grid-table">
-              <thead><tr><th>Item</th><th>Type</th><th>Aircraft</th><th>Ready</th><th className="is-numeric">Skip cost</th></tr></thead>
-              <tbody>
+            <Table className="grid-table">
+              <TableHeader><TableRow><TableHead>Item</TableHead><TableHead>Type</TableHead><TableHead>Aircraft</TableHead><TableHead>Ready</TableHead><TableHead className="is-numeric">Skip cost</TableHead></TableRow></TableHeader>
+              <TableBody>
                 {deliveries.events.map((event) => (
-                  <tr key={event.event_id ?? `${event.type}-${event.aircraft_id}`}>
-                    <td><strong>{event.label || "—"}</strong><small>{formatWhen(event.finish_at)}</small></td>
-                    <td>{event.type || "—"}</td>
-                    <td>{event.aircraft_id ?? <span className="is-dim">—</span>}</td>
-                    <td>{countdown(event.finish_at, deliveries.server_time)}</td>
-                    <td className="is-numeric">{event.am_coins_to_skip ? `${integer.format(event.am_coins_to_skip)} AM¢` : "—"}</td>
-                  </tr>
+                  <TableRow key={event.event_id ?? `${event.type}-${event.aircraft_id}`}>
+                    <TableCell><strong>{event.label || "—"}</strong><small>{dateTime(event.finish_at)}</small></TableCell>
+                    <TableCell>{event.type || "—"}</TableCell>
+                    <TableCell>{event.aircraft_id ?? <span className="is-dim">—</span>}</TableCell>
+                    <TableCell>{countdown(event.finish_at, deliveries.server_time)}</TableCell>
+                    <TableCell className="is-numeric">{event.am_coins_to_skip ? `${integer.format(event.am_coins_to_skip)} AM¢` : "—"}</TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         ) : (
-          <div className="empty-positive"><CheckCircle2 size={20} /><span>Nothing in delivery. Every aircraft is landed and sellable.</span></div>
+          <EmptyState positive icon={CheckCircle2} title="Nothing in delivery" hint="Every aircraft is landed and sellable." />
         )}
         <p className="table-footnote">
           A finished delivery still blocks the aircraft until it is claimed. Server clock: {deliveries.server_time || "unknown"}.
@@ -138,7 +112,7 @@ export function Ops({ refreshToken }: OpsProps) {
                   key={source.table}
                   icon={<Clock3 size={17} />}
                   label={`${source.label} · ${integer.format(source.rows)} rows`}
-                  value={formatWhen(source.newest)}
+                  value={dateTime(source.newest)}
                   warning={hours !== null && hours > 48}
                 />
               );

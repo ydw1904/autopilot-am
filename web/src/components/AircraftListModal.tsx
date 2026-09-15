@@ -2,6 +2,7 @@ import { ArrowRight, Plane, X } from "lucide-react";
 import { LiveryItem } from "../types";
 import { hubLabel } from "../hubFlag";
 import { displayLiveryName } from "../liveryName";
+import { Button } from "@/components/ui/button";
 
 interface AircraftListModalProps {
   item: LiveryItem;
@@ -18,7 +19,7 @@ export function AircraftListModal({ item, onClose, onViewInFleet }: AircraftList
             <p className="section-kicker">{item.aircraft.length} aircraft assigned</p>
             <h3>{displayLiveryName(item)}</h3>
           </div>
-          <button onClick={onClose} aria-label="Close aircraft list"><X size={16} /></button>
+          <Button onClick={onClose} aria-label="Close aircraft list"><X size={16} /></Button>
         </div>
 
         <div className="livery-modal-list">
@@ -31,7 +32,7 @@ export function AircraftListModal({ item, onClose, onViewInFleet }: AircraftList
                   <small>{plane.model}{plane.hub ? ` · Hub ${hubLabel(plane.hub, plane.country_code)}` : ""}</small>
                 </div>
               </div>
-              <span className={`livery-modal-util${plane.utilization >= 100 ? " is-full" : plane.utilization > 0 ? " is-partial" : ""}`}>
+              <span className={`livery-modal-util${plane.utilization > 93 ? " is-full" : plane.utilization > 0 ? " is-partial" : ""}`}>
                 {plane.utilization.toFixed(0)}% util
               </span>
             </div>
@@ -39,11 +40,11 @@ export function AircraftListModal({ item, onClose, onViewInFleet }: AircraftList
         </div>
 
         <div className="livery-modal-footer">
-          <button className="ghost-button" onClick={onClose}>Close</button>
-          <button className="livery-view-button" onClick={() => { onClose(); onViewInFleet(item.name); }}>
+          <Button className="ghost-button" onClick={onClose}>Close</Button>
+          <Button className="livery-view-button" onClick={() => { onClose(); onViewInFleet(item.name); }}>
             <span>View in Fleet</span>
             <ArrowRight size={14} />
-          </button>
+          </Button>
         </div>
       </div>
     </div>

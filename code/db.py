@@ -1065,17 +1065,109 @@ def get_fleet_aircraft_page(*, query=None, limit=50, offset=0, **filters) -> dic
     }
 
 
-def get_fleet_name_suggestions(prefix, limit=30) -> list[str]:
-    """Return a small indexed prefix match for the hangar rename field."""
-    prefix = str(prefix or "").strip()
-    if len(prefix) < 2:
+def get_fleet_name_suggestions(term, limit=30) -> list[str]:
+    """Return cached aircraft names containing ``term``, prefix matches first.
+
+    Substring rather than prefix: fleets are named after a livery series, so
+    "grand prix" has to reach "AGP Grand Prix 04" without typing the code in
+    front of it. That costs a scan of the name column, which is a few thousand
+    short strings.
+    """
+    term = str(term or "").strip()
+    if len(term) < 2:
         return []
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = get_db().execute(
-        "SELECT name FROM fleet WHERE name >= ? COLLATE NOCASE AND name < ? COLLATE NOCASE "
-        "GROUP BY name COLLATE NOCASE ORDER BY name COLLATE NOCASE LIMIT ?",
-        (prefix, prefix + "\uffff", max(1, min(int(limit), 50))),
+        "SELECT name FROM fleet WHERE name LIKE ? ESCAPE '\\' "
+        "GROUP BY name COLLATE NOCASE "
+        "ORDER BY (name LIKE ? ESCAPE '\\') DESC, name COLLATE NOCASE LIMIT ?",
+        (f"%{escaped}%", f"{escaped}%", max(1, min(int(limit), 50))),
     ).fetchall()
     return [row[0] for row in rows]
+
+
+# Special-livery planes are named "<PREFIX>-<SLUG>-<NN>" (B742-KANGAROO25-04).
+# Neither half is derivable. The prefix is usually the ICAO code but sometimes a
+# shorthand of it (X35KL for X350-1000ULR, whose ICAO is X35K), and the slug is a
+# hand-abbreviation of the livery ("Lunar New Year 2025" -> CNY25). So both are
+# LEARNED from planes already wearing a skin from the same livery family, and
+# only fall back to something mechanical when the family is unnamed so far.
+_SERIES_NAME = re.compile(r"^([A-Z0-9]+)-([A-Z0-9]+)-(\d+)$")
+
+
+def _livery_half(skin_name) -> str:
+    """"737-700 - South West Mexico" -> "South West Mexico" (mirrors splitLiveryName)."""
+    match = re.match(r"^(.*?)-\s+(.*)$", str(skin_name or ""))
+    return (match.group(2).strip() if match else str(skin_name or "").strip())
+
+
+def _squash(text) -> str:
+    """Strip a model or slug down to its letters and digits for comparison."""
+    return re.sub(r"[^A-Z0-9]", "", str(text or "").upper())
+
+
+def _mechanical_slug(livery) -> str:
+    """Last-resort slug for a livery nothing in the fleet is named after yet."""
+    words = re.sub(r"[^A-Za-z0-9]+", " ", str(livery or "")).split()
+    if words and words[0].lower() == "challenge":
+        words = words[1:]
+    year = words[-1] if words and re.fullmatch(r"\d{4}", words[-1]) else ""
+    head = "".join(w for w in words if not re.fullmatch(r"\d{4}", w)).upper()
+    return (head[:10] + year) or "LIVERY"
+
+
+def suggest_aircraft_name(model, icao_code, skin_name) -> str | None:
+    """Next free name in the series this aircraft's livery is already named after.
+
+    Returns None for house/manufacturer liveries: those planes are named after
+    the circuit they fly, not after the skin, so there is no series to continue.
+    """
+    livery = _livery_half(skin_name).lower()
+    if not livery or livery.startswith("(manufacturer"):
+        return None
+    db = get_db()
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                      "AND name='mobile_skins'").fetchone():
+        return None
+    rows = db.execute(
+        "SELECT f.name, f.model, s.name FROM fleet f "
+        "JOIN mobile_skins s ON s.skin_id = f.skin_id WHERE f.name IS NOT NULL "
+        "ORDER BY f.updated_at DESC"
+    ).fetchall()
+
+    series = []  # (prefix, slug, number, digits, same_livery, same_model)
+    for name, row_model, row_skin in rows:
+        parts = _SERIES_NAME.match(str(name).strip().upper())
+        # Skip the game's own default name, "<tag>-<model>" (SHOP-A330-800,
+        # CHLENGE-Q-400), which wears the same shape but is not a series: its
+        # slug and "number" are just the model split across the last hyphen.
+        if parts and _squash(parts.group(2) + parts.group(3)) != _squash(row_model):
+            series.append((parts.group(1), parts.group(2), int(parts.group(3)),
+                           len(parts.group(3)),
+                           _livery_half(row_skin).lower() == livery,
+                           (row_model or "").lower() == (model or "").lower()))
+
+    def most_common(values):
+        # Rows arrive newest-first, and max keeps the first of equal counts, so
+        # a tie goes to the most recently renamed plane: the newer convention.
+        return max(values, key=values.count) if values else None
+
+    family = [s for s in series if s[4]]
+    slug = most_common([s[1] for s in family]) or _mechanical_slug(_livery_half(skin_name))
+    # Prefix: what this model is already called in this very series, else its
+    # ICAO code. A model is not always named after its ICAO (X35KL for an
+    # X350-1000ULR, whose ICAO is X35K), so what is on the wing wins. Only this
+    # series counts: same-model planes named after their circuit instead of
+    # their livery (FRA-C001-04) would otherwise hand over a hub code.
+    prefix = (most_common([s[0] for s in family if s[5] and s[1] == slug])
+              or (icao_code or "").upper()
+              or re.sub(r"[^A-Z0-9]", "", str(model or "").upper())[:5])
+    if not prefix:
+        return None
+
+    taken = [s for s in series if s[0] == prefix and s[1] == slug]
+    digits = max([s[3] for s in taken] or [2])
+    return f"{prefix}-{slug}-{max([s[2] for s in taken] or [0]) + 1:0{digits}d}"
 
 
 def get_command_center_snapshot(*, browser_connected=False, mobile_configured=False) -> dict:
@@ -1225,6 +1317,7 @@ def get_command_center_snapshot(*, browser_connected=False, mobile_configured=Fa
 # spelled out here so this read-only layer never has to import the watcher.
 PACK_WATCH_SOURCE = "shop-pack:auto"
 TICKET_WATCH_SOURCE = "shop-ticket:auto"
+AMCOIN_WATCH_SOURCE = "shop-amc:auto"
 GOLD_WATCH_SOURCE = "shop-gold:auto"
 CHALLENGE_WATCH_SOURCE = "challenge:auto"
 
@@ -1298,7 +1391,9 @@ def _shm_watch_origins(db, watches: list[dict]) -> None:
         off = _promo_pct(cost, rows[0]["list_cost"])
         price = ("" if not cost else
                  f"{int(cost):,} travel cards" + (f" (-{off}%)" if off else "")
-                 if currency == "tc" else f"{cost} real money")
+                 if currency == "tc"
+                 else f"{int(cost):,} AM coins" if currency == "amc"
+                 else f"{cost} real money")
         also = (f" (also in {len(rows) - 1} more offer{'s' if len(rows) > 2 else ''})"
                 if len(rows) > 1 else "")
         detail = f"Shop: {title}" + (f" for {price}" if price else "") + also
@@ -1335,6 +1430,8 @@ def _shm_watch_origins(db, watches: list[dict]) -> None:
             origin = shop_origin(skin_id, "realMoney", watch["label"])
         elif source == TICKET_WATCH_SOURCE:
             origin = shop_origin(skin_id, "tc", watch["label"])
+        elif source == AMCOIN_WATCH_SOURCE:
+            origin = shop_origin(skin_id, "amc", watch["label"])
         elif source == GOLD_WATCH_SOURCE:
             origin = shop_origin(skin_id, "gift or free", watch["label"])
         watch["origin"], watch["origin_detail"] = origin or (None, None)
@@ -1682,8 +1779,8 @@ def get_daily_fleet_liveries(count: int = 3, day: str | None = None, seed: str |
 # How a livery can be obtained, in the order the tags read on a card. A livery
 # is routinely reachable more than one way (the Copa challenge planes are also
 # sold as travel-card offers), so these are additive, never a single "source".
-LIVERY_TAG_ORDER = ("challenge", "booster", "shop_gift", "shop_ad", "shop_tc",
-                    "shop_pack", "dutyfree", "market")
+LIVERY_TAG_ORDER = ("challenge", "booster", "shop_gift", "shop_ad", "shop_amc",
+                    "shop_tc", "shop_pack", "dutyfree", "market")
 
 # A shop offer's (template, currency) pair, as `shop2023/offers` spells it,
 # mapped to the tag it earns. Currency is what separates the flavours of a
@@ -1692,6 +1789,7 @@ _SHOP_TAGS = {
     ("gift", "gift or free"): ("shop_gift", "Shop gift"),
     ("gift", "adv"): ("shop_ad", "Ad gift"),
     ("aircraft", "tc"): ("shop_tc", "Travel cards"),
+    ("aircraft", "amc"): ("shop_amc", "AM coins"),
     ("pack", "realMoney"): ("shop_pack", "Paid pack"),
 }
 
@@ -1724,6 +1822,8 @@ def _shop_tag(template: str | None, currency: str | None,
         return ("shop_ad", "Ad gift")
     if currency == "tc":
         return ("shop_tc", "Travel cards")
+    if currency == "amc":
+        return ("shop_amc", "AM coins")
     if currency == "realMoney":
         return ("shop_pack", "Paid pack")
     return ("shop_gift", "Shop gift")
@@ -1788,6 +1888,8 @@ def get_livery_tags() -> dict[int, list[dict]]:
             price = (f" for {int(r['cost']):,} travel cards"
                      + (f" (-{off}%, normally {int(r['list_cost']):,})" if off else "")
                      if r["currency"] == "tc"
+                     else f" for {int(r['cost']):,} AM coins"
+                     if r["currency"] == "amc"
                      else f" for {r['cost']} (real money)"
                      if r["currency"] == "realMoney" else f" for {r['cost']}")
         add(r["skin_id"], kind, label, f"Shop: {r['title']}{price}")
@@ -2077,17 +2179,64 @@ def get_network_snapshot() -> dict:
             "routes": routes,
         })
 
+    network_routes = {}
+    if "routes" in tables:
+        for row in db.execute(
+                "SELECT hub_iata, dest_iata, dest_name, dest_country, distance_km, "
+                "eco_demand, bus_demand, fir_demand, cargo_demand, gross_price, "
+                "line_id FROM routes WHERE is_owned = 1 ORDER BY hub_iata, dest_iata"
+        ).fetchall():
+            item = dict(row)
+            item.update(is_owned=True, is_planned=False, circuits=[])
+            network_routes[(item["hub_iata"], item["dest_iata"])] = item
+
+    # Planned routes are useful on the network map before they are purchased.
+    # Keep them beside the owned routes instead of making the UI rebuild this
+    # join from the circuit hierarchy.
+    for circuit in circuits:
+        if circuit["status"] == "archived":
+            continue
+        for route in circuit["routes"]:
+            key = (circuit["hub_iata"], route["dest_iata"])
+            item = network_routes.get(key)
+            if item is None:
+                item = {
+                    "hub_iata": circuit["hub_iata"],
+                    "dest_iata": route["dest_iata"],
+                    "dest_name": route["dest_name"],
+                    "dest_country": None,
+                    "distance_km": route["distance_km"],
+                    "eco_demand": route["eco_demand"],
+                    "bus_demand": route["bus_demand"],
+                    "fir_demand": route["fir_demand"],
+                    "cargo_demand": route["cargo_demand"],
+                    "gross_price": None,
+                    "line_id": route["line_id"],
+                    "is_owned": False,
+                    "is_planned": True,
+                    "circuits": [],
+                }
+                network_routes[key] = item
+            item["circuits"].append(circuit["name"])
+
     hub_routes = {row["hub_iata"]: dict(row) for row in db.execute(
         "SELECT hub_iata, COUNT(*) AS routes_known, "
         "COALESCE(SUM(is_owned), 0) AS routes_owned FROM routes GROUP BY hub_iata"
     ).fetchall()} if "routes" in tables else {}
 
+    # Every hub the airline owns, not just the ones whose routes have been
+    # scraped or that already have a circuit designed: an unscraped hub is
+    # still a hub, it just shows zero known routes.
+    owned_hubs = {row["hub_iata"] for row in db.execute(
+        "SELECT hub_iata FROM player_hubs")} if "player_hubs" in tables else set()
+
     hubs = []
-    for hub_iata in sorted({c["hub_iata"] for c in circuits} | set(hub_routes)):
+    for hub_iata in sorted({c["hub_iata"] for c in circuits} | set(hub_routes) | owned_hubs):
         mine = [c for c in circuits if c["hub_iata"] == hub_iata]
         counts = hub_routes.get(hub_iata, {})
         hubs.append({
             "hub_iata": hub_iata,
+            "country_code": get_hub_country_code(hub_iata),
             "circuits": len(mine),
             "operating": sum(1 for c in mine if c["status"] == "completed"),
             "aircraft": sum(c["aircraft"] for c in mine),
@@ -2113,6 +2262,7 @@ def get_network_snapshot() -> dict:
         },
         "circuits": circuits,
         "hubs": hubs,
+        "routes": list(network_routes.values()),
     }
 
 

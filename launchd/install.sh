@@ -17,7 +17,7 @@ escape_replacement() {
 AM_ROOT_ESCAPED="$(escape_replacement "$AM_ROOT_DIR")"
 AM_HOME_ESCAPED="$(escape_replacement "$AM_USER_HOME")"
 
-for AM_LABEL in com.lobster.am-web-dev com.lobster.am-shm-watcher; do
+for AM_LABEL in com.lobster.am-web-dev com.lobster.am-shm-watcher com.lobster.am-challenge-tal; do
     AM_TEMPLATE="$AM_LAUNCHD_DIR/$AM_LABEL.plist.in"
     AM_TARGET="$AM_AGENT_DIR/$AM_LABEL.plist"
     AM_TEMP="$AM_TARGET.tmp"

@@ -13,34 +13,27 @@ import {
 import { applyPricing, fetchPricing } from "../api";
 import {
   CommandCenterSnapshot,
-  PriceClass,
   PricingMode,
   PricingPlan,
   PricingPlanRoute,
   PricingRoute,
-  PricingSnapshot,
 } from "../types";
+import { CLASS_LABELS, PRICE_CLASSES, sumClasses } from "../classes";
+import { compactMoney, integer, parseGameDate } from "../format";
 import { MenuSelect } from "./MenuSelect";
+import { SectionHeader } from "./SectionHeader";
+import { EmptyState, ErrorState } from "./PageStates";
+import { useApi } from "../useApi";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface PricingProps {
   snapshot: CommandCenterSnapshot | null;
   refreshToken: number;
 }
 
-const integer = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
-const compactMoney = new Intl.NumberFormat(undefined, {
-  style: "currency",
-  currency: "USD",
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
 
-const CLASSES: { key: PriceClass; label: string }[] = [
-  { key: "eco", label: "Eco" },
-  { key: "bus", label: "Bus" },
-  { key: "first", label: "First" },
-  { key: "cargo", label: "Cargo" },
-];
 
 const MODE_HINT: Record<PricingMode, string> = {
   ideal: "Match the audit's recommended price on every class.",
@@ -58,9 +51,8 @@ function ecoGap(route: PricingRoute): number | null {
 }
 
 function isLocked(route: PricingRoute, now: Date): boolean {
-  if (!route.locked_until) return false;
-  const until = new Date(`${route.locked_until.replace(" ", "T")}Z`);
-  return !Number.isNaN(until.valueOf()) && until > now;
+  const until = parseGameDate(route.locked_until);
+  return until !== null && until > now;
 }
 
 /** Routes a dry run says would actually move — the exact set an apply sends. */
@@ -71,9 +63,6 @@ function changedRoutes(plan: PricingPlan | null): PricingPlanRoute[] {
 export function Pricing({ snapshot, refreshToken }: PricingProps) {
   const hubs = useMemo(() => (snapshot?.hubs ?? []).map((hub) => hub.hub_iata), [snapshot]);
   const [hub, setHub] = useState("");
-  const [data, setData] = useState<PricingSnapshot | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState("gap");
   const [reload, setReload] = useState(0);
 
@@ -88,21 +77,7 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
 
   useEffect(() => { if (!hub && hubs.length) setHub(hubs[0]); }, [hubs, hub]);
 
-  useEffect(() => {
-    if (!hub) return;
-    let live = true;
-    setLoading(true);
-    setError(null);
-    fetchPricing(hub)
-      .then((result) => { if (live) { setData(result); setLoading(false); } })
-      .catch((reason) => {
-        if (!live) return;
-        setData(null);
-        setError(reason instanceof Error ? reason.message : "Live pricing read failed");
-        setLoading(false);
-      });
-    return () => { live = false; };
-  }, [hub, refreshToken, reload]);
+  const { data, error, loading } = useApi(hub ? () => fetchPricing(hub) : null, [hub, refreshToken, reload]);
 
   // A plan is a snapshot of prices that have since been re-read, so any change
   // to the hub, the mode, or the scope invalidates it rather than leaving a
@@ -203,11 +178,7 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
       </section>
 
       <section className="flat-section">
-        <div className="section-title-row">
-          <div>
-            <p className="section-kicker">Repricing</p>
-            <h2>Plan a price run</h2>
-          </div>
+        <SectionHeader kicker="Repricing" title="Plan a price run">
           <div className="section-header-controls">
             <MenuSelect
               label="Mode"
@@ -220,7 +191,7 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
             {mode === "percent" && (
               <label className="pct-field">
                 <span>%</span>
-                <input
+                <Input
                   type="number"
                   min={25}
                   max={200}
@@ -237,12 +208,12 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
                 ...circuits.map((name) => ({ value: name, label: name }))]}
               icon={Layers}
             />
-            <button className="primary-action" onClick={runPreview} disabled={!hub || busy !== null}>
+            <Button className="primary-action" onClick={runPreview} disabled={!hub || busy !== null}>
               <Wand2 size={15} className={busy === "preview" ? "is-spinning" : ""} />
               <span>{busy === "preview" ? "Previewing…" : "Preview"}</span>
-            </button>
+            </Button>
           </div>
-        </div>
+        </SectionHeader>
 
         <div className="plan-bar">
           <p className="plan-hint">{MODE_HINT[mode]}</p>
@@ -254,7 +225,7 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
                 Wrote {result.applied} price{result.applied === 1 ? "" : "s"}
                 {result.counts.fail ? `, ${result.counts.fail} refused` : ""}. Prices re-read below.
               </span>
-              <button className="plan-dismiss" onClick={() => setResult(null)} aria-label="Dismiss"><X size={14} /></button>
+              <Button className="plan-dismiss" onClick={() => setResult(null)} aria-label="Dismiss"><X size={14} /></Button>
             </div>
           )}
           {plan && (
@@ -272,17 +243,17 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
                 )}
               </div>
               <div className="plan-actions">
-                <button className="ghost-button" onClick={discardPlan} disabled={busy !== null}>Discard</button>
+                <Button className="ghost-button" onClick={discardPlan} disabled={busy !== null}>Discard</Button>
                 {pending.length === 0 ? (
                   <span className="plan-none">Nothing to write</span>
                 ) : confirming ? (
-                  <button className="danger-action" onClick={runApply} disabled={busy !== null}>
+                  <Button className="danger-action" onClick={runApply} disabled={busy !== null}>
                     {busy === "apply" ? "Writing…" : `Confirm — write ${pending.length} price${pending.length === 1 ? "" : "s"}`}
-                  </button>
+                  </Button>
                 ) : (
-                  <button className="primary-action" onClick={() => setConfirming(true)} disabled={busy !== null}>
+                  <Button className="primary-action" onClick={() => setConfirming(true)} disabled={busy !== null}>
                     Apply {pending.length} change{pending.length === 1 ? "" : "s"}
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>
@@ -291,11 +262,7 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
       </section>
 
       <section className="flat-section">
-        <div className="section-title-row">
-          <div>
-            <p className="section-kicker">Live route pricing</p>
-            <h2>Current vs recommended</h2>
-          </div>
+        <SectionHeader kicker="Live route pricing" title="Current vs recommended">
           <div className="section-header-controls">
             <MenuSelect
               label="Hub"
@@ -311,74 +278,74 @@ export function Pricing({ snapshot, refreshToken }: PricingProps) {
               options={[{ value: "gap", label: "Price gap" }, { value: "revenue", label: "Daily revenue" },
                 { value: "remaining", label: "Unsold demand" }, { value: "iata", label: "Destination" }]}
             />
-            <button className="icon-action" onClick={() => setReload((value) => value + 1)} disabled={loading || !hub} title="Re-read live prices">
+            <Button className="icon-action" onClick={() => setReload((value) => value + 1)} disabled={loading || !hub} title="Re-read live prices">
               <RefreshCcw size={16} className={loading ? "is-spinning" : ""} />
               <span>Reload</span>
-            </button>
+            </Button>
           </div>
-        </div>
+        </SectionHeader>
 
         {error ? (
-          <div className="fatal-state is-inline"><AlertTriangle size={20} /><div><strong>No live prices</strong><p>{error}</p></div></div>
+          <ErrorState inline title="No live prices" message={error} />
         ) : (
           <div className="grid-table-wrap">
-            <table className="grid-table">
-              <thead>
-                <tr>
-                  <th>Route</th><th>Circuit</th>
-                  {CLASSES.map((cls) => <th key={cls.key} className="is-numeric">{cls.label}</th>)}
-                  <th className="is-numeric">Eco gap</th>
-                  <th className="is-numeric">Unsold</th>
-                  <th className="is-numeric">Daily</th>
-                  {plan && <th>Plan</th>}
-                </tr>
-              </thead>
-              <tbody>
+            <Table className="grid-table">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Route</TableHead><TableHead>Circuit</TableHead>
+                  {PRICE_CLASSES.map((cls) => <TableHead key={cls} className="is-numeric">{CLASS_LABELS[cls]}</TableHead>)}
+                  <TableHead className="is-numeric">Eco gap</TableHead>
+                  <TableHead className="is-numeric">Unsold</TableHead>
+                  <TableHead className="is-numeric">Daily</TableHead>
+                  {plan && <TableHead>Plan</TableHead>}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {rows.map((route) => {
                   const gap = ecoGap(route);
                   const locked = isLocked(route, now);
                   const planned = planByIata.get(route.iata);
                   const willChange = planned?.status === "dry-run";
                   return (
-                    <tr key={route.iata} className={`${locked ? "is-dormant" : ""}${willChange ? " is-planned-change" : ""}`}>
-                      <td>
+                    <TableRow key={route.iata} className={`${locked ? "is-dormant" : ""}${willChange ? " is-planned-change" : ""}`}>
+                      <TableCell>
                         <strong>{route.iata}{locked && <Lock size={11} className="inline-lock" />}</strong>
                         <small>{route.name || ""}</small>
-                      </td>
-                      <td>{route.circuit ? <span className="status-tag is-planned">{route.circuit}</span> : <span className="is-dim">—</span>}</td>
-                      {CLASSES.map((cls) => (
-                        <td key={cls.key} className="is-numeric">
-                          {integer.format(route.price[cls.key] ?? 0)}
+                      </TableCell>
+                      <TableCell>{route.circuit ? <span className="status-tag is-planned">{route.circuit}</span> : <span className="is-dim">—</span>}</TableCell>
+                      {PRICE_CLASSES.map((cls) => (
+                        <TableCell key={cls} className="is-numeric">
+                          {integer.format(route.price[cls] ?? 0)}
                           <small className={willChange ? "value-target" : "is-dim"}>
-                            {integer.format((willChange ? planned?.target?.[cls.key] : route.audit_price[cls.key]) ?? 0)}
+                            {integer.format((willChange ? planned?.target?.[cls] : route.audit_price[cls]) ?? 0)}
                           </small>
-                        </td>
+                        </TableCell>
                       ))}
-                      <td className={`is-numeric ${gap === null ? "" : gap < -1 ? "value-warn" : gap > 1 ? "value-good" : ""}`}>
+                      <TableCell className={`is-numeric ${gap === null ? "" : gap < -1 ? "value-warn" : gap > 1 ? "value-good" : ""}`}>
                         {gap === null ? "—" : (
                           <>
                             {gap < 0 ? <ArrowDown size={11} /> : <ArrowUp size={11} />}
                             {Math.abs(gap).toFixed(1)}%
                           </>
                         )}
-                      </td>
-                      <td className="is-numeric">{integer.format(sumClasses(route.remaining))}</td>
-                      <td className="is-numeric">{compactMoney.format(route.daily_revenue)}</td>
+                      </TableCell>
+                      <TableCell className="is-numeric">{integer.format(sumClasses(route.remaining))}</TableCell>
+                      <TableCell className="is-numeric">{compactMoney.format(route.daily_revenue)}</TableCell>
                       {plan && (
-                        <td>
+                        <TableCell>
                           {planned
                             ? <span className={`status-tag is-${planned.status.replace("-", "")}`} title={planned.detail}>{PLAN_LABEL[planned.status] ?? planned.status}</span>
                             : <span className="is-dim">out of scope</span>}
-                        </td>
+                        </TableCell>
                       )}
-                    </tr>
+                    </TableRow>
                   );
                 })}
                 {!rows.length && !loading && (
-                  <tr><td colSpan={plan ? 10 : 9}><div className="empty-positive"><span>No priced routes at this hub.</span></div></td></tr>
+                  <TableRow><TableCell colSpan={plan ? 10 : 9}><EmptyState title="No priced routes at this hub" /></TableCell></TableRow>
                 )}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         )}
         <p className="table-footnote">
@@ -406,8 +373,4 @@ function PlanCount({ label, value, tone }: { label: string; value: number | stri
       <strong>{typeof value === "number" ? integer.format(value) : value}</strong>
     </div>
   );
-}
-
-function sumClasses(values: Partial<Record<PriceClass, number>>): number {
-  return (values.eco ?? 0) + (values.bus ?? 0) + (values.first ?? 0) + (values.cargo ?? 0);
 }

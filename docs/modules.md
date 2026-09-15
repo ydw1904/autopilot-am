@@ -29,6 +29,16 @@ config / quantity → submit via jQuery trigger. Reads circuit config from DB; h
 game-id lookup for aircraft models. Also exposes `get_balance()`, reused by the MCP
 server.
 
+One purchase can carry **several configurations** of the same model: the
+configure step appends one form per row to `#buyAircraft_bucket`, and the
+99-aircraft ceiling applies to the SUM of the rows' quantities, not to each row.
+Repeatable `--config eco=…,bus=…,first=…,cargo=…,qty=…[,hub=…][,name=…]` adds a
+row (unset keys inherit `--eco`/`--bus`/…); MCP takes the same thing as
+`buy_aircraft(configs=[{"bus": 32, "qty": 98}, {"bus": 55, "qty": 1}])`. Every
+row is read back off the page and the purchase aborts on any mismatch, so a
+clamped slider costs nothing. The mobile mint `AMClient.buy_multiple` takes the
+same list via `configs=` — its `aircrafts` body was always a list.
+
 ## `route_details.py` — one route's details page (CDP-only)
 `/network/showline/{line_id}`, parsed. This exists because the mobile API has
 **no** per-line financials: `line/{id}/statistics|stats|finance|accounting|

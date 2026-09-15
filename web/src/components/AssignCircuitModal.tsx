@@ -1,5 +1,7 @@
 import React, { useState } from "react";
 import { Send, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 interface AssignCircuitModalProps {
   isOpen: boolean;
@@ -34,12 +36,12 @@ export const AssignCircuitModal: React.FC<AssignCircuitModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
       <div className="w-full max-w-md bg-[#F8F6F1] border border-[#E5E1D6] rounded-xl shadow-2xl p-6 relative">
-        <button
+        <Button
           onClick={onClose}
           className="absolute top-4 right-4 text-[#8B877C] hover:text-[#0A1E3C]"
         >
           <X className="w-5 h-5" />
-        </button>
+        </Button>
 
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-lg bg-[#1E7E46]/10 border border-[#1E7E46]/20 flex items-center justify-center text-[#1E7E46]">
@@ -58,7 +60,7 @@ export const AssignCircuitModal: React.FC<AssignCircuitModalProps> = ({
             <label className="block text-xs font-mono font-medium text-[#4E4B43] mb-1.5 uppercase">
               Circuit Code
             </label>
-            <input
+            <Input
               type="text"
               required
               placeholder="e.g. MPM-C001 or HKG-C005"
@@ -72,20 +74,20 @@ export const AssignCircuitModal: React.FC<AssignCircuitModalProps> = ({
           </div>
 
           <div className="flex justify-end gap-2.5 pt-3 border-t border-[#E5E1D6]">
-            <button
+            <Button
               type="button"
               onClick={onClose}
               className="px-4 py-2 rounded-lg text-xs font-medium text-[#8B877C] hover:text-[#0A1E3C] hover:bg-[#F1EEE6] transition"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
               disabled={loading || !circuit.trim()}
               className="px-4 py-2 rounded-lg text-xs font-semibold bg-[#1E7E46] hover:bg-[#1E7E46] text-white transition disabled:opacity-50 flex items-center gap-1.5"
             >
               {loading ? "Assigning…" : "Confirm Assignment"}
-            </button>
+            </Button>
           </div>
         </form>
       </div>

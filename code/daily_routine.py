@@ -4,9 +4,9 @@ Daily routine -- the mobile freebies, once a day, in a random order.
 
 Tasks (every one is bounded to free actions; none of them spends a balance):
   currencies  free shop offers (5x/day each) + the travel-card wheel
-  slots       the slot machine's free daily games, ONLY while a spin-milestone
-              event is running -- the event is read live off specialEvent, so
-              no calendar of event windows has to be maintained here
+  slots       the slot machine's free daily games, ALWAYS spun to the max
+              (never paid tickets) -- games bank across days and each spin
+              pays out even when no spin-milestone event is running
   donate      the alliance treasury donation, maxed at the daily cap. This one
               rides the BROWSER (Chrome CDP), not the mobile API, so it needs a
               logged-in tab; it is idempotent, so a repeat run donates 0
@@ -85,21 +85,12 @@ def task_currencies(dry_run: bool) -> dict:
 
 
 def task_slots(dry_run: bool) -> dict:
-    """The slot machine's free games -- skipped unless an event is running.
+    """The slot machine's free games -- always spun to the max.
 
-    The milestone gift (a livery) is what makes the ~20 minutes of spinning
-    worth it, so outside an event window this is a deliberate no-op.
+    Spinning the full free allowance every day banks games across days and
+    collects the per-spin rewards even when no spin-milestone event runs.
+    max_spins=None spins every remaining free game (never paid tickets).
     """
-    probe = _tool("mobile_daily_slot")(dry_run=True)
-    if not probe.get("ok"):
-        return probe
-    event = probe.get("event")
-    if not event:
-        return {"ok": True, "skipped": "no spin-milestone event running",
-                "free_games": probe.get("free_games")}
-    if event.get("spins_to_go") == 0:
-        return {"ok": True, "skipped": "event milestone already reached",
-                "event": event}
     return _tool("mobile_daily_slot")(dry_run=dry_run)
 
 

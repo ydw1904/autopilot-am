@@ -65,6 +65,7 @@ export type LiveryTagKind =
   | "booster"
   | "shop_gift"
   | "shop_ad"
+  | "shop_amc"
   | "shop_tc"
   | "shop_pack"
   | "dutyfree"
@@ -309,6 +310,8 @@ export interface HangarAircraft {
   seats: { eco: number; bus: number; first: number };
   payload: number;
   skin: { id: number | null; name: string | null };
+  /** Next name in this livery's series, e.g. "B742-KANGAROO25-05". Null for house liveries. */
+  suggested_name: string | null;
   /** The three caps the market enforces, plus what the game itself pays. */
   sale: {
     scrap: number | null;
@@ -375,6 +378,25 @@ export interface NetworkCircuit {
   routes: NetworkRoute[];
 }
 
+export interface NetworkLine {
+  hub_iata: string;
+  dest_iata: string;
+  dest_name: string | null;
+  dest_country: string | null;
+  distance_km: number | null;
+  eco_demand: number | null;
+  bus_demand: number | null;
+  fir_demand: number | null;
+  cargo_demand: number | null;
+  gross_price: number | null;
+  line_id: number | null;
+  is_owned: boolean;
+  is_planned: boolean;
+  circuits: string[];
+  origin?: { lat: number; lon: number } | null;
+  destination?: { lat: number; lon: number } | null;
+}
+
 export interface NetworkSnapshot {
   totals: {
     circuits: number;
@@ -387,14 +409,18 @@ export interface NetworkSnapshot {
     unscheduled_waves: number;
   };
   circuits: NetworkCircuit[];
+  routes: NetworkLine[];
+  map_error?: string | null;
   hubs: {
     hub_iata: string;
+    country_code?: string | null;
     circuits: number;
     operating: number;
     aircraft: number;
     weekly_rev: number;
     routes_known: number;
     routes_owned: number;
+    location?: { lat: number; lon: number } | null;
   }[];
 }
 
@@ -415,6 +441,76 @@ export interface PricingRoute {
   locked_until: string | null;
   daily_revenue: number;
   weekly_revenue: number;
+}
+
+/** One aircraft as the game's own route page lists it. */
+export interface ShowlineAircraft {
+  aircraft_id: number;
+  model: string | null;
+  name: string | null;
+  in_flight: boolean;
+  range_km: number | null;
+  use_pct: number | null;
+  cargo_t: number | null;
+  seats: { total: number; eco: number; bus: number; first: number } | null;
+  hub: string | null;
+  /** Result over 7 days, the same figure the game prints on the card. */
+  result: number | null;
+  wear_pct: number | null;
+  age: string | null;
+}
+
+/** Everything scraped off /network/showline — the numbers the mobile API lacks. */
+export interface Showline {
+  route: string;
+  purchased_at: string | null;
+  aircraft: number | null;
+  flights_per_week: number | null;
+  distance_km: number | null;
+  taxes: number | null;
+  categories: number[];
+  departure: { iata: string; country_code: string; country: string } | null;
+  arrival: { iata: string; country_code: string; country: string } | null;
+  totals: { today: Record<string, number>; yesterday: Record<string, number> };
+  per_class: { today: Record<string, ClassValues>; yesterday: Record<string, ClassValues> };
+  history: { dates: string[]; rows: Record<string, (number | null)[]> };
+  forecast: { dates: string[]; turnover: (number | null)[] | null };
+  week: Record<string, number>;
+  aircraft_list: ShowlineAircraft[];
+}
+
+export interface RouteDetail {
+  hub_iata: string;
+  dest_iata: string;
+  dest_name: string | null;
+  dest_country: string | null;
+  distance_km: number | null;
+  dest_category: number | null;
+  stars: number | null;
+  gross_price: number | null;
+  line_id: number | null;
+  is_owned: boolean;
+  eco_demand: number | null;
+  bus_demand: number | null;
+  fir_demand: number | null;
+  cargo_demand: number | null;
+  /** The live `line/{id}` read; null when there is no line id or mobile is down. */
+  line: {
+    name: string | null;
+    distance_km: number | null;
+    purchase_price: number | null;
+    purchased_at: string | null;
+    selling_price: number | null;
+    locked_until: string | null;
+    is_frozen: boolean;
+    incidents: number;
+    incidents_grounded: number;
+    price: ClassValues;
+    demand: ClassValues;
+    remaining: ClassValues;
+    audit: { date: string | null; reliability: number | null; price: ClassValues; demand: ClassValues };
+  } | null;
+  error: string | null;
 }
 
 export interface PricingSnapshot {

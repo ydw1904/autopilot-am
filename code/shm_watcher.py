@@ -76,11 +76,13 @@ PAID_PACK_SOURCE = "shop-pack:auto"
 # rather than money, so they are their own bucket: same automatic discovery,
 # no automatic arming.
 TICKET_SOURCE = "shop-ticket:auto"
+# Same shape as the ticket aircraft, paid in AM coins ('amc') instead.
+AMCOIN_SOURCE = "shop-amc:auto"
 GOLD_SOURCE = "shop-gold:auto"
 CHALLENGE_SOURCE = "challenge:auto"
-SHOP_SOURCES = (PAID_PACK_SOURCE, TICKET_SOURCE, GOLD_SOURCE)
-AUTO_SOURCES = frozenset({PAID_PACK_SOURCE, TICKET_SOURCE, GOLD_SOURCE,
-                          CHALLENGE_SOURCE})
+SHOP_SOURCES = (PAID_PACK_SOURCE, TICKET_SOURCE, AMCOIN_SOURCE, GOLD_SOURCE)
+AUTO_SOURCES = frozenset({PAID_PACK_SOURCE, TICKET_SOURCE, AMCOIN_SOURCE,
+                          GOLD_SOURCE, CHALLENGE_SOURCE})
 _SHOP_MARKS = ",".join("?" * len(SHOP_SOURCES))
 _AUTO_MARKS = ",".join("?" * len(AUTO_SOURCES))
 
@@ -271,7 +273,16 @@ def set_watch_armed(conn, skin_id: int, armed: bool) -> bool:
              WHERE skin_id=?
         """, (skin_id,))
     else:
-        cur = conn.execute("UPDATE shm_watch SET armed=0 WHERE skin_id=?", (skin_id,))
+        # Disarming rolls that bump back, so an owned livery reads as acquired
+        # again instead of sitting live-but-unarmed forever. Only the arm's own
+        # `bought + 1` is undone; a want set by hand is left alone.
+        cur = conn.execute("""
+            UPDATE shm_watch
+               SET armed=0,
+                   want=CASE WHEN bought > 0 AND want = bought + 1
+                             THEN bought ELSE want END
+             WHERE skin_id=?
+        """, (skin_id,))
     conn.commit()
     return bool(cur.rowcount)
 
@@ -288,11 +299,12 @@ def automatic_target_skins(conn) -> list[dict]:
     """Special shop-priced and challenge liveries, including owned catalog rows."""
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    # Anything the shop only parts with for a price: real-money packs, and the
-    # travel-card aircraft ('aircraft'/'tc', e.g. the Air Qilin Beijing 737s),
-    # which are livery-exclusive the same way a pack is. The currency is the
-    # test, not the template — free gifts ('gift or free', 'adv') arrive on
-    # their own and never need sniping.
+    # Anything the shop only parts with for a price: real-money packs, the
+    # travel-card aircraft ('aircraft'/'tc', e.g. the Air Qilin Beijing 737s)
+    # and the AM-coin ones ('amc', e.g. the Tennis 2026 planes), all of them
+    # livery-exclusive the same way a pack is. The currency is the test, not
+    # the template — free gifts ('gift or free', 'adv') arrive on their own and
+    # never need sniping.
     shop = """
         SELECT DISTINCT i.skin_id AS skin_id, ? AS source, ? AS priority
           FROM mobile_shop_offer_items i
@@ -300,9 +312,10 @@ def automatic_target_skins(conn) -> list[dict]:
          WHERE i.skin_id IS NOT NULL
            AND o.currency = ?
     """
-    sources = [shop, shop]
+    sources = [shop, shop, shop]
     params: list[Any] = [PAID_PACK_SOURCE, 2, "realMoney",
-                         TICKET_SOURCE, 3, "tc"]
+                         TICKET_SOURCE, 3, "tc",
+                         AMCOIN_SOURCE, 4, "amc"]
     offer_columns = {r["name"] for r in conn.execute(
         "PRAGMA table_info(mobile_shop_offers)")}
     if "am_gold_step" in offer_columns:
@@ -351,10 +364,10 @@ def automatic_target_skins(conn) -> list[dict]:
 def sync_automatic_watches(conn, max_price: Optional[int] = None) -> dict:
     """Sync shop-priced and challenge catalog rows into the watchlist.
 
-    Missing paid-pack targets start armed. Ticket aircraft, AM Gold rewards,
-    challenge and manual targets remain observation-only until their individual
-    arm toggle is enabled — these are still directly claimable or buyable, so
-    an uncapped market snipe is rarely the better deal. Owned
+    Missing paid-pack targets start armed. Ticket and AM-coin aircraft, AM Gold
+    rewards, challenge and manual targets remain observation-only until their
+    individual arm toggle is enabled — these are still directly claimable or
+    buyable, so an uncapped market snipe is rarely the better deal. Owned
     automatic catalog rows stay visible but inactive, so the UI explains why a
     known paid livery is not a purchase target.
     """

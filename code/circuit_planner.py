@@ -1002,9 +1002,23 @@ def _plan(args):
             print(f"\nCircuit #{circuit_num}: no viable circuits remaining")
             break
 
-        # Pick best across aircraft
-        candidates.sort(key=lambda x: -x[0])
-        p1_score, total_time, route_list, best_ac = candidates[0]
+        if args.phase1_only:
+            p1_score, total_time, route_list, best_ac = max(
+                candidates, key=lambda candidate: candidate[0])
+            cfg, waves, daily_rev, breakdown = None, 0, 0, None
+        else:
+            evaluated = []
+            for p1_score, total_time, route_list, ac in candidates:
+                cfg, waves, daily_rev, breakdown = optimize_circuit(
+                    route_list, ac, comfort=args.comfort, speed=args.speed,
+                    max_waves=args.max_waves, overshoot_pct=args.overshoot,
+                    wave_slack=args.wave_slack,
+                )
+                evaluated.append((daily_rev, p1_score, total_time, route_list,
+                                  ac, cfg, waves, breakdown))
+            (daily_rev, p1_score, total_time, route_list, best_ac,
+             cfg, waves, breakdown) = max(
+                evaluated, key=lambda candidate: (candidate[0], candidate[1]))
 
         # Lock routes
         circuit_iatas = set(r["iata"] for r in route_list)
@@ -1012,11 +1026,6 @@ def _plan(args):
 
         # Phase 2
         if not args.phase1_only:
-            cfg, waves, daily_rev, breakdown = optimize_circuit(
-                route_list, best_ac, comfort=args.comfort, speed=args.speed,
-                max_waves=args.max_waves, overshoot_pct=args.overshoot,
-                wave_slack=args.wave_slack,
-            )
             print_circuit(circuit_num, best_ac, route_list, total_time,
                           cfg, waves, daily_rev, breakdown, p1_score,
                           bulk_discount=args.bulk_discount,

@@ -14,10 +14,45 @@ import {
   PricingMode,
   PricingPlan,
   PricingSnapshot,
+  RouteDetail,
+  Showline,
   ShmMonitorSnapshot,
 } from "./types";
 
 const BASE_URL = "";
+
+// Switching views unmounts the old one, so every view refetches its snapshot
+// from scratch on mount -- and /api/ops is ~3.5s of live game calls, /api/network
+// a 700 KB read. Hand back the in-flight (or recent) promise per URL instead, so
+// flipping between tabs is free. Cleared by clearApiCache() on any write or an
+// explicit refresh; the TTL is the backstop for a tab left open all afternoon.
+const SNAPSHOT_TTL_MS = 30_000;
+// Live pricing is one mobile call per hub -- 23 of them to fill the Network
+// table -- so it keeps its entry far longer than a plain snapshot. A write or
+// the refresh button still drops it, which is what actually makes it stale.
+const PRICING_TTL_MS = 15 * 60_000;
+const snapshots = new Map<string, { at: number; promise: Promise<unknown> }>();
+
+export function clearApiCache(): void {
+  snapshots.clear();
+}
+
+function cachedGet<T>(path: string, failure: string, ttl = SNAPSHOT_TTL_MS): Promise<T> {
+  const hit = snapshots.get(path);
+  if (hit && Date.now() - hit.at < ttl) return hit.promise as Promise<T>;
+
+  const promise = fetch(`${BASE_URL}${path}`).then(async (res) => {
+    if (!res.ok) {
+      const detail = (await res.json().catch(() => null))?.detail;
+      throw new Error(typeof detail === "string" ? detail : failure);
+    }
+    return res.json();
+  });
+  // A failed load must never be served from the cache.
+  promise.catch(() => { if (snapshots.get(path)?.promise === promise) snapshots.delete(path); });
+  snapshots.set(path, { at: Date.now(), promise });
+  return promise as Promise<T>;
+}
 
 export async function fetchStats(): Promise<FleetStats> {
   const res = await fetch(`${BASE_URL}/api/stats`);
@@ -25,10 +60,8 @@ export async function fetchStats(): Promise<FleetStats> {
   return res.json();
 }
 
-export async function fetchCommandCenter(): Promise<CommandCenterSnapshot> {
-  const res = await fetch(`${BASE_URL}/api/command-center`);
-  if (!res.ok) throw new Error("Failed to load command center");
-  return res.json();
+export function fetchCommandCenter(): Promise<CommandCenterSnapshot> {
+  return cachedGet("/api/command-center", "Failed to load command center");
 }
 
 export async function fetchShmMonitor(): Promise<ShmMonitorSnapshot> {
@@ -89,14 +122,15 @@ export async function fetchFleet(params: FleetParams = {}): Promise<FleetAircraf
   return res.json();
 }
 
-export async function fetchFleetNameSuggestions(prefix: string): Promise<string[]> {
-  const res = await fetch(`${BASE_URL}/api/fleet-name-suggestions?prefix=${encodeURIComponent(prefix)}`);
+export async function fetchFleetNameSuggestions(term: string): Promise<string[]> {
+  const res = await fetch(`${BASE_URL}/api/fleet-name-suggestions?q=${encodeURIComponent(term)}`);
   if (!res.ok) throw new Error("Failed to load aircraft name suggestions");
   return res.json();
 }
 
 export interface FleetPageParams {
   q?: string;
+  name_query?: string;
   hub?: string;
   utilization?: "all" | "active" | "idle" | "partial" | "full";
   skin_filter?: "special" | "manufacturer" | "all";
@@ -110,6 +144,7 @@ export interface FleetPageParams {
 export async function fetchFleetPage(params: FleetPageParams = {}): Promise<FleetPage> {
   const q = new URLSearchParams();
   if (params.q) q.set("q", params.q);
+  if (params.name_query) q.set("name_query", params.name_query);
   if (params.hub && params.hub !== "all") q.set("hubs", params.hub);
   if (params.haul && params.haul !== "all") q.set("haul", params.haul);
   if (params.tag && params.tag !== "all") q.set("tag", params.tag);
@@ -386,23 +421,27 @@ export function unscheduleHangarAircraft(aircraftId: number): Promise<{ cleared:
   return hangarPost(`${aircraftId}/unschedule`);
 }
 
-export async function fetchNetwork(): Promise<NetworkSnapshot> {
-  const res = await fetch(`${BASE_URL}/api/network`);
-  if (!res.ok) throw new Error("Failed to load the circuit network");
-  return res.json();
+export function fetchNetwork(): Promise<NetworkSnapshot> {
+  return cachedGet("/api/network", "Failed to load the circuit network");
 }
 
-export async function fetchPricing(hub: string, backend?: "mobile" | "cdp"): Promise<PricingSnapshot> {
+export function fetchPricing(hub: string, backend?: "mobile" | "cdp"): Promise<PricingSnapshot> {
   const query = backend ? `?backend=${backend}` : "";
-  const res = await fetch(`${BASE_URL}/api/pricing/${encodeURIComponent(hub)}${query}`);
-  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || "Failed to load live prices");
-  return res.json();
+  return cachedGet(`/api/pricing/${encodeURIComponent(hub)}${query}`, "Failed to load live prices", PRICING_TTL_MS);
 }
 
-export async function fetchOps(): Promise<OpsSnapshot> {
-  const res = await fetch(`${BASE_URL}/api/ops`);
-  if (!res.ok) throw new Error("Failed to load operations status");
-  return res.json();
+export function fetchRouteDetail(hub: string, dest: string): Promise<RouteDetail> {
+  return cachedGet(`/api/route/${encodeURIComponent(hub)}/${encodeURIComponent(dest)}`, "Failed to load the route");
+}
+
+/** The /network/showline scrape. Separate from fetchRouteDetail because it is
+ *  the only part that needs a signed-in Chrome, and ~1.2s of CDP. */
+export function fetchRouteShowline(hub: string, dest: string): Promise<{ details: Showline | null; error: string | null }> {
+  return cachedGet(`/api/route/${encodeURIComponent(hub)}/${encodeURIComponent(dest)}/details`, "Failed to load the route details page");
+}
+
+export function fetchOps(): Promise<OpsSnapshot> {
+  return cachedGet("/api/ops", "Failed to load operations status");
 }
 
 export async function applyPricing(

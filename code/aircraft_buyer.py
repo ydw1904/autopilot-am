@@ -7,7 +7,8 @@ Two modes:
     python3 aircraft_buyer.py MPM-C001
     python3 aircraft_buyer.py MPM-C001 --dry-run
 
-  Standalone mode: specify aircraft, hub, seats directly
+  Standalone mode: specify aircraft, hub, seats directly (add --config,
+  repeatable, for several configurations bought in one POST)
     python3 aircraft_buyer.py --model B742 --hub MPM --eco 293 --bus 16 --first 11 --cargo 35 --quantity 7
     python3 aircraft_buyer.py --model B742 --hub MPM --eco 293 --bus 16 --first 11 --cargo 35 --quantity 7 --dry-run
 
@@ -26,7 +27,10 @@ Flow (verified against the live page):
      - Set seats: zero all four, then cargo→first→bus→eco (eco LAST) because
        each slider clamps against the others' current values.
      - Set quantity (.aircraftQuantity, max 99) and optional name.
-     - GUARD: read the seats back; abort if they don't match the request.
+     - For a multi-configuration purchase, repeat that per row: the configure
+       step appends one form per configuration to #buyAircraft_bucket, and the
+       99 ceiling applies to the SUM of the rows' quantities, not to each row.
+     - GUARD: read every row back; abort if it doesn't match the request.
   5. Click "Personal purchase" (input[data-purchaseassistance="false"]), or
      "Purchase through Alliance" (…="true") with --alliance. The game
      serialises the config into the hidden `aircrafts` field in that button's
@@ -54,7 +58,7 @@ AIRCRAFT_GAME_IDS = {
     "A340-300": 12, "A340-600": 16, "777-300": 17, "747-400": 20,
     "A300-600R": 41, "MD-11": 62, "707-320C": 109, "747-100B": 113,
     "747-200B": 114, "DC8-55": 123, "737-MAX8": 132, "A321neo": 133,
-    "747-SP": 151, "L-1049G": 179,
+    "747-SP": 151, "L-1049G": 179, "Il-96-300": 146,
 }
 
 CATEGORY_TO_HAUL = {
@@ -74,6 +78,51 @@ def resolve_model(name):
     """
     r = resolve_aircraft(name)
     return r.model if r.status == "ok" else name
+
+
+def parse_config(spec):
+    """Parse a --config string into one configuration row.
+
+    Format: comma-separated key=value, e.g.
+        "eco=104,bus=32,first=23,cargo=19,qty=98,name=LAX-A,hub=LAX"
+    Seat keys default to 0, qty to 1; hub/name fall back to the purchase-wide
+    values in build_configs().
+    """
+    cfg = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"--config item {part!r} is not key=value")
+        key, _, val = part.partition("=")
+        key = key.strip().lower()
+        val = val.strip()
+        key = {"fir": "first", "crg": "cargo", "quantity": "qty",
+               "n": "qty"}.get(key, key)
+        if key not in ("eco", "bus", "first", "cargo", "qty", "hub", "name"):
+            raise ValueError(f"--config: unknown key {key!r}")
+        cfg[key] = val if key in ("hub", "name") else int(val)
+    return cfg
+
+
+def build_configs(specs, hub, name, eco, bus, first, cargo, qty):
+    """Turn --config strings into complete rows, or fall back to a single row.
+
+    Unspecified fields inherit the purchase-wide values, so
+    `--eco 104 --config bus=32,qty=98 --config bus=55,qty=1` means two rows
+    that differ only where the string says so.
+    """
+    base = {"hub": hub, "name": name, "eco": eco, "bus": bus,
+            "first": first, "cargo": cargo, "qty": qty}
+    if not specs:
+        return [base]
+    rows = []
+    for spec in specs:
+        row = dict(base)
+        row.update(parse_config(spec))
+        rows.append(row)
+    return rows
 
 
 # ── Page interaction ────────────────────────────────────────────────────────
@@ -320,18 +369,80 @@ def set_seat_js(form_js, selector, value):
     }})({js_args(selector, str(value))}))"""
 
 
-def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
-                           num_aircraft=1, dry_run=False, name_prefix=None,
-                           alliance=False):
-    """Fill configure form and submit purchase.
+def _row_form_js(idx):
+    """JS expression for the idx-th configuration row's form.
 
-    Returns (success: bool|None, message: str). None = dry run.
+    The configure step drops one form per configuration into
+    #buyAircraft_bucket, so the bucket is a list of rows, not a single form.
+    Row 0 is the only one a single-config purchase ever has.
     """
-    bucket_form_js = "document.getElementById('buyAircraft_bucket').querySelector('form')"
+    return ("document.getElementById('buyAircraft_bucket')"
+            f".querySelectorAll('form')[{idx}]")
+
+
+def bucket_row_count(cdp):
+    """How many configuration rows the bucket currently holds."""
+    return cdp.eval(
+        "(() => { const b = document.getElementById('buyAircraft_bucket');"
+        " return b ? b.querySelectorAll('form').length : 0; })()") or 0
+
+
+def add_config_row(cdp, box_index, timeout=8):
+    """Append another configuration row to the bucket. Returns True on success.
+
+    The game offers this as "Add a <maker> model and/or a new configuration",
+    which puts the aircraft list back on screen; picking a box appends a second
+    row instead of replacing the first. Both halves are handled here, and the
+    result is verified by the row count actually growing — never assumed.
+    """
+    before = bucket_row_count(cdp)
+    cdp.eval("""(() => {
+        const cfg = document.getElementById('buyAircraft_configure');
+        const root = cfg || document;
+        const re = /add a .*model|new configuration|nouvelle configuration/i;
+        // Text matching hits every ancestor too, and clicking the wrapper does
+        // nothing — keep only elements with no matching descendant.
+        const hits = Array.from(root.querySelectorAll('a, button, input, span, div'))
+            .filter(el => re.test(el.textContent || el.value || ''));
+        const inner = hits.filter(el => !hits.some(o => o !== el && el.contains(o)));
+        const btn = root.querySelector('.addAircraftLine, .addAircraft, .addLine')
+            || inner.find(el => /^(A|BUTTON|INPUT)$/.test(el.tagName))
+            || inner[0];
+        if (btn) { btn.click(); return 'clicked'; }
+        return 'no_add_button';
+    })()""")
+
+    deadline = time.monotonic() + timeout
+    retriggered = False
+    while time.monotonic() < deadline:
+        cdp.wait(0.5)
+        if bucket_row_count(cdp) > before:
+            return True
+        # The add button re-showed the aircraft list: pick the same box again.
+        if not retriggered and cdp.eval(
+                "document.querySelectorAll('.aircraftPurchaseBox').length") and \
+                box_index is not None:
+            retriggered = True
+            cdp.eval(f"""(() => {{
+                const box = document.querySelectorAll('.aircraftPurchaseBox')[{box_index}];
+                if (!box) return 'no_box';
+                const form = box.querySelector('form');
+                if (form) {{ $(form).trigger('submit'); return 'ok'; }}
+                return 'no_form';
+            }})()""")
+    print(f"  ERROR: config row {before + 1} never appeared in the bucket",
+          file=sys.stderr)
+    return False
+
+
+def _fill_row(cdp, idx, cfg):
+    """Fill one configuration row. Returns an error string, or None on success."""
+    form_js = _row_form_js(idx)
 
     # Step 1: Set hub dropdown
+    hub_iata = cfg["hub"]
     hub_result = cdp.eval(f"""(((want, wantLower) => {{
-        const form = {bucket_form_js};
+        const form = {form_js};
         if (!form) return 'no_form';
         const hub = form.querySelector('#aircraft_hub, select[name*="hub"]');
         if (!hub) return 'no_hub_select';
@@ -373,7 +484,7 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
             pass
     if isinstance(hub_debug, dict) and "error" in hub_debug:
         print(f"  ERROR: Hub selection failed: {hub_debug}", file=sys.stderr)
-        return False, f"hub_select_failed: {hub_debug.get('error')}"
+        return f"hub_select_failed: {hub_debug.get('error')}"
     print(f"  Hub set: {hub_debug}")
 
     cdp.wait(0.5)
@@ -386,48 +497,52 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
     # cargo → first → bus → eco (eco LAST) so no class ever clamps.
     for sel in ('.cargoManualInput', '.firstManualInput',
                 '.busManualInput', '.ecoManualInput'):
-        cdp.eval(set_seat_js(bucket_form_js, sel, '0'))
+        cdp.eval(set_seat_js(form_js, sel, '0'))
         cdp.wait(0.15)
-    for sel, val in (('.cargoManualInput', cargo), ('.firstManualInput', first),
-                     ('.busManualInput', bus), ('.ecoManualInput', eco)):
-        res = cdp.eval(set_seat_js(bucket_form_js, sel, str(val)))
+    for sel, val in (('.cargoManualInput', cfg["cargo"]),
+                     ('.firstManualInput', cfg["first"]),
+                     ('.busManualInput', cfg["bus"]),
+                     ('.ecoManualInput', cfg["eco"])):
+        res = cdp.eval(set_seat_js(form_js, sel, str(val)))
         if res and res.startswith('no_element'):
             print(f"  WARNING: seat input {sel} not found", file=sys.stderr)
         cdp.wait(0.25)
 
     # Step 3: Set quantity
     qty_js = f"""(() => {{
-        const form = {bucket_form_js};
+        const form = {form_js};
         if (!form) return 'no_form';
         const setVal = (el) => {{
             if (!el) return;
             const ns = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-            ns.call(el, '{num_aircraft}');
+            ns.call(el, '{cfg["qty"]}');
             $(el).trigger('input').trigger('change');
         }};
         // Try multiple selectors for quantity input
         setVal(form.querySelector('.aircraftQuantity'));
         setVal(form.querySelector('input[name="aircraft[quantity]"]'));
-        setVal(form.querySelector('input[type="number"]'));
         return 'qty_set';
     }})()"""
     cdp.eval(qty_js)
     cdp.wait(0.3)
 
     # Step 3b: Set aircraft name
-    if name_prefix:
-        cdp.eval(set_input_value(bucket_form_js, 'input[name="aircraft[name]"]', name_prefix))
+    if cfg.get("name"):
+        cdp.eval(set_input_value(form_js, 'input[name="aircraft[name]"]', cfg["name"]))
         cdp.eval(f"""(() => {{
-            const form = {bucket_form_js};
+            const form = {form_js};
             if (!form) return;
             const r = form.querySelector('input[name="aircraft[namePattern]"][value="0"]');
             if (r) {{ r.checked = true; $(r).trigger('change'); }}
         }})()""")
         cdp.wait(0.3)
+    return None
 
-    # Read back actual values for verification
-    actual = cdp.eval_json(f"""(() => {{
-        const form = {bucket_form_js};
+
+def _read_row(cdp, idx):
+    """Read one configuration row back off the page."""
+    return cdp.eval_json(f"""(() => {{
+        const form = {_row_form_js(idx)};
         if (!form) return null;
         return {{
             eco: form.querySelector('.ecoManualInput')?.value,
@@ -440,35 +555,71 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
         }};
     }})()""")
 
-    if actual:
-        print(f"  Config read back: eco={actual.get('eco')} bus={actual.get('bus')} "
-              f"first={actual.get('first')} cargo={actual.get('cargo')}t "
-              f"hub={actual.get('hub')} qty={actual.get('qty')} "
-              f"name={actual.get('name')!r}")
 
-    # Safety guard: the form must hold EXACTLY the requested seat config before
-    # we spend money. A missing input (None) or a clamped/reverted value means
-    # we matched the wrong aircraft variant or the sliders didn't take — in
-    # which case the game would otherwise buy with its default layout. Abort.
+def configure_and_purchase(cdp, configs, box_index=None, dry_run=False,
+                           alliance=False):
+    """Fill the configure form(s) and submit one purchase.
+
+    `configs` is a list of {hub, eco, bus, first, cargo, qty, name} dicts — one
+    per configuration row. The game bills every row in a single POST, and the
+    99-aircraft ceiling applies to their SUM, not to each row.
+
+    Returns (success: bool|None, message: str). None = dry run.
+    """
+    total = sum(c["qty"] for c in configs)
+    if total > PER_PURCHASE_LIMIT:
+        return False, (f"quantity_over_limit: {total} > {PER_PURCHASE_LIMIT} "
+                       "across configurations")
+
+    for i, cfg in enumerate(configs):
+        if len(configs) > 1:
+            print(f"  Config {i + 1}/{len(configs)}: "
+                  f"eco={cfg['eco']} bus={cfg['bus']} first={cfg['first']} "
+                  f"cargo={cfg['cargo']}t x{cfg['qty']}")
+        if i and not add_config_row(cdp, box_index):
+            return False, f"add_config_row_failed: row {i + 1}"
+        err = _fill_row(cdp, i, cfg)
+        if err:
+            return False, err
+
+    # Safety guard: every row must hold EXACTLY the requested seat config and
+    # quantity before we spend money. A missing input (None) or a
+    # clamped/reverted value means we matched the wrong aircraft variant or the
+    # sliders didn't take — in which case the game would otherwise buy with its
+    # default layout. A wrong quantity would buy the wrong number of planes at
+    # ~$110M each. Abort on either.
     def _as_int(v):
         try:
             return int(float(v))
         except (TypeError, ValueError):
             return None
-    if not actual:
-        return False, "config_readback_failed: configure form not found"
-    want = {"eco": eco, "bus": bus, "first": first, "cargo": cargo}
-    mismatches = {
-        k: (actual.get(k), v) for k, v in want.items()
-        if _as_int(actual.get(k)) != v
-    }
-    if mismatches:
-        detail = ", ".join(f"{k}: got {g!r} want {w}" for k, (g, w) in mismatches.items())
-        print(f"  ABORT: seat config did not apply ({detail}).", file=sys.stderr)
-        print("  This usually means the wrong aircraft variant was matched "
-              "(check game_id/haul) or a value exceeded capacity. Not buying.",
-              file=sys.stderr)
-        return False, f"seat_config_mismatch: {detail}"
+
+    rows = bucket_row_count(cdp)
+    if rows != len(configs):
+        return False, f"row_count_mismatch: bucket has {rows}, want {len(configs)}"
+
+    for i, cfg in enumerate(configs):
+        actual = _read_row(cdp, i)
+        if not actual:
+            return False, f"config_readback_failed: row {i + 1} not found"
+        print(f"  Row {i + 1} read back: eco={actual.get('eco')} bus={actual.get('bus')} "
+              f"first={actual.get('first')} cargo={actual.get('cargo')}t "
+              f"hub={actual.get('hub')} qty={actual.get('qty')} "
+              f"name={actual.get('name')!r}")
+        want = {"eco": cfg["eco"], "bus": cfg["bus"], "first": cfg["first"],
+                "cargo": cfg["cargo"], "qty": cfg["qty"]}
+        mismatches = {
+            k: (actual.get(k), v) for k, v in want.items()
+            if _as_int(actual.get(k)) != v
+        }
+        if mismatches:
+            detail = ", ".join(f"{k}: got {g!r} want {w}"
+                               for k, (g, w) in mismatches.items())
+            print(f"  ABORT: row {i + 1} did not apply ({detail}).", file=sys.stderr)
+            print("  This usually means the wrong aircraft variant was matched "
+                  "(check game_id/haul) or a value exceeded capacity. Not buying.",
+                  file=sys.stderr)
+            return False, f"seat_config_mismatch: row {i + 1}: {detail}"
 
     # "Purchase through Alliance" takes the alliance's fixed discount and
     # fronts the members-assistance share from the treasury; whatever members
@@ -513,7 +664,7 @@ def configure_and_purchase(cdp, hub_iata, eco, bus, first, cargo,
     # nothing. So we must click the actual button. data-purchaseassistance
     # ="false" selects a personal (non-alliance) purchase.
     print(f"  Submitting {'alliance' if alliance else 'personal'} purchase "
-          f"for {num_aircraft}x aircraft...")
+          f"for {total}x aircraft in {len(configs)} configuration(s)...")
     submit_result = cdp.eval(r"""(() => {
         const cfg = document.getElementById('buyAircraft_configure');
         if (!cfg) return 'no_configure_section';
@@ -633,6 +784,10 @@ Standalone mode:
   python3 aircraft_buyer.py --model B742 --hub MPM --eco 293 --bus 16 --first 11 --cargo 35 --quantity 7
   python3 aircraft_buyer.py --model B742 --hub MPM --eco 293 --bus 16 --first 11 --cargo 35 --quantity 7 --dry-run
 
+Multiple configurations in one purchase (99 total across rows):
+  python3 aircraft_buyer.py --model Il-96-300 --hub LAX --eco 104 --first 23 --cargo 19 \
+      --config bus=32,qty=98 --config bus=55,qty=1
+
 List:
   python3 aircraft_buyer.py --list
 """,
@@ -647,6 +802,12 @@ List:
     p.add_argument("--first", type=int, default=None)
     p.add_argument("--cargo", type=int, default=None)
     p.add_argument("--quantity", type=int, default=None)
+    p.add_argument("--config", action="append", default=None, metavar="SPEC",
+                   help="Extra configuration row, repeatable: "
+                        "'eco=104,bus=32,first=23,cargo=19,qty=98[,hub=LAX]"
+                        "[,name=X]'. Unset keys inherit --eco/--bus/…; the "
+                        "quantities of all rows share the 99-per-purchase "
+                        "limit and are bought in one POST")
     p.add_argument("--name", default=None, help="Aircraft name prefix")
     p.add_argument("--alliance", action="store_true",
                    help="Buy via 'Purchase through Alliance' (fixed discount + "
@@ -814,6 +975,25 @@ def _buy(args, doc):
 
     hub_id = args.hub_id or get_hub_id_from_db(db, hub_iata)
 
+    try:
+        configs = build_configs(args.config, hub_iata, name_prefix,
+                                eco, bus, first, cargo, requested)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        doc["errors"].append(str(e))
+        sys.exit(1)
+    doc["configs"] = configs
+    if len(configs) > 1:
+        # Every row is billed in one POST, so the 99 ceiling covers their sum
+        # and there is nothing to batch.
+        requested = sum(c["qty"] for c in configs)
+        if requested > PER_PURCHASE_LIMIT:
+            msg = (f"{requested} aircraft across {len(configs)} configurations "
+                   f"exceeds the {PER_PURCHASE_LIMIT}-per-purchase limit")
+            print(f"ERROR: {msg}", file=sys.stderr)
+            doc["errors"].append(msg)
+            sys.exit(1)
+
     # Summary
     print(f"\n{'=' * 55}")
     print(f"  Aircraft:  {model_name} (alias: {model_alias}, game_id: {game_id or 'TBD'})")
@@ -822,7 +1002,13 @@ def _buy(args, doc):
     if specs.get("max_pax"):
         print(f"  Specs:     {specs['max_pax']} PAX / {specs['max_tonnage']}T / "
               f"{specs['range_km']}km")
-    print(f"  Seats:     eco={eco} bus={bus} first={first} cargo={cargo}t")
+    if len(configs) == 1:
+        print(f"  Seats:     eco={eco} bus={bus} first={first} cargo={cargo}t")
+    else:
+        for i, c in enumerate(configs, 1):
+            print(f"  Config {i}:  eco={c['eco']} bus={c['bus']} "
+                  f"first={c['first']} cargo={c['cargo']}t "
+                  f"hub={c['hub']} x{c['qty']} name={c['name']}")
     print(f"  Name:      {name_prefix}")
     print(f"  To buy:    {requested} aircraft "
           f"({(requested + PER_PURCHASE_LIMIT - 1) // PER_PURCHASE_LIMIT} batch(es) of "
@@ -833,13 +1019,16 @@ def _buy(args, doc):
 
     # Offline capacity sanity check (both dry-run and live).
     if specs.get("max_tonnage", 0) > 0:
-        payload = 0.1 * eco + 0.125 * bus + 0.15 * first + 1 * cargo
-        print(f"Payload check: {payload:.2f}T / {specs['max_tonnage']}T max")
-        print(f"PAX check:     {eco + bus + first} / {specs['max_pax']} max")
-        if payload > specs["max_tonnage"]:
-            print("WARNING: Payload exceeds capacity!")
-        if eco + bus + first > specs["max_pax"]:
-            print("WARNING: Seats exceed capacity!")
+        for i, c in enumerate(configs, 1):
+            tag = "" if len(configs) == 1 else f" (config {i})"
+            payload = 0.1 * c["eco"] + 0.125 * c["bus"] + 0.15 * c["first"] + c["cargo"]
+            pax = c["eco"] + c["bus"] + c["first"]
+            print(f"Payload check{tag}: {payload:.2f}T / {specs['max_tonnage']}T max")
+            print(f"PAX check{tag}:     {pax} / {specs['max_pax']} max")
+            if payload > specs["max_tonnage"]:
+                print("WARNING: Payload exceeds capacity!")
+            if pax > specs["max_pax"]:
+                print("WARNING: Seats exceed capacity!")
     print()
 
     # ── Live flow ─────────────────────────────────────────────────────────
@@ -871,7 +1060,11 @@ def _buy(args, doc):
 
     while remaining > 0:
         batch_idx += 1
+        # Multi-config purchases already fit in one POST (checked above); a
+        # single config over 99 is split into batches of 99.
         batch_qty = min(remaining, PER_PURCHASE_LIMIT)
+        batch_configs = ([dict(configs[0], qty=batch_qty)] if len(configs) == 1
+                         else configs)
         print(f"\n{'─' * 50}")
         print(f"  Batch {batch_idx}: buying {batch_qty} aircraft")
         print(f"{'─' * 50}")
@@ -903,9 +1096,7 @@ def _buy(args, doc):
 
         # Configure and purchase (dry_run captures payload without submitting)
         success, message = configure_and_purchase(
-            cdp, hub_iata,
-            eco=eco, bus=bus, first=first, cargo=cargo,
-            num_aircraft=batch_qty, name_prefix=name_prefix,
+            cdp, batch_configs, box_index=box_index,
             dry_run=args.dry_run, alliance=args.alliance,
         )
         print(f"  Result: {message}")

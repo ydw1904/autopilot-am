@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchCommandCenter } from "./api";
+import { clearApiCache, fetchCommandCenter } from "./api";
 import { AppShell, AppView } from "./components/AppShell";
 import { CommandCenter } from "./components/CommandCenter";
+import { Circuits } from "./components/Circuits";
 import { FleetWorkspace } from "./components/FleetWorkspace";
-import { Hangar } from "./components/Hangar";
 import { LiveryCollection } from "./components/LiveryCollection";
 import { Network } from "./components/Network";
 import { Ops } from "./components/Ops";
@@ -11,11 +11,13 @@ import { Pricing } from "./components/Pricing";
 import { ShmMonitor } from "./components/ShmMonitor";
 import { CommandCenterSnapshot } from "./types";
 
-const ROUTES: AppView[] = ["command", "network", "pricing", "fleet", "hangar", "liveries", "shm", "ops"];
+const ROUTES: AppView[] = ["command", "network", "circuits", "pricing", "fleet", "liveries", "shm", "ops"];
 
 function readLocation(): { view: AppView; preset?: string } {
   const raw = window.location.hash.replace(/^#/, "");
-  const [route, query = ""] = raw.split("?");
+  const [rawRoute, query = ""] = raw.split("?");
+  // The aircraft editor used to be its own "hangar" tab; old links still land.
+  const route = rawRoute === "hangar" ? "fleet" : rawRoute;
   const params = new URLSearchParams(query);
   return {
     view: (ROUTES as string[]).includes(route) ? (route as AppView) : "command",
@@ -71,7 +73,10 @@ export function App() {
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#${view}`);
   };
 
+  // Every cached snapshot is suspect once anything is written or the operator
+  // asks for a refresh, so drop the cache before the views remount and refetch.
   const dataChanged = () => {
+    clearApiCache();
     setRefreshToken((value) => value + 1);
     loadSnapshot(true);
   };
@@ -82,12 +87,14 @@ export function App() {
       snapshot={snapshot}
       refreshing={refreshing}
       onNavigate={(next) => navigate(next)}
-      onRefresh={() => { setRefreshToken((value) => value + 1); loadSnapshot(true); }}
+      onRefresh={dataChanged}
     >
       {view === "command" ? (
         <CommandCenter snapshot={snapshot} loading={loading} error={error} onNavigate={navigate} />
       ) : view === "network" ? (
-        <Network refreshToken={refreshToken} onOpenFleet={(preset) => navigate("fleet", preset)} />
+        <Network refreshToken={refreshToken} onOpenAircraft={(aircraftId) => navigate("fleet", `ac:${aircraftId}`)} />
+      ) : view === "circuits" ? (
+        <Circuits refreshToken={refreshToken} onOpenAircraft={(aircraftId) => navigate("fleet", `ac:${aircraftId}`)} />
       ) : view === "pricing" ? (
         <Pricing snapshot={snapshot} refreshToken={refreshToken} />
       ) : view === "ops" ? (
@@ -99,14 +106,8 @@ export function App() {
           refreshToken={refreshToken}
           onDataChanged={dataChanged}
           onOpenLivery={(skinId) => navigate("liveries", `skin:${skinId}`)}
-          onOpenAircraft={(aircraftId) => navigate("hangar", `ac:${aircraftId}`)}
-        />
-      ) : view === "hangar" ? (
-        <Hangar
-          snapshot={snapshot}
-          initialPreset={fleetPreset}
-          refreshToken={refreshToken}
-          onDataChanged={dataChanged}
+          onOpenAircraft={(aircraftId) => navigate("fleet", `ac:${aircraftId}`)}
+          onPresetCleared={clearPreset}
         />
       ) : view === "liveries" ? (
         <LiveryCollection

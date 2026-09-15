@@ -8,7 +8,34 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: "#F5F2EC",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted-ui))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent-ui))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
         surface: "#FFFFFF",
         surface2: "#F8F6F1",
         border: "#E5E1D6",
@@ -18,15 +45,6 @@ export default {
         dim: "#8B877C",
         navy: "#05164D",
         gold: "#FFAD00",
-        accent: {
-          navy: "#05164D",
-          gold: "#FFAD00",
-          cyan: "#1D6FB8",
-          amber: "#9E7600",
-          green: "#1E7E46",
-          purple: "#7C5CBF",
-          red: "#C8102E",
-        },
       },
       fontFamily: {
         sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "SF Pro Text", "Helvetica Neue", "sans-serif"],

@@ -12,12 +12,13 @@ import {
   Route,
   Settings2,
   Sparkles,
-  Warehouse,
+  Workflow,
 } from "lucide-react";
 import { CommandCenterSnapshot } from "../types";
 import { launchBrowser } from "../api";
+import { Button } from "@/components/ui/button";
 
-export type AppView = "command" | "network" | "pricing" | "fleet" | "hangar" | "liveries" | "shm" | "ops";
+export type AppView = "command" | "network" | "circuits" | "pricing" | "fleet" | "liveries" | "shm" | "ops";
 
 interface AppShellProps {
   activeView: AppView;
@@ -31,9 +32,9 @@ interface AppShellProps {
 const navigation = [
   { id: "command" as const, label: "Command", icon: Gauge },
   { id: "network" as const, label: "Network", icon: Route },
+  { id: "circuits" as const, label: "Circuits", icon: Workflow },
   { id: "pricing" as const, label: "Pricing", icon: CircleDollarSign },
   { id: "fleet" as const, label: "Fleet", icon: Plane },
-  { id: "hangar" as const, label: "Hangar", icon: Warehouse },
   { id: "liveries" as const, label: "Liveries", icon: Palette },
   { id: "shm" as const, label: "SHM", icon: Radar },
   { id: "ops" as const, label: "Ops", icon: Activity },
@@ -41,10 +42,10 @@ const navigation = [
 
 const pageCopy: Record<AppView, { title: string; subtitle: string }> = {
   command: { title: "Command Center", subtitle: "Portfolio readiness and execution queue" },
-  network: { title: "Network", subtitle: "Circuits, their routes, and where coverage is missing" },
+  network: { title: "Network", subtitle: "Owned routes, planned expansion, and global coverage" },
+  circuits: { title: "Circuits", subtitle: "Current and planned circuit performance" },
   pricing: { title: "Pricing", subtitle: "Live route prices against the game's own recommendation" },
-  fleet: { title: "Fleet Operations", subtitle: "Inspect and organize every aircraft from one workspace" },
-  hangar: { title: "Hangar", subtitle: "Rename, repaint, reconfigure, move, sell or scrap one aircraft" },
+  fleet: { title: "Fleet Operations", subtitle: "Browse the fleet, then rename, repaint, reconfigure, move, sell or scrap one aircraft" },
   liveries: { title: "Livery Collection", subtitle: "Track every special paint scheme across the fleet" },
   shm: { title: "SHM Watcher", subtitle: "Track market coverage, sightings, and purchase decisions" },
   ops: { title: "Operations", subtitle: "Delivery queue, daily rewards, and cache freshness" },
@@ -92,17 +93,17 @@ export function AppShell({
   return (
     <div className="app-frame">
       <aside className="nav-rail" aria-label="Primary navigation">
-        <button className="brand-button" onClick={() => onNavigate("command")} aria-label="Autopilot home">
+        <Button className="brand-button" onClick={() => onNavigate("command")} aria-label="Autopilot home">
           <span className="brand-glyph"><Sparkles size={18} strokeWidth={2.4} /></span>
           <span className="brand-word">AM</span>
-        </button>
+        </Button>
 
         <nav className="rail-nav">
           {navigation.map((item) => {
             const Icon = item.icon;
             const active = activeView === item.id;
             return (
-              <button
+              <Button
                 key={item.id}
                 className={`rail-link${active ? " is-active" : ""}`}
                 onClick={() => onNavigate(item.id)}
@@ -110,7 +111,7 @@ export function AppShell({
               >
                 <Icon size={20} strokeWidth={active ? 2.3 : 1.8} />
                 <span>{item.label}</span>
-              </button>
+              </Button>
             );
           })}
         </nav>
@@ -143,7 +144,7 @@ export function AppShell({
                 <span>Chrome connected</span>
               </div>
             ) : (
-              <button
+              <Button
                 className="connection-pill is-offline is-action"
                 onClick={handleLaunch}
                 disabled={launching}
@@ -153,26 +154,26 @@ export function AppShell({
               >
                 {launching ? <Plug size={13} className="is-spinning" /> : <span className="connection-dot" />}
                 <span>{launching ? "Linking…" : "Limited mode"}</span>
-              </button>
+              </Button>
             )}
-            <button className="icon-action" onClick={onRefresh} disabled={refreshing} title="Reload cached data">
+            <Button className="icon-action" onClick={onRefresh} disabled={refreshing} title="Reload cached data">
               <RefreshCcw size={17} className={refreshing ? "is-spinning" : ""} />
               <span>Reload</span>
-            </button>
+            </Button>
           </div>
         </header>
 
         <main className="app-content">{children}</main>
 
         {showBackToTop && (
-          <button
+          <Button
             className="back-to-top"
             onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
             aria-label="Back to top"
             title="Back to top"
           >
             <ArrowUp size={19} strokeWidth={2.4} />
-          </button>
+          </Button>
         )}
       </div>
     </div>

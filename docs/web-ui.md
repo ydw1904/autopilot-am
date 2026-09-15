@@ -1,5 +1,19 @@
 # Browser UI (`web/src/`)
 
+## Shared pieces: use these, don't copy them
+
+| Need | Use |
+|---|---|
+| Search box + filter toolbar + "N active filters / Clear all" row | `<SearchInput>`, `<FilterBar>` in `components/FilterBar.tsx` |
+| Debounced server-side search text | `useDebouncedQuery(text)` in `components/FilterBar.tsx` |
+| Numbers, money, game timestamps | `integer`, `wholeMoney`, `compactMoney`, `shortMoney`, `parseGameDate`, `shortDate`, `dateTime` in `format.ts` |
+| Page error, first-load skeleton, empty or all-clear message | `<ErrorState>`, `<LoadingState>`, `<EmptyState>` in `components/PageStates.tsx` |
+| Load data on mount / on `refreshToken` | `useApi(load, deps)` in `useApi.ts` (keeps the last data during a reload) |
+| One-of-N buttons (view switch, tabs, status pills) | `<SegmentedControl>`; the look comes from its `className` |
+| Section kicker + title + count | `<SectionHeader>` |
+| Fare class list, labels, sums, circuit capacity | `PRICE_CLASSES`, `CLASS_LABELS`, `sumClasses`, `dailyCapacity` in `classes.ts` |
+| Livery name parts, hub flags | `splitLiveryName`, `cleanLiveryName` in `liveryName.ts`; `hubLabel`, `hubFlagMap` in `hubFlag.ts` |
+
 ## Dropdowns (browser UI) — `web/src/components/MenuSelect.tsx`
 
 Every dropdown in `web/src/` — filters, sorts, pickers — uses `<MenuSelect>`. Do

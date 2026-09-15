@@ -54,8 +54,25 @@ def test_network_snapshot_joins(conn):  # noqa: F811
     assert totals["unscheduled_waves"] == 1
     assert (totals["routes_owned"], totals["routes_known"]) == (1, 2)
 
+    routes = {(r["hub_iata"], r["dest_iata"]): r for r in snap["routes"]}
+    assert routes[("HKG", "CPT")]["is_owned"] is True
+    assert routes[("HKG", "CPT")]["circuits"] == ["HKG-C001"]
+    assert routes[("HKG", "LOS")]["is_planned"] is True
+
     hub = next(h for h in snap["hubs"] if h["hub_iata"] == "HKG")
     assert (hub["circuits"], hub["operating"], hub["aircraft"]) == (2, 1, 3)
+
+
+def test_hubs_include_owned_hubs_with_nothing_scraped(conn):  # noqa: F811
+    _seed(conn)
+    conn.execute("INSERT INTO player_hubs (hub_iata, hub_id) VALUES ('RVN', 1)")
+    conn.commit()
+    snap = dbmod.get_network_snapshot()
+
+    rvn = next(h for h in snap["hubs"] if h["hub_iata"] == "RVN")
+    assert (rvn["routes_known"], rvn["circuits"]) == (0, 0)
+    # An unscraped hub adds no routes, so the totals must not move.
+    assert snap["totals"]["routes_known"] == 2
 
 
 def test_ops_freshness_skips_absent_tables(conn):  # noqa: F811

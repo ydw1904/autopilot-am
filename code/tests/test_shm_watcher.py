@@ -248,6 +248,21 @@ def test_sync_automatic_watches_observes_special_am_gold_rewards_only(conn):
                    "active": 1, "armed": 0}
 
 
+def test_sync_automatic_watches_observes_am_coin_aircraft(conn):
+    """'aircraft'/'amc' is shop-exclusive like the ticket planes: watched, unarmed."""
+    add_catalog_tables(conn)
+    conn.execute("INSERT INTO mobile_skins VALUES (9, 90, 'X777-9 - Tennis 2026', 'playrion')")
+    conn.execute("INSERT INTO mobile_shop_offers VALUES (900, 'aircraft', 'amc')")
+    conn.execute("INSERT INTO mobile_shop_offer_items VALUES (900, 9)")
+
+    sw.sync_automatic_watches(conn)
+
+    row = dict(conn.execute(
+        "SELECT skin_id, source, active, armed FROM shm_watch").fetchone())
+    assert row == {"skin_id": 9, "source": sw.AMCOIN_SOURCE,
+                   "active": 1, "armed": 0}
+
+
 def test_sync_automatic_watches_marks_acquired_managed_rows_inactive(conn):
     add_catalog_tables(conn)
     conn.executemany(

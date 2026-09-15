@@ -16,11 +16,13 @@ import os
 import sys
 import threading
 import time
+from functools import lru_cache
 from typing import List, Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -32,6 +34,7 @@ from db import (
     get_fleet_aircraft,
     get_fleet_aircraft_page,
     get_fleet_name_suggestions,
+    suggest_aircraft_name,
     get_daily_fleet_liveries,
     get_fleet_summary_stats,
     get_livery_collection,
@@ -53,6 +56,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIST = os.path.join(REPO_ROOT, "web", "dist")
 
 app = FastAPI(title="Autopilot AM API", version="2.0.0")
+
+# The snapshot endpoints are large, repetitive JSON: /api/network is 693 KB
+# and /api/fleet 1.75 MB on the wire, both ~24x smaller gzipped.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.add_middleware(
     CORSMiddleware,
@@ -224,8 +231,130 @@ def set_shm_watch(skin_id: int, update: ShmWatchUpdate):
 
 @app.get("/api/network")
 def network():
-    """Circuits, their routes, and hub route coverage — cached, no game calls."""
-    return get_network_snapshot()
+    """Owned and planned routes, with optional world coordinates for the map."""
+    snapshot = get_network_snapshot()
+    try:
+        locations = _airport_locations()
+        for route in snapshot.get("routes", []):
+            origin = locations.get(route["hub_iata"])
+            destination = locations.get(route["dest_iata"])
+            route["origin"] = origin
+            route["destination"] = destination
+        for hub in snapshot.get("hubs", []):
+            hub["location"] = locations.get(hub["hub_iata"])
+        snapshot["map_error"] = None
+    except Exception as exc:                                    # noqa: BLE001
+        snapshot["map_error"] = str(exc)
+    return snapshot
+
+
+@lru_cache(maxsize=1)
+def _airport_locations():
+    """Static airport coordinates from one mobile world-catalog read."""
+    from mobile_api import AMClient, AMSession
+
+    world = AMClient(AMSession.load()).world()
+    return {
+        row["i"].upper(): {"lat": float(row["lt"]), "lon": float(row["lg"])}
+        for row in world.get("airportList", [])
+        if row.get("i") and row.get("lt") is not None and row.get("lg") is not None
+    }
+
+
+CLASSES = ("eco", "bus", "first", "cargo")
+
+
+def _mobile_date(value) -> Optional[str]:
+    """The mobile API wraps every timestamp as {date, timezone…}; keep the date."""
+    if isinstance(value, dict):
+        return value.get("date")
+    return value or None
+
+
+@app.get("/api/route/{hub_iata}/{dest_iata}")
+def route_detail(hub_iata: str, dest_iata: str):
+    """One route's profile — the cached row plus the live `line/{id}` read.
+
+    The mobile API has no per-line financial history (the web route page's
+    turnover/forecast tables), so what it does carry is what this returns:
+    purchase and resale price, the audit, and live price/demand/remaining.
+    """
+    hub, dest = hub_iata.upper().strip(), dest_iata.upper().strip()
+    row = get_db().execute(
+        "SELECT hub_iata, dest_iata, dest_name, dest_country, distance_km, "
+        "dest_category, stars, gross_price, line_id, is_owned, "
+        "eco_demand, bus_demand, fir_demand, cargo_demand "
+        "FROM routes WHERE hub_iata = ? AND dest_iata = ?", (hub, dest)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"{hub}/{dest} is not a known route")
+
+    out = dict(row)
+    out["is_owned"] = bool(out["is_owned"])
+    out.update(line=None, error=None)
+    if not out["line_id"]:
+        out["error"] = "No line id cached for this route yet."
+        return out
+
+    try:
+        from mobile_api import AMClient, AMSession
+        client = AMClient(AMSession.load())
+        try:
+            line = client.line(int(out["line_id"]))
+        finally:
+            client.close()
+    except Exception as exc:                                    # noqa: BLE001
+        out["error"] = f"Live route read failed: {exc}"
+        return out
+
+    audit = (line.get("audit") or {}).get("profile") or {}
+    incidents = line.get("incidents") or {}
+    classes = lambda block: {c: int((block or {}).get(c) or 0) for c in CLASSES}
+    out["line"] = {
+        "name": line.get("name"),
+        "distance_km": line.get("distance"),
+        "purchase_price": line.get("purchasePrice"),
+        "purchased_at": _mobile_date(line.get("purchaseDate")),
+        "selling_price": line.get("sellingPrice"),
+        "locked_until": _mobile_date(line.get("lockedUntil")),
+        "is_frozen": bool(line.get("isFrozen")),
+        "incidents": int(incidents.get("incidentNb") or 0),
+        "incidents_grounded": int(incidents.get("incidentNoFlightNb") or 0),
+        "price": classes(line.get("price")),
+        "demand": classes(line.get("demand")),
+        "remaining": classes(line.get("remainingDemand")),
+        "audit": {
+            "date": _mobile_date(audit.get("date")),
+            "reliability": audit.get("reliability"),
+            "price": classes(audit.get("price")),
+            "demand": classes(audit.get("demand")),
+        },
+    }
+    return out
+
+
+@app.get("/api/route/{hub_iata}/{dest_iata}/details")
+def route_details(hub_iata: str, dest_iata: str):
+    """The game's own /network/showline page for one route, parsed.
+
+    Kept off `/api/route/{hub}/{dest}` on purpose: this is the only part that
+    needs a signed-in Chrome, and it is ~1.2s of CDP, so the page paints the
+    mobile read first and fills this in when it lands. A missing browser is a
+    populated `error`, not a failed request.
+    """
+    hub, dest = hub_iata.upper().strip(), dest_iata.upper().strip()
+    row = get_db().execute(
+        "SELECT line_id FROM routes WHERE hub_iata = ? AND dest_iata = ?",
+        (hub, dest)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"{hub}/{dest} is not a known route")
+    if not row["line_id"]:
+        return {"details": None, "error": "No line id cached for this route yet."}
+
+    try:
+        import route_details as scraper
+        return {"details": scraper.fetch_showline(int(row["line_id"])), "error": None}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"details": None, "error": f"Route details page unavailable: {exc}"}
 
 
 @app.get("/api/pricing/{hub_iata}")
@@ -316,6 +445,14 @@ def apply_pricing(hub_iata: str, req: PricingApplyRequest):
     return doc
 
 
+# The four mobile calls below are ~3.5s of round trips, paid on every visit to
+# the Ops view. Nothing here is written by this app, and a delivery countdown is
+# measured in hours, so a stale-for-a-minute copy is free. Freshness and the two
+# connectivity probes stay live -- they are what you check when the session dies.
+_OPS_LIVE_TTL_S = 60
+_OPS_LIVE: dict = {"at": 0.0, "value": None}
+
+
 @app.get("/api/ops")
 def ops():
     """Delivery queue, claimable dailies, and cache freshness in one read.
@@ -324,6 +461,13 @@ def ops():
     whole page: a dead mobile session must not hide the freshness table, which
     is exactly what you look at when the session is dead.
     """
+    cached = _OPS_LIVE.get("value")
+    if cached and time.time() - _OPS_LIVE["at"] < _OPS_LIVE_TTL_S:
+        deliveries, daily = cached
+        return {"deliveries": deliveries, "daily": daily, "freshness": get_ops_freshness(),
+                "browser_connected": _browser_connected(),
+                "mobile_configured": _mobile_configured()}
+
     deliveries = {"events": [], "server_time": None, "error": None}
     daily = {"error": None}
     try:
@@ -349,6 +493,8 @@ def ops():
             slot_games_left=slot.get("nbRemainingGames") or 0)
     except HTTPException as exc:
         deliveries["error"] = daily["error"] = str(exc.detail)
+    else:
+        _OPS_LIVE.update(at=time.time(), value=(deliveries, daily))
 
     return {"deliveries": deliveries, "daily": daily, "freshness": get_ops_freshness(),
             "browser_connected": _browser_connected(),
@@ -395,6 +541,7 @@ def list_fleet(
 @app.get("/api/fleet-page")
 def fleet_page(
     q: Optional[str] = Query(None),
+    name_query: Optional[str] = Query(None, description="Substring of the aircraft name"),
     hubs: Optional[str] = Query(None),
     min_util: Optional[float] = Query(None),
     max_util: Optional[float] = Query(None),
@@ -409,6 +556,7 @@ def fleet_page(
     hub_list = [h.strip().upper() for h in hubs.split(",") if h.strip()] if hubs else None
     return get_fleet_aircraft_page(
         query=q,
+        name_query=name_query,
         hubs=hub_list,
         min_util=min_util,
         max_util=max_util,
@@ -422,10 +570,10 @@ def fleet_page(
 
 
 @app.get("/api/fleet-name-suggestions")
-def fleet_name_suggestions(prefix: str = Query(..., min_length=2, max_length=20),
+def fleet_name_suggestions(q: str = Query(..., min_length=2, max_length=20),
                             limit: int = Query(30, ge=1, le=50)):
-    """Return only the first cached aircraft names matching a typed prefix."""
-    return get_fleet_name_suggestions(prefix, limit)
+    """Return cached aircraft names containing the typed text."""
+    return get_fleet_name_suggestions(q, limit)
 
 
 class AircraftTagUpdate(BaseModel):
@@ -1110,6 +1258,9 @@ def _hangar_view(client, aircraft_id: int) -> dict:
                   "first": seats.get("first") or 0},
         "payload": profile.get("payload") or 0,
         "skin": {"id": skin.get("id"), "name": skin.get("name")},
+        "suggested_name": suggest_aircraft_name(
+            model.get("name"), spec["icao_code"] if spec else None,
+            skin.get("name")),
         # The three caps the market enforces, plus what the game itself pays.
         # binThreshold is per-LIVERY, so it moves when the livery does.
         "sale": {"scrap": profile.get("sellPrice"),

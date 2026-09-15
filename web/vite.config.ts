@@ -4,6 +4,9 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   base: "/app/",
   plugins: [react()],
+  resolve: {
+    alias: { "@": new URL("./src", import.meta.url).pathname },
+  },
   server: {
     port: 3000,
     proxy: {

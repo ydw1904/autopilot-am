@@ -108,6 +108,10 @@ MAX_ACTIVE_LISTINGS = 10
 # timeMinus / timePlus — every other value silently falls back to timeMinus.
 AUCTION_PAGE_LIMIT = 100
 
+# Aircraft per purchase, summed across the `aircrafts` entries — the same
+# ceiling the web configure form enforces (aircraft_buyer.PER_PURCHASE_LIMIT).
+BUY_LIMIT = 99
+
 # `aircraft.skin.type` on a listing, and `mobile_skins.livery_type`.
 SKIN_TYPE_MANUFACTURER = 0   # the model's default paint
 SKIN_TYPE_PLAYRION = 1       # official/event liveries — the limited-time ones
@@ -912,10 +916,23 @@ class AMClient:
             self.store.commit()
         return out
 
+    def claim_objective(self, objective_id: int) -> dict:
+        """Collect one challenge progress reward (free track).
+
+        `Api.ChallengesCalls.ClaimReward(objectiveId)` in the APK metadata;
+        verified live 2026-09-15 (TAL Journey objective 5479 handed over the
+        A320neo). The reward's `cardEffects[]` carries the same shape as a shop
+        claim's `bonus`. Re-claiming answers status 0, so it is safe to retry.
+        """
+        return self._request("POST", f"challenge/objective/{int(objective_id)}/claim",
+                             data={"objectiveId": int(objective_id)})
+
     # ── writes ──────────────────────────────────────────────────────────
-    def buy_multiple(self, *, model_id: int, hub_id: int, quantity: int,
-                     name: str, skin_id: int, eco: int, bus: int,
-                     first: int, payload: int) -> dict:
+    def buy_multiple(self, *, model_id: int = None, hub_id: int = None,
+                     quantity: int = None, name: str = None,
+                     skin_id: int = None, eco: int = None, bus: int = None,
+                     first: int = None, payload: int = None,
+                     configs: list = None) -> dict:
         """Mint new aircraft from the shop (mobile endpoint).
 
         Captured body shape:
@@ -924,21 +941,39 @@ class AMClient:
                         "name":"…","aircraftSkinId":2801396,"seatsEco":136,
                         "seatsBus":74,"seatsFirst":31,"payload":12}]
 
+        `aircrafts` is a list because one purchase may mix configurations (and
+        even models/hubs): pass `configs=[{model_id, hub_id, quantity, name,
+        skin_id, eco, bus, first, payload}, …]` instead of the single-config
+        keywords. The game's 99-per-purchase ceiling applies to the SUM of the
+        entries' quantities, which is checked here before spending.
+
         With the model license owned the AM-coin cost is waived (money only).
         Response `events[].objectid` carries the new aircraft ids — the same
         ids that then sit in the delivery queue (`pending_events()`). New
         planes are NOT sellable until they leave it; `wait_for_delivery()`
         blocks on that.
         """
-        aircrafts = [{"aircraftId": int(model_id),
-                      "hubId": int(hub_id),
-                      "quantity": int(quantity),
-                      "name": name,
-                      "aircraftSkinId": int(skin_id),
-                      "seatsEco": int(eco),
-                      "seatsBus": int(bus),
-                      "seatsFirst": int(first),
-                      "payload": int(payload)}]
+        if configs is None:
+            configs = [{"model_id": model_id, "hub_id": hub_id,
+                        "quantity": quantity, "name": name, "skin_id": skin_id,
+                        "eco": eco, "bus": bus, "first": first,
+                        "payload": payload}]
+        if not configs:
+            raise ValueError("buy_multiple: no configurations given")
+        total = sum(int(c["quantity"]) for c in configs)
+        if total > BUY_LIMIT:
+            raise ValueError(
+                f"buy_multiple: {total} aircraft across {len(configs)} "
+                f"configurations exceeds the {BUY_LIMIT}-per-purchase limit")
+        aircrafts = [{"aircraftId": int(c["model_id"]),
+                      "hubId": int(c["hub_id"]),
+                      "quantity": int(c["quantity"]),
+                      "name": c["name"],
+                      "aircraftSkinId": int(c["skin_id"]),
+                      "seatsEco": int(c["eco"]),
+                      "seatsBus": int(c["bus"]),
+                      "seatsFirst": int(c["first"]),
+                      "payload": int(c["payload"])} for c in configs]
         body = self._request("POST", "aircraft/buymultiple",
                              data={"purchaseAssistance": "false",
                                    "aircrafts": json.dumps(aircrafts)})

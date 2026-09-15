@@ -1,10 +1,19 @@
 import { useEffect, useState } from "react";
 import {
+  ColumnDef,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from "@tanstack/react-table";
+import {
   Activity,
   ArrowDown,
+  ArrowDownWideNarrow,
   ArrowUp,
+  ArrowUpNarrowWide,
   ChevronsUpDown,
   Clock3,
+  Coins,
   Eye,
   Filter,
   Gavel,
@@ -13,19 +22,26 @@ import {
   Package,
   Plane,
   Radar,
-  Search,
   ShieldCheck,
   ShoppingBag,
   Ticket,
   Trophy,
-  X,
 } from "lucide-react";
 import { fetchShmMonitor, updateShmWatch } from "../api";
+import { EMPTY, integer, parseGameDate, shortMoney } from "../format";
 import { ShmMonitorSnapshot, ShmWatch } from "../types";
+import { FilterBar, SearchInput } from "./FilterBar";
 import { MenuOption, MenuSelect } from "./MenuSelect";
+import { EmptyState, ErrorState, LoadingState } from "./PageStates";
+import { SectionHeader } from "./SectionHeader";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
-  CHECK_SORTS,
   DECISION_SORTS,
+  FeedFilters,
+  NO_FEED_FILTERS,
   NO_WATCH_FILTERS,
   SIGHTING_SORTS,
   STATE_LABELS,
@@ -34,15 +50,19 @@ import {
   WATCH_COLUMNS,
   WATCH_SORTS,
   WatchFilters,
+  checkSorts,
+  countFeedFilters,
   countWatchFilters,
   filterChecks,
   filterDecisions,
+  filterSightings,
   filterWatches,
   groupDecisions,
   isLiveWatch,
   modelNames,
   nextSort,
   sortBy,
+  sortByValue,
   sourceBucket,
   sourceStyle,
   watchLivery,
@@ -50,11 +70,22 @@ import {
   watchState,
 } from "./shmFilters";
 
-const integer = new Intl.NumberFormat();
+// Per-cell attributes the watch table needs (numeric alignment, the
+// price-reach colour, empty-state dimming) ride on the column's meta so the
+// body renderer stays one generic flexRender loop.
+declare module "@tanstack/react-table" {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  interface ColumnMeta<TData, TValue> {
+    className?: (row: TData) => string | undefined;
+    title?: (row: TData) => string | undefined;
+  }
+}
+
 
 const SOURCE_ICONS: Record<string, typeof Trophy> = {
   "is-shop-pack": ShoppingBag,
   "is-shop-tc": Ticket,
+  "is-shop-amc": Coins,
   "is-shop-gift": Gift,
   "is-challenge": Trophy,
   "is-booster": Package,
@@ -65,6 +96,7 @@ const SOURCE_OPTIONS: MenuOption[] = [
   { value: "all", label: "All sources" },
   { value: "shop-pack:auto", label: "Paid pack" },
   { value: "shop-ticket:auto", label: "Ticket aircraft", hint: "costs travel cards" },
+  { value: "shop-amc:auto", label: "AM coin aircraft", hint: "costs AM coins" },
   { value: "shop-gold:auto", label: "AM Gold Crew", hint: "monthly subscription reward" },
   { value: "challenge:auto", label: "Challenge" },
   { value: "booster", label: "Booster" },
@@ -81,6 +113,11 @@ const STATE_OPTIONS: MenuOption[] = [
   { value: "observing", label: "Observing", hint: "watch only" },
   { value: "inactive", label: "Dormant", hint: "acquired or retired" },
 ];
+const SIGHTING_FILTER_OPTIONS: MenuOption[] = [
+  { value: "all", label: "All listings" },
+  { value: "ending", label: "Ending soon", hint: "under an hour left" },
+  { value: "bids", label: "Has bids", hint: "someone else is in" },
+];
 const CHECK_FILTER_OPTIONS: MenuOption[] = [
   { value: "all", label: "All checks" },
   { value: "truncated", label: "Truncated only" },
@@ -92,36 +129,45 @@ const DECISION_FILTER_OPTIONS: MenuOption[] = [
   { value: "live", label: "Live only" },
 ];
 
-/** The feed sections pick their sort column from the same specs the table sorts by. */
+/** Every feed sort is one menu of "field, direction" pairs, built from the same
+ *  specs the watch table sorts by. The spec's own direction leads (a listing
+ *  feed opens newest first), then its opposite, and each names itself in a hint
+ *  the way the fleet and livery sort menus do. */
 function sortOptions<T>(specs: Record<string, SortSpec<T>>): MenuOption[] {
-  return Object.entries(specs).map(([value, spec]) => ({ value, label: spec.label }));
+  return Object.entries(specs).flatMap(([key, spec]) =>
+    ([spec.dir, -spec.dir as SortDir]).map((dir) => ({
+      value: `${key}:${dir}`,
+      label: spec.label,
+      hint: spec.hints[dir === 1 ? 0 : 1],
+      icon: dir === 1 ? ArrowUpNarrowWide : ArrowDownWideNarrow,
+    })));
 }
 
-/** Ascending/descending toggle sitting next to a feed's sort dropdown. */
-function DirButton({ dir, onFlip }: { dir: SortDir; onFlip: () => void }) {
+/** The filter shell every feed shares, and the same one the watched-liveries
+ *  table already uses: search, the feed's own dropdown, its sort, and the
+ *  standard "N active filters / showing X of Y" strip underneath. */
+function FeedControls<T>({ filters, onChange, options, placeholder, sort, onSort, sortSpecs, shown, total }: {
+  filters: FeedFilters;
+  onChange: (filters: FeedFilters) => void;
+  options: MenuOption[];
+  placeholder: string;
+  sort: string;
+  onSort: (sort: string) => void;
+  sortSpecs: Record<string, SortSpec<T>>;
+  shown: number;
+  total: number;
+}) {
   return (
-    <button
-      type="button"
-      className="sort-dir-button"
-      onClick={onFlip}
-      title={dir === 1 ? "Ascending — click for descending" : "Descending — click for ascending"}
-      aria-label={dir === 1 ? "Sorted ascending" : "Sorted descending"}
-    >
-      {dir === 1 ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-    </button>
+    <FilterBar className="shm-controls is-feed" active={countFeedFilters(filters)} onClear={() => onChange(NO_FEED_FILTERS)}
+      status={<small>Showing {integer.format(shown)} of {integer.format(total)}</small>}>
+      <SearchInput value={filters.query} onChange={(query) => onChange({ ...filters, query })} placeholder={placeholder} />
+      <MenuSelect label="Filter" value={filters.select} onChange={(select) => onChange({ ...filters, select })} options={options} icon={Filter} />
+      <MenuSelect label="Sort by" value={sort} onChange={onSort} options={sortOptions(sortSpecs)} align="right" />
+    </FilterBar>
   );
 }
 
-const EMPTY = "—";
-
-function money(value: number | null | undefined): string {
-  if (value === null || value === undefined) return EMPTY;
-  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(0)}M`;
-  return `$${integer.format(value)}`;
-}
-
-// Accepts what money() prints back ("$2.00B", "$1,250"), plus the shorthand the
+// Accepts what shortMoney() prints back ("$2.00B", "$1,250"), plus the shorthand the
 // CLI takes ("2b", "850m"). Empty clears the cap; anything else is rejected so a
 // typo never silently becomes a $0 cap that buys nothing.
 function parseMoney(raw: string): number | null | undefined {
@@ -133,14 +179,8 @@ function parseMoney(raw: string): number | null | undefined {
   return Math.round(Number(match[1]) * scale);
 }
 
-function utcDate(value: string | null | undefined): Date | null {
-  if (!value) return null;
-  const parsed = new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
 function relativeTime(value: string | null | undefined): string {
-  const date = utcDate(value);
+  const date = parseGameDate(value);
   if (!date) return "Never";
   const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
@@ -186,8 +226,8 @@ function capReach(watch: ShmWatch): { cls: string; title: string } {
   if (watch.cheapest_seen === null) return { cls: "", title: "This livery has not been listed since the watch was added" };
   if (watch.max_price === null) return { cls: "", title: "No cap set — any buy-now price is accepted" };
   return watch.cheapest_seen <= watch.max_price
-    ? { cls: "is-under-cap", title: `Within the ${money(watch.max_price)} cap` }
-    : { cls: "is-over-cap", title: `Above the ${money(watch.max_price)} cap — this watch cannot fire at that price` };
+    ? { cls: "is-under-cap", title: `Within the ${shortMoney(watch.max_price)} cap` }
+    : { cls: "is-over-cap", title: `Above the ${shortMoney(watch.max_price)} cap — this watch cannot fire at that price` };
 }
 
 /** Why a weighed listing was left alone. The watcher takes a listing only at
@@ -196,11 +236,194 @@ function capReach(watch: ShmWatch): { cls: string; title: string } {
 function decisionGuard(binPrice: number, watch: ShmWatch | undefined): { value: string; label: string; blocked: boolean } {
   if (!watch) return { value: EMPTY, label: "no longer watched", blocked: false };
   if (watch.max_price !== null && binPrice > watch.max_price) {
-    return { value: money(watch.max_price), label: "over cap", blocked: true };
+    return { value: shortMoney(watch.max_price), label: "over cap", blocked: true };
   }
   if (!isLiveWatch(watch)) return { value: STATE_LABELS[watchState(watch)].label, label: "dormant", blocked: true };
   if (!watch.armed) return { value: "Observe", label: "not armed", blocked: true };
-  return { value: money(watch.max_price), label: "price cap", blocked: false };
+  return { value: shortMoney(watch.max_price), label: "price cap", blocked: false };
+}
+
+/** The watched-liveries grid. A TanStack table owns the column model and row
+ *  render; sorting stays external — the tested sortBy/nextSort comparators in
+ *  shmFilters get null-sinking right in a way TanStack's desc-negation would
+ *  not — so the table runs with the rows already ordered (manual sort). */
+function WatchTable({ rows, totalWatches, sort, onToggleSort, updatingSkin, onArm, onCommitCap, modelLabel }: {
+  rows: ShmWatch[];
+  totalWatches: number;
+  sort: { key: string; dir: SortDir };
+  onToggleSort: (key: string) => void;
+  updatingSkin: number | null;
+  onArm: (skinId: number, armed: boolean, watch: ShmWatch) => void;
+  onCommitCap: (skinId: number, raw: string, current: number | null) => void;
+  modelLabel: (id: number | null) => string;
+}) {
+  const columns: ColumnDef<ShmWatch>[] = [
+    {
+      id: "label",
+      header: WATCH_SORTS.label.label,
+      cell: ({ row }) => {
+        const w = row.original;
+        return (
+          <div className="shm-watch-name">
+            <Thumb skinId={w.skin_id} alt="" />
+            <div>
+              <strong title={w.label}>{watchLivery(w)}</strong>
+              {/* Ownership rides the meta line rather than a line of its own: a
+                  quarter of the list is owned, and a taller row for each makes
+                  the table ragged. */}
+              <div className="shm-watch-meta">
+                <small>{watchModel(w) || modelLabel(w.model_id)} · skin {w.skin_id}</small>
+                {w.is_owned && (
+                  <span className="shm-owned" title={`${w.owned_count} in the hangar`}>
+                    Owned ×{w.owned_count}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      id: "source",
+      header: WATCH_SORTS.source.label,
+      cell: ({ row }) => {
+        const w = row.original;
+        return (
+          <>
+            <SourceChip source={w.source} />
+            {w.origin && (
+              <small className="shm-origin" title={w.origin_detail ?? w.origin}>{w.origin}</small>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      id: "state",
+      header: WATCH_SORTS.state.label,
+      cell: ({ row }) => {
+        const w = row.original;
+        const state = watchState(w);
+        return (
+          <>
+            <label className="livery-toggle shm-arm-toggle" title={w.is_owned
+              ? "You already own this livery — arming hunts for another copy"
+              : STATE_LABELS.armed.hint}>
+              <Checkbox
+                checked={Boolean(w.armed)}
+                disabled={updatingSkin === w.skin_id}
+                onCheckedChange={(checked) => onArm(w.skin_id, checked === true, w)}
+              />
+              {w.armed ? STATE_LABELS.armed.label : STATE_LABELS.observing.label}
+            </label>
+            {!isLiveWatch(w) && (
+              <small className={`shm-state ${STATE_LABELS[state].cls}`} title={STATE_LABELS[state].hint}>
+                {STATE_LABELS[state].label}
+              </small>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      id: "cap",
+      header: WATCH_SORTS.cap.label,
+      cell: ({ row }) => {
+        const w = row.original;
+        return (
+          <Input
+            className="shm-cap-input"
+            key={`${w.skin_id}:${w.max_price ?? ""}`}
+            defaultValue={w.max_price === null ? "" : shortMoney(w.max_price)}
+            placeholder="No cap"
+            title="Highest buy-now price to accept. Blank means no cap. Accepts 2b, 850m, or a plain number."
+            disabled={updatingSkin === w.skin_id}
+            onBlur={(event) => onCommitCap(w.skin_id, event.target.value, w.max_price)}
+            onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+          />
+        );
+      },
+    },
+    {
+      id: "cheapest",
+      header: WATCH_SORTS.cheapest.label,
+      cell: ({ row }) => shortMoney(row.original.cheapest_seen),
+      meta: { className: (w) => `shm-num ${capReach(w).cls}`, title: (w) => capReach(w).title },
+    },
+    {
+      id: "last_price",
+      header: WATCH_SORTS.last_price.label,
+      cell: ({ row }) => shortMoney(row.original.last_price_seen),
+      meta: { className: () => "shm-num" },
+    },
+    {
+      id: "sightings",
+      header: WATCH_SORTS.sightings.label,
+      cell: ({ row }) => row.original.sightings || EMPTY,
+      meta: { className: (w) => `shm-num${w.sightings ? "" : " is-empty"}` },
+    },
+    {
+      id: "last_seen",
+      header: WATCH_SORTS.last_seen.label,
+      cell: ({ row }) => relativeTime(row.original.last_seen),
+      meta: { className: (w) => (w.last_seen ? undefined : "is-empty") },
+    },
+  ];
+
+  const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() });
+
+  return (
+    <div className="shm-table-wrap">
+      <Table className="shm-table">
+        <TableHeader>
+          {table.getHeaderGroups().map((group) => (
+            <TableRow key={group.id}>
+              {group.headers.map((header) => {
+                const active = sort.key === header.column.id;
+                const Arrow = !active ? ChevronsUpDown : sort.dir === 1 ? ArrowUp : ArrowDown;
+                return (
+                  <TableHead key={header.id} className={active ? "is-sorted" : undefined} aria-sort={!active ? "none" : sort.dir === 1 ? "ascending" : "descending"}>
+                    <Button type="button" className="shm-th-sort" onClick={() => onToggleSort(header.column.id)}>
+                      <span>{flexRender(header.column.columnDef.header, header.getContext())}</span>
+                      <Arrow size={12} />
+                    </Button>
+                  </TableHead>
+                );
+              })}
+            </TableRow>
+          ))}
+        </TableHeader>
+        <TableBody>
+          {table.getRowModel().rows.map((row) => {
+            const w = row.original;
+            return (
+              <TableRow key={w.skin_id} className={isLiveWatch(w) ? undefined : "is-dormant"}>
+                {row.getVisibleCells().map((cell) => {
+                  const meta = cell.column.columnDef.meta;
+                  return (
+                    <TableCell key={cell.id} className={meta?.className?.(w)} title={meta?.title?.(w)}>
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </TableCell>
+                  );
+                })}
+              </TableRow>
+            );
+          })}
+          {rows.length === 0 && (
+            <TableRow><TableCell colSpan={WATCH_COLUMNS.length}>
+              <EmptyState
+                title={totalWatches ? "No watched livery matches" : "No liveries are being watched"}
+                hint={totalWatches
+                  ? "Adjust or clear the active filters."
+                  : "Add one with shm_watch_add before the watcher has anything to hunt."}
+              />
+            </TableCell></TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
 }
 
 interface ShmMonitorProps {
@@ -210,21 +433,22 @@ interface ShmMonitorProps {
 export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
   const [snapshot, setSnapshot] = useState<ShmMonitorSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [updatingSkin, setUpdatingSkin] = useState<number | null>(null);
   const [filters, setFilters] = useState<WatchFilters>(NO_WATCH_FILTERS);
   // "priority" is not a column: it means "leave the server's owned-last order alone".
   const [sort, setSort] = useState<{ key: string; dir: SortDir }>({ key: "priority", dir: 1 });
-  const [sightingSort, setSightingSort] = useState<{ key: string; dir: SortDir }>({ key: "last_seen", dir: -1 });
-  const [checkFilter, setCheckFilter] = useState("all");
-  const [checkSort, setCheckSort] = useState<{ key: string; dir: SortDir }>({ key: "last_checked", dir: -1 });
-  const [decisionFilter, setDecisionFilter] = useState("all");
-  const [decisionSort, setDecisionSort] = useState<{ key: string; dir: SortDir }>({ key: "bought_at", dir: -1 });
+  // Activity feeds open on their newest rows; the alphabetical sorts are there
+  // for scanning a long feed, not for reading one.
+  const [sightingFilters, setSightingFilters] = useState<FeedFilters>(NO_FEED_FILTERS);
+  const [sightingSort, setSightingSort] = useState("last_seen:-1");
+  const [checkFilters, setCheckFilters] = useState<FeedFilters>(NO_FEED_FILTERS);
+  const [checkSort, setCheckSort] = useState("last_checked:-1");
+  const [decisionFilters, setDecisionFilters] = useState<FeedFilters>(NO_FEED_FILTERS);
+  const [decisionSort, setDecisionSort] = useState("bought_at:-1");
 
   useEffect(() => {
     let cancelled = false;
-    const load = async (quiet = false) => {
-      if (!quiet) setLoading(true);
+    const load = async () => {
       try {
         const data = await fetchShmMonitor();
         if (!cancelled) {
@@ -235,25 +459,18 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
         if (!cancelled) {
           setError(reason instanceof Error ? reason.message : "Failed to load watcher activity");
         }
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     };
     load();
-    const timer = window.setInterval(() => load(true), 15_000);
+    const timer = window.setInterval(load, 15_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
   }, [refreshToken]);
 
-  if (loading && !snapshot) {
-    return <div className="fleet-loading">Loading SHM watcher activity…</div>;
-  }
-  if (error && !snapshot) {
-    return <div className="table-error">{error}</div>;
-  }
-  if (!snapshot) return null;
+  if (error && !snapshot) return <ErrorState title="SHM monitor unavailable" message={error} />;
+  if (!snapshot) return <LoadingState />;
 
   const { status, summary, watches, model_checks: checks, sightings, decisions } = snapshot;
   const models = modelNames(watches);
@@ -315,11 +532,14 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
   const packWatches = watches.filter(
     (watch) => isLiveWatch(watch) && sourceBucket(watch.source) === "shop-pack:auto").length;
 
-  const visibleSightings = [...sightings].sort(sortBy(SIGHTING_SORTS, sightingSort.key, sightingSort.dir));
-  const visibleChecks = filterChecks(checkFilter, checks).slice().sort(sortBy(CHECK_SORTS, checkSort.key, checkSort.dir));
+  const visibleSightings = filterSightings(sightings, sightingFilters, modelLabel)
+    .sort(sortByValue(SIGHTING_SORTS, sightingSort));
+  const CHECK_SORTS = checkSorts(modelLabel);
+  const visibleChecks = filterChecks(checks, checkFilters, modelLabel)
+    .sort(sortByValue(CHECK_SORTS, checkSort));
   const groupedDecisions = groupDecisions(decisions);
-  const visibleDecisions = filterDecisions(decisionFilter, groupedDecisions)
-    .sort(sortBy(DECISION_SORTS, decisionSort.key, decisionSort.dir));
+  const visibleDecisions = filterDecisions(groupedDecisions, decisionFilters, modelLabel)
+    .sort(sortByValue(DECISION_SORTS, decisionSort));
   const truncatedChecks = checks.filter((check) => check.truncated).length;
 
   // Clicking a column heading sorts by it; clicking it again reverses, and a
@@ -368,142 +588,40 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
       </section>
 
       <section className="flat-section shm-section">
-        <div className="section-title-row">
-          <div>
-            <p className="section-kicker">Standing orders</p>
-            <h2>Watched liveries</h2>
-          </div>
-          <span className="section-count">{integer.format(liveWatches)} live · {integer.format(watches.length)} total</span>
-        </div>
-        <section className="fleet-controls shm-controls">
-          <div className="fleet-toolbar">
-            <label className="search-control">
-              <Search size={17} />
-              <input value={filters.query} onChange={(event) => setFilter({ query: event.target.value })} placeholder="Search livery or skin id" />
-              {filters.query && <button onClick={() => setFilter({ query: "" })} aria-label="Clear search"><X size={15} /></button>}
-            </label>
-            <MenuSelect label="Source" value={filters.source} onChange={(source) => setFilter({ source })} options={SOURCE_OPTIONS} />
-            <MenuSelect label="Standing order" value={filters.state} onChange={(state) => setFilter({ state })} options={STATE_OPTIONS} icon={ShieldCheck} />
-            <MenuSelect label="Ownership" value={filters.ownership} onChange={(ownership) => setFilter({ ownership })} options={OWNERSHIP_OPTIONS} />
-            <input
-              className="model-input"
-              value={filters.model}
-              onChange={(event) => setFilter({ model: event.target.value })}
-              placeholder="Model name or id"
-              aria-label="Filter by model"
-            />
-          </div>
-          <div className="active-filter-row">
-            <span><Filter size={14} /> {activeFilters ? `${activeFilters} active filter${activeFilters === 1 ? "" : "s"}` : "No filters applied"}</span>
-            {activeFilters > 0 && <button onClick={() => setFilters(NO_WATCH_FILTERS)}>Clear all</button>}
-            <small>Showing {integer.format(visibleWatches.length)} of {integer.format(watches.length)}</small>
-          </div>
-        </section>
-        <div className="shm-table-wrap">
-          <table className="shm-table">
-            <thead>
-              <tr>
-                {WATCH_COLUMNS.map((key) => {
-                  const active = sort.key === key;
-                  const Arrow = !active ? ChevronsUpDown : sort.dir === 1 ? ArrowUp : ArrowDown;
-                  return (
-                    <th key={key} className={active ? "is-sorted" : undefined} aria-sort={!active ? "none" : sort.dir === 1 ? "ascending" : "descending"}>
-                      <button type="button" className="shm-th-sort" onClick={() => toggleSort(key)}>
-                        <span>{WATCH_SORTS[key].label}</span>
-                        <Arrow size={12} />
-                      </button>
-                    </th>
-                  );
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {visibleWatches.map((watch) => {
-                const state = watchState(watch);
-                const live = isLiveWatch(watch);
-                const reach = capReach(watch);
-                return (
-                  <tr key={watch.skin_id} className={live ? undefined : "is-dormant"}>
-                    <td>
-                      <div className="shm-watch-name">
-                        <Thumb skinId={watch.skin_id} alt="" />
-                        <div>
-                          <strong title={watch.label}>{watchLivery(watch)}</strong>
-                          {/* Ownership rides the meta line rather than a line of
-                              its own: a quarter of the list is owned, and a
-                              taller row for each of them makes the table ragged. */}
-                          <div className="shm-watch-meta">
-                            <small>{watchModel(watch) || modelLabel(watch.model_id)} · skin {watch.skin_id}</small>
-                            {watch.is_owned && (
-                              <span className="shm-owned" title={`${watch.owned_count} in the hangar`}>
-                                Owned ×{watch.owned_count}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <SourceChip source={watch.source} />
-                      {watch.origin && (
-                        <small className="shm-origin" title={watch.origin_detail ?? watch.origin}>
-                          {watch.origin}
-                        </small>
-                      )}
-                    </td>
-                    <td>
-                      <label className="livery-toggle shm-arm-toggle" title={watch.is_owned
-                        ? "You already own this livery — arming hunts for another copy"
-                        : STATE_LABELS.armed.hint}>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(watch.armed)}
-                          disabled={updatingSkin === watch.skin_id}
-                          onChange={(event) => toggleArm(watch.skin_id, event.target.checked, watch)}
-                        />
-                        {watch.armed ? STATE_LABELS.armed.label : STATE_LABELS.observing.label}
-                      </label>
-                      {!live && (
-                        <small className={`shm-state ${STATE_LABELS[state].cls}`} title={STATE_LABELS[state].hint}>
-                          {STATE_LABELS[state].label}
-                        </small>
-                      )}
-                    </td>
-                    <td>
-                      <input
-                        className="shm-cap-input"
-                        key={`${watch.skin_id}:${watch.max_price ?? ""}`}
-                        defaultValue={watch.max_price === null ? "" : money(watch.max_price)}
-                        placeholder="No cap"
-                        title="Highest buy-now price to accept. Blank means no cap. Accepts 2b, 850m, or a plain number."
-                        disabled={updatingSkin === watch.skin_id}
-                        onBlur={(event) => commitCap(watch.skin_id, event.target.value, watch.max_price)}
-                        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-                      />
-                    </td>
-                    <td className={`shm-num ${reach.cls}`} title={reach.title}>{money(watch.cheapest_seen)}</td>
-                    <td className="shm-num">{money(watch.last_price_seen)}</td>
-                    <td className={`shm-num${watch.sightings ? "" : " is-empty"}`}>{watch.sightings || EMPTY}</td>
-                    <td className={watch.last_seen ? undefined : "is-empty"}>{relativeTime(watch.last_seen)}</td>
-                  </tr>
-                );
-              })}
-              {visibleWatches.length === 0 && <tr><td colSpan={WATCH_COLUMNS.length} className="shm-empty">{watches.length ? "No watched livery matches those filters." : "No liveries are being watched."}</td></tr>}
-            </tbody>
-          </table>
-        </div>
+        <SectionHeader kicker="Standing orders" title="Watched liveries" count={<>{integer.format(liveWatches)} live · {integer.format(watches.length)} total</>} />
+        <FilterBar className="shm-controls" active={activeFilters} onClear={() => setFilters(NO_WATCH_FILTERS)}
+          status={<small>Showing {integer.format(visibleWatches.length)} of {integer.format(watches.length)}</small>}>
+          <SearchInput value={filters.query} onChange={(query) => setFilter({ query })} placeholder="Search livery, model, or id" />
+          <MenuSelect label="Source" value={filters.source} onChange={(source) => setFilter({ source })} options={SOURCE_OPTIONS} />
+          <MenuSelect label="Standing order" value={filters.state} onChange={(state) => setFilter({ state })} options={STATE_OPTIONS} icon={ShieldCheck} />
+          <MenuSelect label="Ownership" value={filters.ownership} onChange={(ownership) => setFilter({ ownership })} options={OWNERSHIP_OPTIONS} />
+        </FilterBar>
+        <WatchTable
+          rows={visibleWatches}
+          totalWatches={watches.length}
+          sort={sort}
+          onToggleSort={toggleSort}
+          updatingSkin={updatingSkin}
+          onArm={toggleArm}
+          onCommitCap={commitCap}
+          modelLabel={modelLabel}
+        />
       </section>
 
       <div className="shm-columns">
         <section className="flat-section shm-section">
-          <div className="section-title-row">
-            <div><p className="section-kicker">Matches</p><h2>Recent watched listings</h2></div>
-            <div className="section-header-controls">
-              <MenuSelect label="Sort by" value={sightingSort.key} onChange={(key) => setSightingSort({ key, dir: SIGHTING_SORTS[key].dir })} options={sortOptions(SIGHTING_SORTS)} align="right" />
-              <DirButton dir={sightingSort.dir} onFlip={() => setSightingSort((s) => ({ ...s, dir: (s.dir === 1 ? -1 : 1) as SortDir }))} />
-              <span className="section-count">Latest {sightings.length}</span>
-            </div>
-          </div>
+          <SectionHeader kicker="Matches" title="Recent watched listings" count={<>Latest {integer.format(sightings.length)} recorded</>} />
+          <FeedControls
+            filters={sightingFilters}
+            onChange={setSightingFilters}
+            options={SIGHTING_FILTER_OPTIONS}
+            placeholder="Search livery, model, or auction id"
+            sort={sightingSort}
+            onSort={setSightingSort}
+            sortSpecs={SIGHTING_SORTS}
+            shown={visibleSightings.length}
+            total={sightings.length}
+          />
           <div className="shm-feed is-sightings">
             {visibleSightings.map((item) => {
               const ending = item.time_left_s !== null && item.time_left_s < 3600;
@@ -515,11 +633,11 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
                     <small>{modelLabel(item.model_id)} · auction {item.auction_id}</small>
                   </div>
                   <div className="shm-metric">
-                    <strong>{money(item.bin_price)}</strong>
+                    <strong>{shortMoney(item.bin_price)}</strong>
                     <small>buy now</small>
                   </div>
                   <div className="shm-metric">
-                    <strong>{money(item.current_price)}</strong>
+                    <strong>{shortMoney(item.current_price)}</strong>
                     <small>{item.bids ? `${item.bids} bid${item.bids === 1 ? "" : "s"}` : "no bids"}</small>
                   </div>
                   <div className={`shm-metric${ending ? " is-ending" : ""}`}>
@@ -530,19 +648,30 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
                 </article>
               );
             })}
-            {sightings.length === 0 && <p className="shm-empty">No watched livery has appeared yet.</p>}
+            {visibleSightings.length === 0 && (
+              <EmptyState
+                title={sightings.length ? "No listing matches" : "No watched livery has appeared yet"}
+                hint={sightings.length
+                  ? "Adjust or clear the active filters."
+                  : "A match is recorded the first time one of these liveries is listed."}
+              />
+            )}
           </div>
         </section>
 
         <section className="flat-section shm-section is-narrow">
-          <div className="section-title-row">
-            <div><p className="section-kicker">Coverage</p><h2>Model sweeps</h2></div>
-            <div className="section-header-controls">
-              <MenuSelect label="Filter" value={checkFilter} onChange={setCheckFilter} options={CHECK_FILTER_OPTIONS} />
-              <MenuSelect label="Sort by" value={checkSort.key} onChange={(key) => setCheckSort({ key, dir: CHECK_SORTS[key].dir })} options={sortOptions(CHECK_SORTS)} align="right" />
-              <DirButton dir={checkSort.dir} onFlip={() => setCheckSort((s) => ({ ...s, dir: (s.dir === 1 ? -1 : 1) as SortDir }))} />
-            </div>
-          </div>
+          <SectionHeader kicker="Coverage" title="Model sweeps" count={<>{integer.format(truncatedChecks)} truncated</>} />
+          <FeedControls
+            filters={checkFilters}
+            onChange={setCheckFilters}
+            options={CHECK_FILTER_OPTIONS}
+            placeholder="Search model"
+            sort={checkSort}
+            onSort={setCheckSort}
+            sortSpecs={CHECK_SORTS}
+            shown={visibleChecks.length}
+            total={checks.length}
+          />
           <div className="shm-feed is-checks">
             {visibleChecks.map((check) => (
               <article key={check.model_id}>
@@ -561,24 +690,31 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
                 <time>{relativeTime(check.last_checked)}</time>
               </article>
             ))}
-            {visibleChecks.length === 0 && <p className="shm-empty">{checks.length ? "No model sweeps match that filter." : "No model sweeps recorded yet."}</p>}
+            {visibleChecks.length === 0 && (
+              <EmptyState
+                title={checks.length ? "No model sweep matches" : "No model sweeps recorded yet"}
+                hint={checks.length
+                  ? "Adjust or clear the active filters."
+                  : "The watcher records one sweep per watched model, per pass."}
+              />
+            )}
           </div>
         </section>
       </div>
 
       <section className="flat-section shm-section">
-        <div className="section-title-row">
-          <div>
-            <p className="section-kicker">Audit trail</p>
-            <h2>Purchase decisions</h2>
-          </div>
-          <div className="section-header-controls">
-            <MenuSelect label="Filter" value={decisionFilter} onChange={setDecisionFilter} options={DECISION_FILTER_OPTIONS} />
-            <MenuSelect label="Sort by" value={decisionSort.key} onChange={(key) => setDecisionSort({ key, dir: DECISION_SORTS[key].dir })} options={sortOptions(DECISION_SORTS)} align="right" />
-            <DirButton dir={decisionSort.dir} onFlip={() => setDecisionSort((s) => ({ ...s, dir: (s.dir === 1 ? -1 : 1) as SortDir }))} />
-            <span className="section-count">{integer.format(summary.dry_runs_today)} dry runs today</span>
-          </div>
-        </div>
+        <SectionHeader kicker="Audit trail" title="Purchase decisions" count={<>{integer.format(summary.dry_runs_today)} dry runs today</>} />
+        <FeedControls
+          filters={decisionFilters}
+          onChange={setDecisionFilters}
+          options={DECISION_FILTER_OPTIONS}
+          placeholder="Search livery, model, auction id, or note"
+          sort={decisionSort}
+          onSort={setDecisionSort}
+          sortSpecs={DECISION_SORTS}
+          shown={visibleDecisions.length}
+          total={groupedDecisions.length}
+        />
         <div className="shm-feed is-decisions">
           {visibleDecisions.map((decision) => {
             const guard = decisionGuard(decision.bin_price, watchBySkin.get(decision.skin_id));
@@ -590,10 +726,10 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
                 <small>{modelLabel(decision.model_id)} · auction {decision.auction_id}{decision.note ? ` · ${decision.note}` : ""}</small>
               </div>
               <div className="shm-metric">
-                <strong>{money(decision.bin_price)}</strong>
+                <strong>{shortMoney(decision.bin_price)}</strong>
                 {/* The accepted cost is exactly the submitted BIN, so the estimate
                     is only worth a line when something moved it. */}
-                <small>{decision.est_cost === decision.bin_price ? "buy now" : `est. ${money(decision.est_cost)}`}</small>
+                <small>{decision.est_cost === decision.bin_price ? "buy now" : `est. ${shortMoney(decision.est_cost)}`}</small>
               </div>
               {/* The guard that actually decided this row. */}
               <div className={`shm-metric${guard.blocked ? " is-over" : ""}`}>
@@ -608,7 +744,14 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
             </article>
             );
           })}
-          {visibleDecisions.length === 0 && <p className="shm-empty">{decisions.length ? "No purchase decisions match that filter." : "No purchase decisions recorded."}</p>}
+          {visibleDecisions.length === 0 && (
+            <EmptyState
+              title={decisions.length ? "No decision matches" : "No purchase decisions recorded"}
+              hint={decisions.length
+                ? "Adjust or clear the active filters."
+                : "Every weighed listing lands here, dry runs included."}
+            />
+          )}
         </div>
       </section>
     </div>

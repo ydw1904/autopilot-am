@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Plus, Tag } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 // Starter vocabulary offered on an empty fleet so the first tag is a click
 // rather than a typing exercise. These are only suggestions: nothing writes
@@ -110,7 +112,7 @@ export function TagPicker({ known, applied = [], onApply, busy, placeholder = "A
   };
 
   const optionRow = (item: TagSuggestion, index: number, isCreate?: boolean) => (
-    <button
+    <Button
       type="button"
       key={`${isCreate ? "new:" : "known:"}${item.tag}`}
       role="option"
@@ -122,14 +124,14 @@ export function TagPicker({ known, applied = [], onApply, busy, placeholder = "A
       {isCreate ? <Plus size={14} /> : <Tag size={14} />}
       <span><b>{isCreate ? `Create “${item.tag}”` : item.tag}</b>{item.count !== undefined && <em>{item.count} aircraft</em>}</span>
       {appliedSet.has(fold(item.tag)) && <Check size={14} className="tag-option-check" />}
-    </button>
+    </Button>
   );
 
   return (
     <div className={`tag-picker${open ? " is-open" : ""}`} ref={rootRef}>
       <div className="tag-entry">
         <Tag size={14} />
-        <input
+        <Input
           ref={inputRef}
           value={draft}
           role="combobox"
@@ -142,9 +144,9 @@ export function TagPicker({ known, applied = [], onApply, busy, placeholder = "A
           onFocus={() => setOpen(true)}
           onKeyDown={onKeyDown}
         />
-        <button type="button" disabled={!trimmed || busy} onClick={() => void apply(trimmed)}>
+        <Button type="button" disabled={!trimmed || busy} onClick={() => void apply(trimmed)}>
           {busy ? "Adding" : "Add tag"}
-        </button>
+        </Button>
       </div>
 
       {open && rows.length > 0 && (

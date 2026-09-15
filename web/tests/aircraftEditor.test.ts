@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { salePricesValid, seatCeiling } from "../src/components/Hangar";
+import { salePricesValid, seatCeiling } from "../src/components/AircraftEditor";
 
 test("class cabin space caps the screenshot configuration at 111 economy seats", () => {
   expect(seatCeiling(

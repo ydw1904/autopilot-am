@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
   Building2,
   CalendarDays,
   Check,
   Flame,
   Gavel,
+  History,
   Layers,
   Palette,
   Plane,
@@ -36,25 +38,21 @@ import {
   HangarFlight,
   HangarLiveryOption,
 } from "../types";
+import { EMPTY, integer, parseGameDate, shortDate, shortMoney } from "../format";
 import { hubLabel } from "../hubFlag";
 import { splitLiveryName } from "../liveryName";
-import { MenuOption, MenuSelect } from "./MenuSelect";
+import { MenuSelect } from "./MenuSelect";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
-interface HangarProps {
+interface AircraftEditorProps {
+  aircraftId: number;
   snapshot: CommandCenterSnapshot | null;
-  initialPreset?: string;
-  refreshToken: number;
   onDataChanged: () => void;
-}
-
-const integer = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
-const EMPTY = "—";
-
-function money(value: number | null | undefined): string {
-  if (value === null || value === undefined) return EMPTY;
-  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(0)}M`;
-  return `$${integer.format(value)}`;
+  /** Back to the fleet browser. */
+  onClose: () => void;
+  /** Switch to another aircraft (the jump search and the recent list). */
+  onOpenAircraft: (aircraftId: number) => void;
 }
 
 function exactMoney(value: number | null | undefined): string {
@@ -112,7 +110,7 @@ function MillionField({ label, millions, onChange, min, max }: {
       <span>{label}</span>
       <div className={`million-input${invalid ? " is-invalid" : ""}`}>
         <span className="million-input-currency">$</span>
-        <input
+        <Input
           className="million-input-value"
           type="number"
           min={minM}
@@ -126,7 +124,7 @@ function MillionField({ label, millions, onChange, min, max }: {
       <small>
         Min ${integer.format(minM)}M{maxM ? ` · Max $${integer.format(maxM)}M` : ""}
         {!!maxM && value !== maxM && (
-          <button type="button" onClick={() => onChange(String(maxM))}>Use max</button>
+          <Button type="button" onClick={() => onChange(String(maxM))}>Use max</Button>
         )}
       </small>
     </label>
@@ -138,20 +136,9 @@ export function salePricesValid(bin: number, start: number, minStart: number,
   return bin >= start && start >= minStart && start <= maxStart && bin <= maxBin;
 }
 
-function parseGameDate(value: string | null) {
-  if (!value) return null;
-  const date = new Date(`${value.replace(" ", "T").replace(/\.\d+$/, "")}Z`);
-  return Number.isNaN(date.valueOf()) ? null : date;
-}
-
 function clock(value: string | null) {
   const date = parseGameDate(value);
   return date ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : value || EMPTY;
-}
-
-function shortDate(value: string | null) {
-  const date = parseGameDate(value);
-  return date ? date.toLocaleDateString([], { dateStyle: "medium" }) : EMPTY;
 }
 
 /** A rotation slot routinely ends the next day, and a bare "09:00 – 08:59"
@@ -165,24 +152,39 @@ function slot(flight: HangarFlight) {
 
 const DAY_LABELS = ["Today", "+1", "+2", "+3", "+4", "+5", "+6"];
 
-// The picker finds one aircraft; it is not a second fleet browser, so it reads
-// a page rather than the whole hub. Whenever that page is short of the match
-// count the list says so — a silent cap reads as "this hub has 60 aircraft".
-const PICKER_LIMIT = 60;
+// The last few aircraft opened, kept in this browser only: the hangar is a
+// workbench and the plane being worked on is usually the one from a minute ago.
+const JUMP_LIMIT = 8;
+const RECENT_KEY = "hangar.recent";
+const RECENT_LIMIT = 8;
+interface Recent { aircraft_id: number; name: string; model: string; hub_iata: string | null; skin_id: number | null }
+function readRecent(): Recent[] {
+  try { return JSON.parse(window.localStorage.getItem(RECENT_KEY) || "[]"); } catch { return []; }
+}
+function writeRecent(items: Recent[]) {
+  try { window.localStorage.setItem(RECENT_KEY, JSON.stringify(items)); } catch { /* private mode */ }
+}
 
 /** Every action is one in-game write, so each button reports its own state. */
 type ActionKey = "name" | "seats" | "hub" | "livery" | "sell" | "scrap" | "unschedule";
 
-export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }: HangarProps) {
-  const presetId = initialPreset?.startsWith("ac:") ? Number(initialPreset.slice(3)) : undefined;
+// Actions that hand back a refreshed aircraft have no result to report, so the
+// banner names the write instead. The rest phrase their own outcome.
+const DONE_MESSAGE: Partial<Record<ActionKey, string>> = {
+  name: "Renamed.",
+  seats: "Seats reconfigured.",
+  hub: "Hub changed.",
+  livery: "Livery applied.",
+};
+
+export function AircraftEditor({ aircraftId, snapshot, onDataChanged, onClose, onOpenAircraft }: AircraftEditorProps) {
   const nameListId = useId();
 
   const [query, setQuery] = useState("");
-  const [hubFilter, setHubFilter] = useState("all");
+  const [jumpOpen, setJumpOpen] = useState(false);
   const [candidates, setCandidates] = useState<FleetAircraft[]>([]);
-  const [matched, setMatched] = useState(0);
-  const [listError, setListError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<number | undefined>(presetId);
+  const [listLoading, setListLoading] = useState(false);
+  const [recent, setRecent] = useState<Recent[]>(readRecent);
 
   const [aircraft, setAircraft] = useState<HangarAircraft | null>(null);
   const [loading, setLoading] = useState(false);
@@ -202,34 +204,31 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
   const [startMillions, setStartMillions] = useState("");
   const [duration, setDuration] = useState("11");
   const [scrapConfirm, setScrapConfirm] = useState("");
+  const [scrapOpen, setScrapOpen] = useState(false);
 
   const hubCountries = useMemo(() => new Map(
     (snapshot?.fleet_facets.hubs || []).map((hub) => [hub.hub_iata, hub.country_code]),
   ), [snapshot]);
 
-  const hubOptions = useMemo<MenuOption[]>(() => [
-    { value: "all", label: "All hubs" },
-    ...(snapshot?.fleet_facets.hubs || []).map((hub) => ({
-      value: hub.hub_iata,
-      label: hubLabel(hub.hub_iata, hub.country_code),
-      hint: `${hub.count} aircraft`,
-    })),
-  ], [snapshot]);
-
-  // Candidate list: the cached fleet table, so typing stays instant and no
+  // Jump search reads the cached fleet table, so typing stays instant and no
   // game request is spent until an aircraft is actually opened.
   useEffect(() => {
+    const term = query.trim();
+    if (!term) { setCandidates([]); return; }
     let cancelled = false;
+    setListLoading(true);
     const timer = window.setTimeout(async () => {
       try {
-        const page = await fetchFleetPage({ q: query.trim(), hub: hubFilter, limit: PICKER_LIMIT });
-        if (!cancelled) { setCandidates(page.items); setMatched(page.total); setListError(null); }
-      } catch (reason) {
-        if (!cancelled) setListError(reason instanceof Error ? reason.message : "Fleet lookup failed");
+        const result = await fetchFleetPage({ q: term, limit: JUMP_LIMIT });
+        if (!cancelled) setCandidates(result.items);
+      } catch {
+        if (!cancelled) setCandidates([]);
+      } finally {
+        if (!cancelled) setListLoading(false);
       }
-    }, query ? 220 : 0);
+    }, 220);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [query, hubFilter, refreshToken]);
+  }, [query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -257,6 +256,13 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
     setBinMillions(next.sale.bin_threshold ? String(Math.floor(next.sale.bin_threshold / 1_000_000)) : "");
     setStartMillions(next.sale.max_start_bid ? String(Math.floor(next.sale.max_start_bid / 1_000_000)) : "");
     setScrapConfirm("");
+    setScrapOpen(false);
+    setRecent((prev) => {
+      const entry = { aircraft_id: next.aircraft_id, name: next.name, model: next.model, hub_iata: next.hub_iata, skin_id: next.skin.id };
+      const items = [entry, ...prev.filter((item) => item.aircraft_id !== next.aircraft_id)].slice(0, RECENT_LIMIT);
+      writeRecent(items);
+      return items;
+    });
   }, []);
 
   const load = useCallback(async (aircraftId: number) => {
@@ -274,7 +280,13 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
     }
   }, [applyAircraft]);
 
-  useEffect(() => { if (selectedId) load(selectedId); }, [selectedId, load]);
+  useEffect(() => { load(aircraftId); }, [aircraftId, load]);
+
+  const jump = (nextId: number) => {
+    setQuery("");
+    setJumpOpen(false);
+    if (nextId !== aircraftId) { setError(null); setNotice(null); onOpenAircraft(nextId); }
+  };
 
   // One wrapper for every write: it holds the busy flag, reports the failure
   // in place, and refreshes the cached fleet views the change invalidates.
@@ -286,7 +298,7 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
     try {
       const result = await action();
       if (typeof result === "string") setNotice(result);
-      else { applyAircraft(result); setNotice("Done."); }
+      else { applyAircraft(result); setNotice(DONE_MESSAGE[key] || "Done."); }
       onDataChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Action failed");
@@ -359,64 +371,61 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
     [key]: Math.max(0, Math.min(seatCeiling(key, prev, maxPax, maxTon), Math.floor(raw) || 0)),
   }));
 
+  const thumb = (skinId: number | null) => (
+    <span className="hangar-thumb">
+      {skinId ? <img src={`/api/skin_image/${skinId}/medium`} alt="" loading="lazy" /> : <Plane size={16} />}
+    </span>
+  );
+
+  // With nothing typed the menu offers the last few planes opened; once a
+  // term is in, it lists the matches.
+  const searching = query.trim() !== "";
+  const jumpRows = searching ? candidates : recent.filter((item) => item.aircraft_id !== aircraftId);
+
   return (
     <div className="hangar-layout">
-      <section className="flat-section hangar-picker">
-        <div className="hangar-picker-controls">
-          <div className="search-control">
-            <Search size={15} />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Find an aircraft by name or model"
-            />
-            {query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={14} /></button>}
-          </div>
-          <MenuSelect label="Hub" value={hubFilter} onChange={setHubFilter} options={hubOptions} icon={Building2} />
-        </div>
-
-        <div className="hangar-picker-list">
-          {listError && <p className="hangar-empty">{listError}</p>}
-          {!listError && candidates.length === 0 && <p className="hangar-empty">No aircraft match that search.</p>}
-          {candidates.map((item) => (
-            <button
-              key={item.aircraft_id}
-              className={`hangar-picker-row${item.aircraft_id === selectedId ? " is-active" : ""}`}
-              onClick={() => setSelectedId(item.aircraft_id)}
-            >
-              <span className="hangar-picker-art">
-                {item.skin_id
-                  ? <img src={`/api/skin_image/${item.skin_id}/medium`} alt="" loading="lazy" />
-                  : <Plane size={16} />}
-              </span>
-              <span className="hangar-picker-copy">
-                <strong>{item.name}</strong>
-                <small>{item.model} · {hubLabel(item.hub_iata, hubCountries.get(item.hub_iata))} · {Math.round(item.utilization)}%</small>
-              </span>
-            </button>
-          ))}
-          {candidates.length > 0 && matched > candidates.length && (
-            <p className="hangar-picker-foot">
-              Showing {candidates.length} of {integer.format(matched)} — search or pick a hub to narrow it down.
-            </p>
-          )}
-        </div>
-      </section>
+      {/* Above the panel on purpose: scrapping empties the workbench, and the
+          confirmation of an irreversible action has to outlive it. */}
+      {error && <div className="hangar-alert is-error"><AlertTriangle size={14} /><span>{error}</span></div>}
+      {notice && !error && <div className="hangar-alert"><Check size={14} /><span>{notice}</span></div>}
 
       <section className="hangar-panel">
-        {/* Outside the panel below on purpose: scrapping empties the workbench,
-            and the confirmation of an irreversible action has to outlive it. */}
-        {error && <div className="hangar-alert is-error"><AlertTriangle size={14} /><span>{error}</span></div>}
-        {notice && !error && <div className="hangar-alert"><Check size={14} /><span>{notice}</span></div>}
-
-        {selectedId && loading && <div className="fleet-loading">Reading the aircraft…</div>}
-
-        {!aircraft && !loading && (
-          <div className="table-empty">
-            <strong>Pick an aircraft</strong>
-            <span>Everything here writes straight to the game through the mobile API.</span>
+        <nav className="hangar-bar">
+          <Button className="icon-action" onClick={onClose}>
+            <ArrowLeft size={15} /> <span>All aircraft</span>
+          </Button>
+          <div className="hangar-jump">
+            <label className="search-control">
+              <Search size={15} />
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onFocus={() => setJumpOpen(true)}
+                onBlur={() => setJumpOpen(false)}
+                placeholder="Jump to another aircraft"
+              />
+              {query && <Button onClick={() => setQuery("")} aria-label="Clear search"><X size={14} /></Button>}
+            </label>
+            {jumpOpen && (searching || jumpRows.length > 0) && (
+              <div className="hangar-jump-menu">
+                {!searching && <p><History size={11} /> Recently opened</p>}
+                {jumpRows.map((item) => (
+                  // mousedown, not click: the input blurs first and would close the menu.
+                  <Button key={item.aircraft_id} onMouseDown={(event) => { event.preventDefault(); jump(item.aircraft_id); }}>
+                    {thumb(item.skin_id)}
+                    <span className="hangar-copy">
+                      <strong>{item.name}</strong>
+                      <small>{item.model}{item.hub_iata ? ` · ${hubLabel(item.hub_iata, hubCountries.get(item.hub_iata))}` : ""}</small>
+                    </span>
+                  </Button>
+                ))}
+                {searching && jumpRows.length === 0 && <p>{listLoading ? "Searching…" : "No aircraft match."}</p>}
+              </div>
+            )}
           </div>
-        )}
+        </nav>
+
+        {loading && <div className="fleet-loading">Reading the aircraft…</div>}
 
         {aircraft && (
           <>
@@ -431,16 +440,16 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                 <h2>{aircraft.name}</h2>
                 <div className="hangar-head-chips">
                   <span className="hub-code">{aircraft.hub_iata ? hubLabel(aircraft.hub_iata, hubCountries.get(aircraft.hub_iata)) : EMPTY}</span>
-                  <span className="livery-chip tone-special">{splitLiveryName(aircraft.skin.name || "").livery}</span>
+                  <span className="livery-chip tone-special">{splitLiveryName(aircraft.skin.name).livery}</span>
                   <span className="haul-chip">{Math.round(aircraft.utilization)}% used</span>
                   <span className="haul-chip">wear {aircraft.wear.toFixed(1)}%</span>
                   <span className="haul-chip">{aircraft.mark || EMPTY}</span>
                   {aircraft.is_rental && <span className="haul-chip">rented</span>}
                 </div>
               </div>
-              <button className="icon-action" onClick={() => load(aircraft.aircraft_id)} disabled={!!busy}>
+              <Button className="icon-action" onClick={() => load(aircraft.aircraft_id)} disabled={!!busy}>
                 <RefreshCcw size={15} /> <span>Reload</span>
-              </button>
+              </Button>
               <dl className="hangar-head-stats">
                 <div><dt>Category</dt><dd>{aircraft.category ? `${aircraft.category} / 10` : EMPTY}</dd></div>
                 <div><dt>Speed</dt><dd>{aircraft.speed_kmh ? `${integer.format(aircraft.speed_kmh)} km/h` : EMPTY}</dd></div>
@@ -460,12 +469,18 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                 <h3><Tag size={15} /> Name</h3>
                 <p>Renaming echoes the current seat map back, so it costs nothing.</p>
                 <div className="hangar-row">
-                  <input className="model-input" value={name} onChange={(event) => setName(event.target.value)}
+                  <Input className="model-input" value={name} onChange={(event) => setName(event.target.value)}
                     list={nameListId} maxLength={20} autoComplete="off" />
                   <datalist id={nameListId}>
                     {nameSuggestions.map((suggestion) => <option key={suggestion} value={suggestion} />)}
                   </datalist>
-                  <button
+                  {aircraft.suggested_name && aircraft.suggested_name !== name && (
+                    <Button type="button" className="neutral-action" onClick={() => setName(aircraft.suggested_name!)}
+                      title={`Next in this livery's series: ${aircraft.suggested_name}`}>
+                      {aircraft.suggested_name}
+                    </Button>
+                  )}
+                  <Button
                     className="primary-action"
                     disabled={busy === "name" || !name.trim() || name === aircraft.name}
                     onClick={() => run("name", () => {
@@ -475,7 +490,7 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                     })}
                   >
                     {busy === "name" ? "Renaming…" : "Rename"}
-                  </button>
+                  </Button>
                 </div>
               </article>
 
@@ -493,13 +508,13 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                     }))}
                     icon={Building2}
                   />
-                  <button
+                  <Button
                     className="primary-action"
                     disabled={busy === "hub" || !targetHub || targetHub === aircraft.hub_iata}
                     onClick={() => run("hub", () => moveHangarAircraft(aircraft.aircraft_id, targetHub))}
                   >
                     {busy === "hub" ? "Moving…" : "Move"}
-                  </button>
+                  </Button>
                 </div>
               </article>
 
@@ -507,17 +522,17 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                 <h3><Palette size={15} /> Livery</h3>
                 <p>
                   Wearing <b>{aircraft.skin.name || EMPTY}</b>. A livery raises the market ceiling
-                  ({money(aircraft.sale.bin_threshold)} today) and is free once owned.
+                  ({shortMoney(aircraft.sale.bin_threshold)} today) and is free once owned.
                 </p>
                 {!liveries && (
-                  <button className="primary-action" onClick={openLiveries} disabled={liveryBusy}>
+                  <Button className="primary-action" onClick={openLiveries} disabled={liveryBusy}>
                     {liveryBusy ? "Loading liveries…" : "Change livery"}
-                  </button>
+                  </Button>
                 )}
                 {liveries && (
                   <div className="hangar-livery-grid">
                     {liveries.map((livery) => (
-                      <button
+                      <Button
                         key={livery.skin_id}
                         className={`hangar-livery${livery.is_current ? " is-current" : ""}`}
                         disabled={livery.is_current || busy === "livery"}
@@ -527,9 +542,9 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                           <img src={`/api/skin_image/${livery.skin_id}/medium`} alt="" loading="lazy" />
                           {livery.is_current && <span className="livery-badge is-owned">Worn</span>}
                         </span>
-                        <strong>{splitLiveryName(livery.name || "").livery}</strong>
+                        <strong>{splitLiveryName(livery.name).livery}</strong>
                         <small>{livery.purchased ? "Owned" : livery.price_amcoins ? `${livery.price_amcoins} AM coins` : "Free"}</small>
-                      </button>
+                      </Button>
                     ))}
                     {liveries.length === 0 && <p className="hangar-empty">No livery can be applied to this model.</p>}
                   </div>
@@ -598,7 +613,7 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                             {label}
                             <small className="hangar-seat-ceiling">up to {ceiling} {unit}</small>
                           </span>
-                          <input
+                          <Input
                             className="model-input hangar-seat-value"
                             type="number"
                             min={0}
@@ -610,7 +625,7 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                         {/* Ranged to the model's own capacity, not to the ceiling: the
                             grey headroom past the fill is what the other three fields
                             have already spent, which a rescaled track would hide. */}
-                        <input
+                        <Input
                           className="hangar-seat-slider"
                           type="range"
                           min={0}
@@ -626,13 +641,13 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                     );
                   })}
                 </div>
-                <button
+                <Button
                   className="primary-action"
                   disabled={busy === "seats" || !seatsChanged}
                   onClick={() => run("seats", () => reconfigureHangarAircraft(aircraft.aircraft_id, seats))}
                 >
                   <Wrench size={14} /> {busy === "seats" ? "Reconfiguring…" : "Reconfigure"}
-                </button>
+                </Button>
               </article>
 
               <article className="hangar-card is-wide">
@@ -640,15 +655,15 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                 <p>Flights are read from the mobile API; clearing them still goes through Chrome.</p>
                 <div className="hangar-days">
                   {DAY_LABELS.map((label, index) => (
-                    <button
+                    <Button
                       key={label}
                       className={`segmented-option${index === day && flights ? " is-active" : ""}`}
                       onClick={() => { setDay(index); loadSchedule(aircraft.aircraft_id, index); }}
                     >
                       {label}
-                    </button>
+                    </Button>
                   ))}
-                  <button
+                  <Button
                     className="danger-action is-soft"
                     disabled={busy === "unschedule"}
                     onClick={() => {
@@ -661,7 +676,7 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                     }}
                   >
                     {busy === "unschedule" ? "Clearing…" : "Clear schedule"}
-                  </button>
+                  </Button>
                 </div>
                 {flights === null
                   ? <p className="hangar-empty">Pick a day to read its flights.</p>
@@ -700,7 +715,7 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                   <label className="hangar-sale-field">
                     <span>Duration</span>
                     <div className="million-input">
-                      <input
+                      <Input
                         className="million-input-value"
                         type="number"
                         min={1}
@@ -713,7 +728,7 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                     </div>
                     <small>Min 1 hour · Max 48 hours</small>
                   </label>
-                  <button
+                  <Button
                     className="primary-action"
                     disabled={busy === "sell" || !saleValid}
                     onClick={() => run("sell", async () => {
@@ -722,52 +737,88 @@ export function Hangar({ snapshot, initialPreset, refreshToken, onDataChanged }:
                         price: Number(startMillions) ? Number(startMillions) * 1_000_000 : undefined,
                         duration: Number(duration) || 11,
                       });
-                      return `Listed as auction ${auction.auction_id} at ${money(auction.bin_price)}.`;
+                      return `Listed as auction ${auction.auction_id} at ${shortMoney(auction.bin_price)}.`;
                     })}
                   >
-                    {busy === "sell" ? "Listing…" : `List for ${money(binPriceM * 1_000_000)}`}
-                  </button>
+                    {busy === "sell" ? "Listing…" : `List for ${shortMoney(binPriceM * 1_000_000)}`}
+                  </Button>
                 </div>
               </article>
 
               <article className="hangar-card is-wide is-danger">
                 <h3><Flame size={15} /> Sell for scrap</h3>
                 <p>
-                  The game pays {money(aircraft.sale.scrap)} and the aircraft is gone for good — the
-                  market almost always pays more. Click{" "}
-                  <button type="button" className="text-link" onClick={() => setScrapConfirm(aircraft.name)}>
-                    {aircraft.name}
-                  </button>{" "}
-                  or type it below to confirm.
+                  The game pays {shortMoney(aircraft.sale.scrap)} and the aircraft is gone for good — the
+                  market almost always pays more.
                 </p>
                 <div className="hangar-row">
-                  <input
-                    className="model-input"
-                    value={scrapConfirm}
-                    onChange={(event) => setScrapConfirm(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Tab" && aircraft.name.startsWith(scrapConfirm)) {
-                        event.preventDefault();
-                        setScrapConfirm(aircraft.name);
-                      }
-                    }}
-                    placeholder={aircraft.name}
-                  />
-                  <button
+                  <Button
                     className="danger-action"
-                    disabled={busy === "scrap" || scrapConfirm.trim() !== aircraft.name}
-                    onClick={() => run("scrap", async () => {
-                      const result = await scrapHangarAircraft(aircraft.aircraft_id, scrapConfirm.trim());
-                      setAircraft(null);
-                      setSelectedId(undefined);
-                      return `${result.name} scrapped for ${money(result.scrapped_for)}.`;
-                    })}
+                    onClick={() => { setScrapConfirm(""); setScrapOpen(true); }}
                   >
-                    {busy === "scrap" ? "Scrapping…" : "Scrap aircraft"}
-                  </button>
+                    Scrap aircraft
+                  </Button>
                 </div>
               </article>
             </div>
+
+            {scrapOpen && (
+              <div className="modal-overlay" onClick={() => busy !== "scrap" && setScrapOpen(false)}>
+                <form
+                  className="confirm-modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={`Scrap ${aircraft.name}`}
+                  onClick={(event) => event.stopPropagation()}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    run("scrap", async () => {
+                      const result = await scrapHangarAircraft(aircraft.aircraft_id, scrapConfirm.trim());
+                      setScrapOpen(false);
+                      setRecent((prev) => {
+                        const items = prev.filter((item) => item.aircraft_id !== aircraft.aircraft_id);
+                        writeRecent(items);
+                        return items;
+                      });
+                      onClose();
+                      return `${result.name} scrapped for ${shortMoney(result.scrapped_for)}.`;
+                    });
+                  }}
+                >
+                  <h3>Scrap this aircraft?</h3>
+                  <p>
+                    Scrapping is irreversible. {aircraft.name} leaves the fleet for good, its schedule
+                    goes with it, and the game pays {shortMoney(aircraft.sale.scrap)}.
+                  </p>
+                  <p className="confirm-modal-ask">
+                    To confirm, type <b>{aircraft.name}</b> in the box below:
+                  </p>
+                  <div className="confirm-modal-input">
+                    <Input
+                      value={scrapConfirm}
+                      onChange={(event) => setScrapConfirm(event.target.value)}
+                      placeholder={aircraft.name}
+                      autoFocus
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    <Button type="button" onClick={() => setScrapConfirm(aircraft.name)}>Autofill</Button>
+                  </div>
+                  <div className="confirm-modal-actions">
+                    <Button type="button" className="neutral-action" onClick={() => setScrapOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      type="submit"
+                      className="danger-action is-solid"
+                      disabled={busy === "scrap" || scrapConfirm.trim() !== aircraft.name}
+                    >
+                      {busy === "scrap" ? "Scrapping…" : "Confirm"}
+                    </Button>
+                  </div>
+                </form>
+              </div>
+            )}
           </>
         )}
       </section>

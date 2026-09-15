@@ -99,3 +99,33 @@ def test_shm_watch_price_cap_is_editable(tmp_path, monkeypatch):
         assert not shm_watcher.set_watch_max_price(conn, 999, 1)
     finally:
         dbmod.close_db()
+
+
+def test_arm_toggle_round_trip_leaves_owned_watch_dormant(tmp_path, monkeypatch):
+    monkeypatch.setattr(dbmod, "DB", str(tmp_path / "arm.db"))
+    monkeypatch.setattr(dbmod, "_conn", None)
+    try:
+        conn = dbmod.get_db()
+        conn.executescript(shm_watcher.SCHEMA)
+        conn.execute("""
+            INSERT INTO shm_watch (skin_id, model_id, label, want, bought, active, source)
+            VALUES (10, 153, 'Owned Livery', 1, 1, 0, 'challenge:auto'),
+                   (20, 137, 'Wanted Pair', 2, 0, 1, 'manual')
+        """)
+
+        def want(skin_id):
+            return conn.execute(
+                "SELECT want, active FROM shm_watch WHERE skin_id=?", (skin_id,)
+            ).fetchone()
+
+        shm_watcher.set_watch_armed(conn, 10, True)
+        assert tuple(want(10)) == (2, 1), "arming hunts another copy"
+        shm_watcher.set_watch_armed(conn, 10, False)
+        assert want(10)["want"] == 1, "disarming drops the extra copy again"
+
+        # A want set by hand survives a toggle it never asked for.
+        shm_watcher.set_watch_armed(conn, 20, True)
+        shm_watcher.set_watch_armed(conn, 20, False)
+        assert want(20)["want"] == 2
+    finally:
+        dbmod.close_db()

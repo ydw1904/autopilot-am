@@ -129,6 +129,14 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
     reproduces the game's own route distance to within 1 km (fitted on 10,953
     known routes; 6371 is ~2 km short over a 10,000 km leg).
   - `hub/masstool/{hubId}` — inactive lines and unassigned aircraft.
+    `activeLines[].aircraftList` is the cheap "is this plane scheduled" check.
+  - `line/open` (POST `hubId`, `iata`) — buys one route; verified 2026-09-15
+    (GIG-FRA). Re-buying answers "already own it", so it is safe to retry.
+  - `challenge/` — active challenges with the full ladder;
+    `challenge/objective/{id}/claim` collects one free-track reward (verified
+    2026-09-15). Store challenge planes (`shop2023/offers`, `subCategoryId` 143)
+    claim through the normal `shop2023/in-game/purchase/item`, including the
+    ad-priced ones — no ad is watched.
   - `planning/{ignored}/{page}` — the weekly planning, 30 aircraft per page,
     fleet-wide. The first path segment is ignored (it is not a hub or aircraft
     filter, despite looking like one), and `planning/lines` ignores `?page`.

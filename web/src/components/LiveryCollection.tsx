@@ -7,15 +7,14 @@ import {
   CalendarClock,
   CheckCircle2,
   Clock,
+  Coins,
   Gift,
   Package,
   Palette,
   Plane,
   RefreshCcw,
-  Search,
   ShoppingBag,
   Sparkles,
-  SlidersHorizontal,
   Store,
   Ticket,
   Trophy,
@@ -25,10 +24,16 @@ import {
   XCircle,
 } from "lucide-react";
 import { fetchLiveries, triggerSyncLiveries } from "../api";
+import { parseGameDate } from "../format";
 import { LiveryItem, LiveryTag, LiveryTagKind } from "../types";
 import { challengeTag, displayLiveryName, splitLiveryName } from "../liveryName";
 import { AircraftListModal } from "./AircraftListModal";
+import { FilterBar, SearchInput, useDebouncedQuery } from "./FilterBar";
 import { MenuOption, MenuSelect } from "./MenuSelect";
+import { EmptyState, ErrorState } from "./PageStates";
+import { SegmentedControl } from "./SegmentedControl";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 
 interface LiveryCollectionProps {
   refreshToken: number;
@@ -52,6 +57,7 @@ const TAG_STYLES: Record<LiveryTagKind, { cls: string; Icon: typeof Trophy }> = 
   booster: { cls: "is-booster", Icon: Package },
   shop_gift: { cls: "is-shop-gift", Icon: Gift },
   shop_ad: { cls: "is-shop-ad", Icon: Tv },
+  shop_amc: { cls: "is-shop-amc", Icon: Coins },
   shop_tc: { cls: "is-shop-tc", Icon: Ticket },
   shop_pack: { cls: "is-shop-pack", Icon: ShoppingBag },
   dutyfree: { cls: "is-dutyfree", Icon: Store },
@@ -78,9 +84,7 @@ const NEW_WINDOW_DAYS = 7;
 // `first_seen` comes from SQLite's datetime('now'): "YYYY-MM-DD HH:MM:SS" in UTC
 // with no zone marker, which browsers would otherwise read as local time.
 function parseAdded(value: string | null | undefined): number {
-  if (!value) return NaN;
-  const stamp = Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
-  return Number.isNaN(stamp) ? NaN : stamp;
+  return parseGameDate(value)?.getTime() ?? NaN;
 }
 
 // Rows with no timestamp sort to the bottom of "newest first" and the top of
@@ -121,9 +125,9 @@ export function LiveryCollection({ refreshToken, onViewInFleet, initialPreset, o
 
   const [status, setStatus] = useState<StatusFilter>("all");
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebouncedQuery(search);
   const [model, setModel] = useState("");
-  const [debouncedModel, setDebouncedModel] = useState("");
+  const debouncedModel = useDebouncedQuery(model);
   const [sort, setSort] = useState<SortMode>(DEFAULT_SORT);
   const [showUserCreated, setShowUserCreated] = useState<boolean>(loadShowUserCreated);
   const [modalItem, setModalItem] = useState<LiveryItem | null>(null);
@@ -156,16 +160,6 @@ export function LiveryCollection({ refreshToken, onViewInFleet, initialPreset, o
       setFocusSkinId(null);
     }
   }, [initialPreset]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 220);
-    return () => window.clearTimeout(timer);
-  }, [search]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedModel(model.trim()), 220);
-    return () => window.clearTimeout(timer);
-  }, [model]);
 
   useEffect(() => {
     let cancelled = false;
@@ -217,7 +211,7 @@ export function LiveryCollection({ refreshToken, onViewInFleet, initialPreset, o
   const clearFocus = () => { setFocusSkinId(null); if (focusSkinId !== null) onPresetCleared(); };
 
   const activeFilters = [status !== "all", Boolean(debouncedSearch), Boolean(debouncedModel)].filter(Boolean).length;
-  const clearFilters = () => { clearFocus(); setStatus("all"); setSearch(""); setDebouncedSearch(""); setModel(""); setDebouncedModel(""); setSort(DEFAULT_SORT); };
+  const clearFilters = () => { clearFocus(); setStatus("all"); setSearch(""); setModel(""); setSort(DEFAULT_SORT); };
   const syncCatalog = async () => {
     setSyncing(true);
     setSyncNotice("Reading booster packs, shop offers, and the active challenge. The first artwork sync can take a few minutes.");
@@ -277,53 +271,48 @@ export function LiveryCollection({ refreshToken, onViewInFleet, initialPreset, o
           <strong>Refresh reward catalog</strong>
           <span>Sync booster-pack drops, shop skins, the active challenge, and missing artwork through the mobile connection.</span>
         </div>
-        <button className="primary-action" onClick={syncCatalog} disabled={syncing}>
+        <Button className="primary-action" onClick={syncCatalog} disabled={syncing}>
           <RefreshCcw size={15} className={syncing ? "is-spinning" : ""} />
           {syncing ? "Syncing catalog" : "Sync reward skins"}
-        </button>
+        </Button>
       </section>
 
       {syncNotice && (
         <div className="inline-notice" aria-live="polite">
           <span>{syncNotice}</span>
-          {!syncing && <button onClick={() => setSyncNotice(null)} aria-label="Dismiss notice"><X size={14} /></button>}
+          {!syncing && <Button onClick={() => setSyncNotice(null)} aria-label="Dismiss notice"><X size={14} /></Button>}
         </div>
       )}
 
       {focusSkinId !== null && (
         <div className="inline-notice is-focus" aria-live="polite">
           <span>{focused ? <>Showing <b>{displayLiveryName(focused)}</b>, the livery you opened from the fleet page.</> : "That livery is not in the local catalog yet. Sync the reward skins or show the full collection."}</span>
-          <button onClick={clearFocus}>Show all liveries</button>
+          <Button onClick={clearFocus}>Show all liveries</Button>
         </div>
       )}
 
-      <div className="livery-toolbar">
-        <div className="segmented-control" role="tablist" aria-label="Ownership status">
-          <button className={`segmented-option${status === "all" ? " is-active" : ""}`} onClick={() => { clearFocus(); setStatus("all"); }}>All</button>
-          <button className={`segmented-option tone-green${status === "owned" ? " is-active" : ""}`} onClick={() => { clearFocus(); setStatus("owned"); }}><CheckCircle2 size={12} /> Owned</button>
-          <button className={`segmented-option tone-amber${status === "unowned" ? " is-active" : ""}`} onClick={() => { clearFocus(); setStatus("unowned"); }}><XCircle size={12} /> Missing</button>
-        </div>
-        <label className="search-control">
-          <Search size={16} />
-          <input value={search} onChange={(event) => { clearFocus(); setSearch(event.target.value); }} placeholder="Search livery or booster event" />
-          {search && <button onClick={() => setSearch("")} aria-label="Clear search"><X size={14} /></button>}
-        </label>
-        <input className="model-input" value={model} onChange={(event) => { clearFocus(); setModel(event.target.value); }} placeholder="Model, e.g. 737 or A380" />
+      <FilterBar className="livery-controls" active={activeFilters} onClear={clearFilters}>
+        <SegmentedControl className="segmented-control" label="Ownership status" value={status} onChange={(next) => { clearFocus(); setStatus(next); }} options={[
+          { value: "all", label: "All", className: "segmented-option" },
+          { value: "owned", label: <><CheckCircle2 size={12} /> Owned</>, className: "segmented-option tone-green" },
+          { value: "unowned", label: <><XCircle size={12} /> Missing</>, className: "segmented-option tone-amber" },
+        ]} />
+        <SearchInput value={search} onChange={(value) => { clearFocus(); setSearch(value); }} placeholder="Search livery or booster event" />
+        <SearchInput value={model} onChange={(value) => { clearFocus(); setModel(value); }} placeholder="Model, e.g. 737 or A380" icon={Plane} />
         <MenuSelect label="Sort by" value={sort} onChange={(next) => setSort(next as SortMode)} options={SORT_OPTIONS} align="right" />
         <label className="livery-toggle" title="Player-designed market liveries (e.g. LH-A388)">
-          <input type="checkbox" checked={showUserCreated} onChange={(event) => setShowUserCreated(event.target.checked)} />
+          <Checkbox checked={showUserCreated} onCheckedChange={(checked) => setShowUserCreated(checked === true)} />
           <Wand2 size={13} />
           <span>User-created</span>
         </label>
-        {activeFilters > 0 && <button className="reset-button" onClick={clearFilters}>Reset</button>}
-      </div>
+      </FilterBar>
 
       <div className="livery-grid">
         {loading ? Array.from({ length: 8 }).map((_, index) => <div className="livery-card-skeleton" key={index} />)
           : error ? (
-            <div className="livery-empty"><XCircle size={22} /><strong>Couldn't load liveries</strong><span>{error}</span></div>
+            <ErrorState inline title="Couldn't load liveries" message={error} />
           ) : visibleLiveries.length === 0 ? (
-            <div className="livery-empty"><SlidersHorizontal size={22} /><strong>No liveries match</strong><span>Adjust or clear the active filters.</span></div>
+            <EmptyState title="No liveries match" hint="Adjust or clear the active filters." />
           ) : visibleLiveries.map((item) => (
             <LiveryCard key={item.skin_id} item={item} onOpenModal={() => setModalItem(item)} onViewInFleet={onViewInFleet} />
           ))}
@@ -405,7 +394,7 @@ function LiveryCard({ item, onOpenModal, onViewInFleet }: { item: LiveryItem; on
             {visible.map((plane) => (
               <span className="livery-aircraft-chip" key={plane.aircraft_id}><Plane size={10} /><span>{plane.name}</span></span>
             ))}
-            {overflow > 0 && <button className="livery-more-button" onClick={onOpenModal}>+{overflow} more…</button>}
+            {overflow > 0 && <Button className="livery-more-button" onClick={onOpenModal}>+{overflow} more…</Button>}
           </div>
         ) : (
           <p className="livery-empty-fleet">Not currently flying on any aircraft.</p>
@@ -413,9 +402,9 @@ function LiveryCard({ item, onOpenModal, onViewInFleet }: { item: LiveryItem; on
       </div>
 
       {item.is_owned ? (
-        <button className="livery-view-button is-block" onClick={() => onViewInFleet(item.name)}>
+        <Button className="livery-view-button is-block" onClick={() => onViewInFleet(item.name)}>
           <span>View in Fleet</span>
-        </button>
+        </Button>
       ) : (
         <p className="livery-locked-note">Available via drops / auction</p>
       )}

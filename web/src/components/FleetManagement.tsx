@@ -32,6 +32,10 @@ import { BulkRenameModal } from "./BulkRenameModal";
 import { MenuOption, MenuSelect } from "./MenuSelect";
 import { AssignCircuitModal } from "./AssignCircuitModal";
 import { hubLabel } from "../hubFlag";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface FleetManagementProps {
   stats?: FleetStats | null;
@@ -379,7 +383,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                 : dailyLiveries.map((lv) => {
                     const isActive = activeSkinId === lv.skin_id;
                     return (
-                      <button
+                      <Button
                         key={lv.skin_id}
                         onClick={() => {
                           setActiveSkinId(isActive ? null : lv.skin_id);
@@ -420,7 +424,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                             )}
                           </div>
                         </div>
-                      </button>
+                      </Button>
                     );
                   })}
             </div>
@@ -432,7 +436,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
               const active = haulTab === tab.key;
               const count = haulCount(tab.key);
               return (
-                <button
+                <Button
                   key={tab.key}
                   onClick={() => setHaulTab(tab.key)}
                   className={`px-3.5 py-2 rounded-lg text-xs font-mono transition flex items-center gap-2 ${
@@ -451,7 +455,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                       {count.toLocaleString()}
                     </span>
                   )}
-                </button>
+                </Button>
               );
             })}
           </div>
@@ -467,7 +471,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
               {/* Name search */}
               <div className="relative min-w-[170px] flex-1 max-w-[240px]">
                 <Search className="w-3.5 h-3.5 text-[#8B877C] absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
+                <Input
                   type="text"
                   placeholder="Search plane or circuit…"
                   value={searchName}
@@ -477,7 +481,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
               </div>
 
               {/* Model search */}
-              <input
+              <Input
                 type="text"
                 placeholder="Model (e.g. 747)…"
                 value={searchModel}
@@ -488,7 +492,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
               {activeSkinId && (
                 <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#7C5CBF]/10 border border-[#7C5CBF]/30 text-[#7C5CBF] text-xs font-mono">
                   <span className="truncate max-w-[160px]">★ {activeSkinName}</span>
-                  <button
+                  <Button
                     onClick={() => {
                       setActiveSkinId(null);
                       if (onClearSkinFilter) onClearSkinFilter();
@@ -496,22 +500,22 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                     className="hover:text-[#0A1E3C]"
                   >
                     <X className="w-3 h-3" />
-                  </button>
+                  </Button>
                 </div>
               )}
 
-              <button
+              <Button
                 onClick={clearFilters}
                 className="px-2.5 py-1.5 text-xs text-[#8B877C] hover:text-[#0A1E3C] font-mono hover:bg-[#F1EEE6] rounded-lg transition"
               >
                 Reset
-              </button>
+              </Button>
             </div>
 
             {/* View toggle & sync */}
             <div className="flex items-center gap-2">
               <div className="flex items-center bg-white border border-[#E5E1D6] rounded-lg p-0.5">
-                <button
+                <Button
                   onClick={() => setViewMode("grid")}
                   className={`p-1.5 rounded-md text-xs transition ${
                     viewMode === "grid"
@@ -521,8 +525,8 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                   title="Grid view"
                 >
                   <LayoutGrid className="w-4 h-4" />
-                </button>
-                <button
+                </Button>
+                <Button
                   onClick={() => setViewMode("table")}
                   className={`p-1.5 rounded-md text-xs transition ${
                     viewMode === "table"
@@ -532,10 +536,10 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                   title="List view"
                 >
                   <List className="w-4 h-4" />
-                </button>
+                </Button>
               </div>
 
-              <button
+              <Button
                 onClick={handleSync}
                 disabled={syncing}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold font-mono transition ${
@@ -546,16 +550,16 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
                 <span>{syncing ? "Syncing…" : "Sync Fleet"}</span>
-              </button>
+              </Button>
             </div>
           </div>
 
           {statusMsg && (
             <div className="text-[11px] font-mono text-[#4E4B43] bg-white/70 border border-[#E5E1D6] rounded-lg px-3 py-2 flex items-center justify-between">
               <span>{statusMsg}</span>
-              <button onClick={() => setStatusMsg(null)} className="text-[#8B877C] hover:text-[#0A1E3C]">
+              <Button onClick={() => setStatusMsg(null)} className="text-[#8B877C] hover:text-[#0A1E3C]">
                 <X className="w-3 h-3" />
-              </button>
+              </Button>
             </div>
           )}
 
@@ -563,7 +567,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
           {aircraft.length > 0 && (
             <div className="flex items-center justify-between text-xs text-[#8B877C] px-1 font-mono">
               <div className="flex items-center gap-3">
-                <button
+                <Button
                   onClick={handleSelectAll}
                   className="flex items-center gap-1.5 hover:text-[#0A1E3C] text-[#4E4B43] font-medium"
                 >
@@ -577,24 +581,24 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                       ? `${selectedIds.size} of ${aircraft.length} selected`
                       : "Select All"}
                   </span>
-                </button>
+                </Button>
 
                 {selectedIds.size > 0 && (
                   <div className="flex items-center gap-2 pl-3 border-l border-[#E5E1D6]">
-                    <button
+                    <Button
                       onClick={() => setRenameModalOpen(true)}
                       className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#F1EEE6] hover:bg-[#E5E1D6] text-[#4E4B43] font-medium transition"
                     >
                       <Edit3 className="w-3 h-3 text-[#1D6FB8]" />
                       <span>Rename</span>
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       onClick={() => setAssignModalOpen(true)}
                       className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#F1EEE6] hover:bg-[#E5E1D6] text-[#4E4B43] font-medium transition"
                     >
                       <Send className="w-3 h-3 text-[#1E7E46]" />
                       <span>Assign Circuit</span>
-                    </button>
+                    </Button>
                   </div>
                 )}
               </div>
@@ -620,9 +624,9 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
             <div className="h-64 flex flex-col items-center justify-center gap-2 text-[#8B877C] font-mono">
               <Plane className="w-8 h-8 opacity-40 text-[#B6B1A4]" />
               <p className="text-sm">No aircraft match current filters.</p>
-              <button onClick={clearFilters} className="text-xs text-[#1D6FB8] underline mt-1">
+              <Button onClick={clearFilters} className="text-xs text-[#1D6FB8] underline mt-1">
                 Clear filters
-              </button>
+              </Button>
             </div>
           ) : viewMode === "grid" ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3.5 pb-12">
@@ -630,7 +634,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                 const isSelected = selectedIds.has(ac.aircraft_id);
                 const badge = liveryBadge(ac);
                 const utilColor =
-                  ac.utilization >= 100
+                  ac.utilization > 93
                     ? "bg-[#1E7E46]"
                     : ac.utilization > 0
                     ? "bg-[#FFAD00]"
@@ -713,7 +717,7 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                         <span className="text-[#8B877C]">UTILIZATION</span>
                         <span
                           className={`font-bold ${
-                            ac.utilization >= 100
+                            ac.utilization > 93
                               ? "text-[#1E7E46]"
                               : ac.utilization > 0
                               ? "text-[#1D6FB8]"
@@ -745,48 +749,46 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
             /* List view */
             <div className="bg-[#FFFFFF]/80 backdrop-blur border border-[#E5E1D6]/80 rounded-xl overflow-hidden mb-12">
               <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="bg-white border-b border-[#E5E1D6] text-[#8B877C] uppercase text-[10px]">
-                    <tr>
-                      <th className="p-3 w-8">
-                        <input
-                          type="checkbox"
+                <Table className="w-full text-left text-xs font-mono">
+                  <TableHeader className="bg-white border-b border-[#E5E1D6] text-[#8B877C] uppercase text-[10px]">
+                    <TableRow>
+                      <TableHead className="p-3 w-8">
+                        <Checkbox
                           checked={selectedIds.size === aircraft.length && aircraft.length > 0}
-                          onChange={handleSelectAll}
+                          onCheckedChange={handleSelectAll}
                           className="rounded bg-[#F8F6F1] border-[#CFC9BA]"
                         />
-                      </th>
-                      <th className="p-3">Aircraft</th>
-                      <th className="p-3">Model</th>
-                      <th className="p-3">Hub</th>
-                      <th className="p-3">Haul</th>
-                      <th className="p-3">Utilization</th>
-                      <th className="p-3">Seating</th>
-                      <th className="p-3">Livery</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#E5E1D6]/70">
+                      </TableHead>
+                      <TableHead className="p-3">Aircraft</TableHead>
+                      <TableHead className="p-3">Model</TableHead>
+                      <TableHead className="p-3">Hub</TableHead>
+                      <TableHead className="p-3">Haul</TableHead>
+                      <TableHead className="p-3">Utilization</TableHead>
+                      <TableHead className="p-3">Seating</TableHead>
+                      <TableHead className="p-3">Livery</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody className="divide-y divide-[#E5E1D6]/70">
                     {aircraft.map((ac) => {
                       const isSelected = selectedIds.has(ac.aircraft_id);
                       const badge = liveryBadge(ac);
                       const haul = haulLabel(ac);
                       return (
-                        <tr
+                        <TableRow
                           key={ac.aircraft_id}
                           onClick={() => handleToggleSelect(ac.aircraft_id)}
                           className={`hover:bg-[#F1EEE6]/30 cursor-pointer transition ${
                             isSelected ? "bg-[#05164D]/10" : ""
                           }`}
                         >
-                          <td className="p-3">
-                            <input
-                              type="checkbox"
+                          <TableCell className="p-3">
+                            <Checkbox
                               checked={isSelected}
-                              onChange={() => {}}
+                              onCheckedChange={() => {}}
                               className="rounded bg-[#F8F6F1] border-[#CFC9BA]"
                             />
-                          </td>
-                          <td className="p-3 font-bold text-[#0A1E3C]">
+                          </TableCell>
+                          <TableCell className="p-3 font-bold text-[#0A1E3C]">
                             <div className="flex items-center gap-2.5">
                               <div className="w-9 h-6 rounded bg-white border border-[#E5E1D6] flex items-center justify-center overflow-hidden flex-shrink-0">
                                 {ac.skin_id ? (
@@ -801,22 +803,22 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                               </div>
                               <span>{ac.name}</span>
                             </div>
-                          </td>
-                          <td className="p-3 text-[#4E4B43]">{ac.model}</td>
-                          <td className="p-3">
+                          </TableCell>
+                          <TableCell className="p-3 text-[#4E4B43]">{ac.model}</TableCell>
+                          <TableCell className="p-3">
                             <span className="px-2 py-0.5 rounded bg-[#05164D]/10 border border-[#05164D]/20 text-[#1D6FB8] font-bold">
                               {hubBadge(ac.hub_iata)}
                             </span>
-                          </td>
-                          <td className="p-3">
+                          </TableCell>
+                          <TableCell className="p-3">
                             <span className="px-2 py-0.5 rounded border bg-[#F1EEE6] border-[#E5E1D6] text-[#8B877C]">
                               {haul || "Unknown"}
                             </span>
-                          </td>
-                          <td className="p-3">
+                          </TableCell>
+                          <TableCell className="p-3">
                             <span
                               className={`font-bold ${
-                                ac.utilization >= 100
+                                ac.utilization > 93
                                   ? "text-[#1E7E46]"
                                   : ac.utilization > 0
                                   ? "text-[#1D6FB8]"
@@ -825,24 +827,24 @@ export const FleetManagement: React.FC<FleetManagementProps> = ({
                             >
                               {ac.utilization.toFixed(0)}%
                             </span>
-                          </td>
-                          <td className="p-3 text-[#8B877C]">
+                          </TableCell>
+                          <TableCell className="p-3 text-[#8B877C]">
                             {ac.is_cargo
                               ? `${ac.payload_t ?? ac.max_tonnage ?? 0} t`
                               : ac.seats_eco !== null && ac.seats_eco !== undefined
                               ? `${ac.seats_eco}E / ${ac.seats_bus || 0}B / ${ac.seats_first || 0}F`
                               : "Standard"}
-                          </td>
-                          <td className="p-3">
+                          </TableCell>
+                          <TableCell className="p-3">
                             <span className={`px-2 py-0.5 rounded border ${badge.cls}`}>
                               {badge.label}
                             </span>
-                          </td>
-                        </tr>
+                          </TableCell>
+                        </TableRow>
                       );
                     })}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               </div>
             </div>
           )}

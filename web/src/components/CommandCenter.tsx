@@ -15,7 +15,11 @@ import {
 } from "lucide-react";
 import { AppView } from "./AppShell";
 import { CommandCenterSnapshot } from "../types";
+import { compactMoney, dateTime, integer } from "../format";
 import { hubLabel } from "../hubFlag";
+import { EmptyState, ErrorState } from "./PageStates";
+import { SectionHeader } from "./SectionHeader";
+import { Button } from "@/components/ui/button";
 
 interface CommandCenterProps {
   snapshot: CommandCenterSnapshot | null;
@@ -24,29 +28,11 @@ interface CommandCenterProps {
   onNavigate: (view: AppView, preset?: string) => void;
 }
 
-const integer = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
-const compactMoney = new Intl.NumberFormat(undefined, {
-  style: "currency",
-  currency: "USD",
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
-
-function formatDate(value: string | null) {
-  if (!value) return "Never";
-  const date = new Date(`${value.replace(" ", "T")}Z`);
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 export function CommandCenter({ snapshot, loading, error, onNavigate }: CommandCenterProps) {
   if (loading && !snapshot) return <CommandCenterSkeleton />;
   if (error && !snapshot) {
-    return <div className="fatal-state"><AlertTriangle size={22} /><div><strong>Command Center unavailable</strong><p>{error}</p></div></div>;
+    return <ErrorState title="Command Center unavailable" message={error} />;
   }
   if (!snapshot) return null;
 
@@ -71,25 +57,19 @@ export function CommandCenter({ snapshot, loading, error, onNavigate }: CommandC
             <span>Utilization</span>
             <strong>{portfolio.avg_utilization}%</strong>
           </div>
-          <button className="summary-stat is-action" onClick={() => onNavigate("fleet", "idle")}>
+          <Button className="summary-stat is-action" onClick={() => onNavigate("fleet", "idle")}>
             <span>Idle capacity</span>
             <strong>{integer.format(portfolio.idle)}</strong>
             <ArrowUpRight size={16} />
-          </button>
+          </Button>
         </section>
 
         <section className="flat-section attention-section">
-          <div className="section-title-row">
-            <div>
-              <p className="section-kicker">Execution queue</p>
-              <h2>Needs attention</h2>
-            </div>
-            <span className="section-count">{alerts.length} signals</span>
-          </div>
+          <SectionHeader kicker="Execution queue" title="Needs attention" count={<>{alerts.length} signals</>} />
 
           <div className="attention-list">
             {alerts.length ? alerts.map((alert) => (
-              <button
+              <Button
                 className={`attention-row tone-${alert.tone}${alert.target !== "fleet" ? " is-static" : ""}`}
                 key={alert.id}
                 onClick={() => alert.target === "fleet" && onNavigate("fleet", alert.preset)}
@@ -100,20 +80,15 @@ export function CommandCenter({ snapshot, loading, error, onNavigate }: CommandC
                 </span>
                 <span className="attention-copy"><strong>{alert.title}</strong><small>{alert.detail}</small></span>
                 {alert.target === "fleet" ? <ChevronRight size={18} /> : <span className="signal-only">Signal</span>}
-              </button>
+              </Button>
             )) : (
-              <div className="empty-positive"><CheckCircle2 size={20} /><span>No operational exceptions detected.</span></div>
+              <EmptyState positive icon={CheckCircle2} title="No operational exceptions detected" />
             )}
           </div>
         </section>
 
         <section className="flat-section pipeline-section">
-          <div className="section-title-row">
-            <div>
-              <p className="section-kicker">Circuit workflow</p>
-              <h2>From plan to operating revenue</h2>
-            </div>
-          </div>
+          <SectionHeader kicker="Circuit workflow" title="From plan to operating revenue" />
           <div className="pipeline-track">
             {pipeline.map((stage, index) => (
               <React.Fragment key={stage.key}>
@@ -129,13 +104,7 @@ export function CommandCenter({ snapshot, loading, error, onNavigate }: CommandC
         </section>
 
         <section className="flat-section hub-section">
-          <div className="section-title-row">
-            <div>
-              <p className="section-kicker">Network portfolio</p>
-              <h2>Hub performance</h2>
-            </div>
-            <span className="section-count">Top {snapshot.hubs.length}</span>
-          </div>
+          <SectionHeader kicker="Network portfolio" title="Hub performance" count={<>Top {snapshot.hubs.length}</>} />
           <div className="hub-table" role="table" aria-label="Hub performance">
             <div className="hub-table-head" role="row">
               <span>Hub</span><span>Fleet</span><span>Idle</span><span>Utilization</span><span>Circuits</span><span>Weekly</span>
@@ -192,11 +161,11 @@ export function CommandCenter({ snapshot, loading, error, onNavigate }: CommandC
             <span className={`health-mark ${snapshot.status.browser_connected ? "is-good" : "is-limited"}`} />
           </div>
           <div className="health-list">
-            <HealthRow icon={<Clock3 size={17} />} label="Newest fleet record" value={formatDate(health.newest_fleet_record)} />
+            <HealthRow icon={<Clock3 size={17} />} label="Newest fleet record" value={dateTime(health.newest_fleet_record)} />
             <HealthRow icon={<Plane size={17} />} label="Stale aircraft" value={integer.format(health.stale_aircraft)} warning={health.stale_aircraft > 0} />
             <HealthRow icon={<Route size={17} />} label="Route coverage" value={`${integer.format(health.owned_routes)} / ${integer.format(health.routes)}`} />
             <HealthRow icon={<Radar size={17} />} label="Market watches" value={integer.format(health.market_watches)} />
-            <HealthRow icon={<Database size={17} />} label="Oldest fleet record" value={formatDate(health.oldest_fleet_record)} muted />
+            <HealthRow icon={<Database size={17} />} label="Oldest fleet record" value={dateTime(health.oldest_fleet_record)} muted />
           </div>
           <p className="health-note">Freshness is measured across every aircraft, not only the newest synchronized row.</p>
         </section>
@@ -206,7 +175,7 @@ export function CommandCenter({ snapshot, loading, error, onNavigate }: CommandC
           <p className="section-kicker">Suggested next move</p>
           <h3>Recover idle capacity</h3>
           <p>Start with the {integer.format(portfolio.idle)} aircraft currently producing no scheduled utilization.</p>
-          <button onClick={() => onNavigate("fleet", "idle")}>Open idle fleet <ArrowUpRight size={15} /></button>
+          <Button onClick={() => onNavigate("fleet", "idle")}>Open idle fleet <ArrowUpRight size={15} /></Button>
         </section>
       </aside>
     </div>

@@ -46,7 +46,7 @@ def _phase1_bytes(results):
     return bytes(out)
 
 
-def test_phase1_native_results_are_byte_identical_to_cpp_oracle():
+def test_phase1_native_results_are_byte_identical_to_legacy_oracle():
     output = b"".join(
         _phase1_bytes(native.search_circuits_native(*case))
         for case in _phase1_cases()

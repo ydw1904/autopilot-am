@@ -6,10 +6,16 @@ import { LiveryItem } from "./types";
 // whitespace so the model prefix (which never has a hyphen followed by
 // whitespace itself, e.g. "747-200B") is stripped either way; anything
 // without such a hyphen has no model prefix and sorts as a livery name on its own.
-export function splitLiveryName(name: string): { model: string; livery: string } {
+export function splitLiveryName(value?: string | null): { model: string; livery: string } {
+  const name = value?.trim();
+  if (!name) return { model: "", livery: "Unknown livery" };
   const match = name.match(/^(.*?)-\s+(.*)$/);
   if (!match) return { model: "", livery: name };
   return { model: match[1].trim(), livery: match[2].trim() || name };
+}
+
+export function cleanLiveryName(value?: string | null): string {
+  return splitLiveryName(value).livery;
 }
 
 // Challenge liveries are named "<model> - Challenge <event>" (e.g.
