@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Aircraft Buyer -- Purchase aircraft via Chrome CDP.
+Aircraft Buyer -- Purchase aircraft via the mobile API (Chrome CDP fallback).
 
 Two modes:
   Circuit mode: reads config from a saved circuit in DB
@@ -15,7 +15,13 @@ Two modes:
   List saved circuits:
     python3 aircraft_buyer.py --list
 
-Flow (verified against the live page):
+Mobile flow (default): one `POST aircraft/buymultiple` per batch of <=99, with
+the model's manufacturer livery (what the web form buys); --alliance sets
+purchaseAssistance=true, as the web form's alliance button does. Chrome is used
+only with --cdp, or when there is no mobile session / no known model id or
+manufacturer livery.
+
+CDP flow (verified against the live page):
   1. Navigate to /aircraft/buy/new/{haul}; wait for the list to STABILISE
      (boxes load async after document ready — see navigate_to_list).
   2. Find the target aircraft box by game_id (.aircraftJson id) or title.
@@ -768,11 +774,63 @@ def get_hub_id_from_db(db, hub_iata):
     return row[0] if row else None
 
 
+def mobile_model_id(db, model_name):
+    """Mobile aircraftListId: the shared-id table, else the mobile catalog."""
+    if model_name in AIRCRAFT_GAME_IDS:
+        return AIRCRAFT_GAME_IDS[model_name]
+    row = db.execute("SELECT model_id FROM mobile_models WHERE name=?",
+                     (model_name,)).fetchone()
+    return row[0] if row else None
+
+
+def manufacturer_skin_id(db, model_id):
+    """The livery a web purchase gets by default: the model's manufacturer one."""
+    row = db.execute("SELECT skin_id FROM mobile_skins WHERE model_id=? "
+                     "AND source='manufacturer' LIMIT 1", (model_id,)).fetchone()
+    return row[0] if row else None
+
+
+def mobile_rows(db, configs, model_id, skin_id):
+    """buy_multiple rows for aircraft_buyer configs, or None if a hub is unknown."""
+    rows = []
+    for c in configs:
+        hub_id = get_hub_id_from_db(db, c["hub"])
+        if not hub_id:
+            return None
+        rows.append({"model_id": model_id, "hub_id": hub_id, "quantity": c["qty"],
+                     "name": c["name"], "skin_id": skin_id, "eco": c["eco"],
+                     "bus": c["bus"], "first": c["first"], "payload": c["cargo"]})
+    return rows
+
+
+def buy_mobile(client, rows, requested, dry_run, on_batch, alliance=False):
+    """Buy in batches of <=99 over the mobile API. Returns (bought, error)."""
+    from mobile_api import AMError
+    bought, remaining = 0, requested
+    while remaining > 0:
+        qty = min(remaining, PER_PURCHASE_LIMIT)
+        batch = [dict(rows[0], quantity=qty)] if len(rows) == 1 else rows
+        if dry_run:
+            print(f"  [dry-run] would POST aircraft/buymultiple "
+                  f"(purchaseAssistance={str(alliance).lower()}): {batch}")
+            return 0, None
+        try:
+            resp = client.buy_multiple(configs=batch, assistance=alliance)
+        except AMError as e:
+            return bought, str(e)
+        ids = client.bought_aircraft_ids(resp)
+        print(f"  Batch: bought {qty} ({len(ids)} ids returned)")
+        bought += qty
+        remaining -= qty
+        on_batch(bought)
+    return bought, None
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     p = argparse.ArgumentParser(
-        description="Aircraft Buyer — purchase aircraft via Chrome CDP",
+        description="Aircraft Buyer: purchase aircraft (mobile API, Chrome fallback)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Circuit mode:
@@ -813,6 +871,8 @@ List:
                    help="Buy via 'Purchase through Alliance' (fixed discount + "
                         "members assistance) instead of a personal purchase")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--cdp", action="store_true",
+                   help="Buy through Chrome instead of the mobile API")
     p.add_argument("--list", action="store_true")
     p.add_argument("--json", action="store_true",
                    help="Print one JSON document to stdout instead of the "
@@ -1037,6 +1097,55 @@ def _buy(args, doc):
     # only way to confirm the right aircraft variant was matched and the seat
     # sliders actually took, so dry-run failures catch wrong game_id/haul.
 
+    def record_waves(bought_total):
+        # Derive waves from aircraft actually bought, not batches.
+        if args.circuit and waves is not None:
+            new_bought = (waves_bought * 7 + bought_total) // 7
+            try:
+                db.execute("UPDATE circuits SET waves_bought=? WHERE name=?",
+                           (new_bought, args.circuit.upper()))
+                db.commit()
+            except Exception as e:
+                print(f"  (DB update skipped: {e})")
+
+    client = None
+    if not args.cdp:
+        from circuit_scheduler import _mobile_client
+        model_id = mobile_model_id(db, model_name)
+        skin_id = model_id and manufacturer_skin_id(db, model_id)
+        rows = skin_id and mobile_rows(db, configs, model_id, skin_id)
+        client = rows and _mobile_client()
+        if not client:
+            print("Mobile path unavailable (session, model id, livery or hub id "
+                  "missing); using Chrome")
+    if client:
+        print("Backend: mobile API")
+        doc["model"] = model_name
+        doc["backend"] = "mobile"
+        try:
+            before = client.resources()["dollar"]
+            print(f"Balance: ${before:,.0f}")
+            bought, err = buy_mobile(client, rows, requested, args.dry_run,
+                                     record_waves, alliance=args.alliance)
+            if args.dry_run:
+                print("\nDRY RUN: no purchases made.")
+                doc["dry_run"] = True
+                doc["purchased"] = 0
+                sys.exit(0)
+            if err:
+                print(f"  Stopping after failed batch: {err}", file=sys.stderr)
+                doc["errors"].append(err)
+            after = client.resources()["dollar"]
+            print(f"\nBalance: ${before:,.0f} -> ${after:,.0f} (spent: ${before - after:,.0f})")
+            doc["total_cost"] = before - after
+        finally:
+            client.close()
+            close_db()
+        print(f"\nBought {bought}/{requested} aircraft.")
+        doc["purchased"] = bought
+        doc["requested"] = requested
+        sys.exit(0 if bought == requested else 2)
+
     print("Connecting to Chrome...")
     cdp = connect_cdp()
 
@@ -1115,19 +1224,7 @@ def _buy(args, doc):
             bought_total += batch_qty
             remaining -= batch_qty
 
-            # Update DB if in circuit mode. Derive waves from aircraft
-            # actually bought — batch_idx counts batches (up to 99 aircraft
-            # each), not waves of 7.
-            if args.circuit and waves is not None:
-                new_bought = (waves_bought * 7 + bought_total) // 7
-                try:
-                    db.execute(
-                        "UPDATE circuits SET waves_bought=? WHERE name=?",
-                        (new_bought, args.circuit.upper())
-                    )
-                    db.commit()
-                except Exception as e:
-                    print(f"  (DB update skipped: {e})")
+            record_waves(bought_total)
 
         if remaining > 0:
             time.sleep(2)

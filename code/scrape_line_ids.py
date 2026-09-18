@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Scrape line_ids from the game's /network/planning page and store them in the DB.
+Fetch line_ids for every owned route and store them in the DB.
 
-For each hub in player_hubs, navigates to the planning page, selects the hub,
-reads all owned routes with their lineIds, and upserts into the routes table.
+For each hub in player_hubs, reads the owned routes with their lineIds from the
+mobile API (hub/<id>/lines/pricing), and upserts into the routes table. Without
+a mobile session (or with --cdp) it scrapes /network/planning in Chrome.
 
 Usage:
     python3 scrape_line_ids.py
     python3 scrape_line_ids.py --hub MPM
     python3 scrape_line_ids.py --dry-run
 
-Requires Chrome with --remote-debugging-port=9222 and a logged-in AM tab.
+    python3 scrape_line_ids.py --cdp
 """
 
 import argparse, os, sys
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab
 from db import get_db, close_db, load_player_hubs
 from planning_page import navigate_to_planning, select_hub, get_lines_at_hub
+from circuit_scheduler import _mobile_client
 
 
 
@@ -26,6 +28,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--hub", help="Only scrape this hub (default: all)")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--cdp", action="store_true", help="Scrape via Chrome instead of mobile")
     args = p.parse_args()
 
     db = get_db()
@@ -35,11 +38,16 @@ def main():
         close_db()
         return
 
-    print(f"Connecting to Chrome...")
-    cdp = CDP(get_am_tab()["webSocketDebuggerUrl"], timeout=120)
-    cdp.connect()
+    client = None if args.cdp else _mobile_client()
+    if client:
+        print("Backend: mobile API")
+        backend = client
+    else:
+        print(f"Connecting to Chrome...")
+        backend = CDP(get_am_tab()["webSocketDebuggerUrl"], timeout=120)
+        backend.connect()
+        navigate_to_planning(backend)
     try:
-        navigate_to_planning(cdp)
 
         total_matched = 0
         total_stored = 0
@@ -49,11 +57,14 @@ def main():
             print(f"Hub: {hub_iata} (id={hub_id})")
             print(f"{'='*60}")
 
-            if not select_hub(cdp, hub_iata):
+            if client:
+                lines = [{"lineId": int(ln["id"]), "dest": ln.get("aTwoName") or ""}
+                         for ln in client.hub_pricing(int(hub_id))]
+            elif not select_hub(backend, hub_iata):
                 print(f"  SKIP: could not select hub")
                 continue
-
-            lines = get_lines_at_hub(cdp, hub_iata)
+            else:
+                lines = get_lines_at_hub(backend, hub_iata)
             print(f"  Found {len(lines)} owned routes")
 
             for line in lines:
@@ -96,7 +107,7 @@ def main():
             print("[dry-run] no changes made")
     finally:
         close_db()
-        cdp.close()
+        backend.close()
 
 
 if __name__ == "__main__":

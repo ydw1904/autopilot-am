@@ -23,8 +23,11 @@ native `form.submit()`. The game silently rejects `fetch()`-based purchase POSTs
 (returns `200 OK` without buying), so do **not** "simplify" this back to `fetch()`.
 Can take IATAs directly or `--circuit NAME` (loads routes from DB).
 
-## `aircraft_buyer.py` — aircraft purchaser (CDP)
-Find aircraft on the list page → click Buy (AJAX configure form) → set hub / seat
+## `aircraft_buyer.py`: aircraft purchaser (mobile, CDP fallback)
+Default: one `AMClient.buy_multiple` per batch of <=99, with the model's
+manufacturer livery (`mobile_skins.source='manufacturer'`, what the web form
+buys); `--alliance` sends `purchaseAssistance=true`. Chrome is used with `--cdp`, or when the session, model id,
+livery or hub id is missing. The CDP flow: find aircraft on the list page → click Buy (AJAX configure form) → set hub / seat
 config / quantity → submit via jQuery trigger. Reads circuit config from DB; has a
 game-id lookup for aircraft models. Also exposes `get_balance()`, reused by the MCP
 server.
@@ -78,8 +81,9 @@ needs. Exposes `get_lines_at_hub()` (reused by MCP).
 ## Fleet / data-sync scripts
 `aircraft_numberer`, `aircraft_reconfigurator`, `circuit_renamer`, `mass_renamer`,
 `mass_unscheduler`, `warehouse_sync`, `masstool`, `scrape_line_ids`,
-`scrape_audit_line_ids`, `scrape_internal_audits` — each is a focused CDP/DB CLI; see
-its module docstring. Most are also wrapped as MCP tools.
+`scrape_audit_line_ids`, `scrape_internal_audits`: each is a focused CLI; all
+run on the mobile API first (`--cdp` forces Chrome). See its module
+docstring. Most are also wrapped as MCP tools.
 
 ## `alliance_donator.py` — daily treasury donation
 Maxes the donate box at the bottom of `/alliance/profile`. It does **not** drag the

@@ -148,7 +148,7 @@ export function CommandCenter({ snapshot, loading, error, onNavigate }: CommandC
               <CapabilityRow
                 icon={<LockKeyhole size={17} />}
                 label="Chrome required"
-                detail="Route details page and clearing flights"
+                detail="Route details page"
               />
             </div>
             <p className="capability-note">Select Limited mode in the header to link Chrome and enable web-only actions.</p>

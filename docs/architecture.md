@@ -85,21 +85,21 @@ airlines-manager/
     ├── circuit_planner_native.py   ← ctypes wrapper for both Rust optimizer phases
     ├── native/beam_search.rs       ← native optimizer; build with native/build.sh
     │
-    ├── circuit_route_buyer.py      ← buy routes (CDP, country-listing flow)
-    ├── aircraft_buyer.py           ← buy aircraft (CDP); reads circuit config from DB
+    ├── circuit_route_buyer.py      ← buy routes (mobile line/open, CDP flags)
+    ├── aircraft_buyer.py           ← buy aircraft (mobile, CDP fallback); reads circuit config from DB
     ├── circuit_scheduler.py        ← schedule a circuit's aircraft (mobile, CDP fallback)
     ├── auto_pricer.py              ← set corrected ideal prices in bulk (CDP, fallback)
     │
     ├── aircraft_numberer.py        ← assign canonical <HUB>-C<NNN>-<MMM> names
     ├── aircraft_reconfigurator.py  ← align aircraft hub/seat config to circuit plan
-    ├── circuit_renamer.py          ← rename a circuit in DB + all its in-game aircraft
+    ├── circuit_renamer.py          ← rename a circuit in DB + all its in-game aircraft (mobile, CDP fallback)
     ├── mass_renamer.py             ← rename in-game aircraft by prefix
-    ├── mass_unscheduler.py         ← clear schedules for aircraft by prefix
+    ├── mass_unscheduler.py         ← clear schedules for aircraft by prefix (mobile, CDP fallback)
     │
-    ├── warehouse_sync.py           ← scrape fleet → DB `fleet` table
+    ├── warehouse_sync.py           ← fleet → DB `fleet` table (mobile, CDP fallback)
     ├── masstool.py                 ← live route prices/remaining demand (mobile, CDP fallback)
     ├── route_details.py            ← one route's /network/showline page (CDP-only)
-    ├── scrape_line_ids.py          ← line_ids from /network/planning → DB
+    ├── scrape_line_ids.py          ← line_ids → DB (mobile, CDP fallback)
     ├── scrape_audit_line_ids.py    ← line_ids from /marketing/internalaudit → DB
     ├── scrape_internal_audits.py   ← refresh owned-route demand via /marketing/pricing
     │
@@ -158,7 +158,7 @@ directory are local. The repo ships the code that produces and consumes them.
 | `mobile_models` / `mobile_skins` | mobile model specs + liveries: id, name, `source` (`manufacturer`/`playrion`/`market`), creator, duty free price + sold counter (from `skin_name_sync`) |
 | `mobile_aircraft` | mobile account fleet (SHM auction reads are live-only; nothing is logged) |
 | `mobile_boosters` / `mobile_booster_cards` | booster windows/prices/pity + published drop tables (from `booster_sync`) |
-| `mobile_challenges` / `mobile_challenge_rewards` | the challenge ladder: window, rank, and every objective's reward slot on both the free and battle-pass tracks (from `skin_name_sync --challenge`) |
+| `mobile_challenges` / `mobile_challenge_rewards` | the challenge ladder: window, rank, and every objective's reward slot on both the free and battle-pass tracks, plus the final-standings brackets as `track = 'ranking'` (rank range in `objective_id`/`goal`) — from `skin_name_sync --challenge` |
 | `mobile_shop_offers` / `mobile_shop_offer_items` | the shop feed and the liveries each pack/gift/offer contains (from `skin_name_sync --shop`) |
 | `mobile_skin_images` | livery PNG bytes (from `booster_sync --images`) |
 | `mobile_skin_overview` | VIEW: livery + source/creator/price + owned-aircraft count + best drop rate + which boosters/challenges/shop offers carry it + artwork cached. Rebuilt on every `MobileStore()` open, so its columns can grow |

@@ -100,3 +100,41 @@ def test_overview_view_exposes_the_new_columns(store):
         "SELECT name, source, price_amcoins, sold, owned "
         "FROM mobile_skin_overview WHERE skin_id = 6").fetchone()
     assert row == ("787-8 - Greek", "playrion", 40, 7, 1)
+
+
+def test_ranking_ladder_names_liveries_nothing_else_hands_out(store):
+    """The top brackets pay out liveries that are in no objective, no booster
+    and no shop, so `challenge/{id}/ranking-rewards` is the only naming source
+    for them. Rows land on the same table as the objective tracks, with the
+    bracket in objective_id/goal."""
+    n = store.record_ranking_rewards(595, {"rankingRewards": [
+        {"rankMin": 1, "rankMax": 1, "reward": [
+            {"id": 11, "effectType": "aircraft", "label": "X380Plus - Greek",
+             "skin": {"id": 4344399, "name": "X380Plus - Greek",
+                      "picturePath": {"big": "/common/images/Aircrafts/skins/"
+                                             "big/x380plus-greek.png?v2019"}}},
+            {"id": 12, "effectType": "amCoinBonus", "label": ":amc:5,000"}]},
+        {"rankMin": 501, "rankMax": -1, "reward": [
+            {"id": 12, "effectType": "amCoinBonus", "label": ":amc:10"}]},
+        {"reward": [{"id": 13}]},          # no rank: not a bracket, skipped
+    ]})
+    assert n == 3
+    rows = store.conn.execute(
+        "SELECT objective_id, goal, reward_id, skin_id FROM "
+        "mobile_challenge_rewards WHERE track = 'ranking' ORDER BY objective_id, "
+        "reward_id").fetchall()
+    assert [tuple(r) for r in rows] == [(1, 1, 11, 4344399), (1, 1, 12, None),
+                                        (501, -1, 12, None)]
+    # and the livery itself is now named, which is the whole point
+    assert store.conn.execute(
+        "SELECT name FROM mobile_skins WHERE skin_id = 4344399"
+    ).fetchone()[0] == "X380Plus - Greek"
+
+
+@pytest.mark.parametrize("bracket, expected", [
+    ({"rankMin": 1, "rankMax": 1}, "top 1"),
+    ({"rankMin": 11, "rankMax": 15}, "11-15"),
+    ({"rankMin": 501, "rankMax": -1}, "501+"),
+])
+def test_bracket_label(bracket, expected):
+    assert sns._bracket(bracket) == expected

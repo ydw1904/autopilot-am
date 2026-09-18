@@ -17,9 +17,11 @@ fill that in, each covering what the others cannot:
               shop's own `playrion` and `market` buckets.
   --shm       the second-hand market's live listings, whose `skin.type` is the
               game's own Playrion / player-made / manufacturer verdict.
-  --challenge the running challenge's reward ladder (`challenge/`), the only
-              endpoint that names the challenge liveries while they are still
-              being awarded — the shop never sells them.
+  --challenge the running challenge's reward ladder (`challenge/`) AND its
+              final-standings ladder (`challenge/{id}/ranking-rewards`), the
+              only endpoints that name the challenge liveries while they are
+              still being awarded — the shop never sells them. The ranking
+              brackets' top liveries are handed out by nothing else at all.
   --shop      the shop feed (`shop2023/offers`): packs and battle passes list
               the liveries they contain, with the livery's own type stated.
 
@@ -246,11 +248,44 @@ def sync_challenge(client: AMClient, store: MobileStore, dry_run: bool) -> None:
               f"{len(skins)} distinct liveries ({len(special)} special, "
               f"{len(factory)} factory paint); rank {prog.get('rank')} "
               f"at {prog.get('progress')}")
+        sync_ranking_rewards(client, store, ch)
         for a in (ch.get("aircraft") or []):
             print(f"        x{a.get('multiplier')}  {a.get('id'):<9} {a.get('name')}")
     print(f"  {_skin_delta(store, before)}")
     if not dry_run:
         store.commit()
+
+
+def sync_ranking_rewards(client: AMClient, store: MobileStore, ch: dict) -> None:
+    """The same challenge's final-standings ladder, a second livery source.
+
+    The objective ladder is what everyone can reach; the ranking brackets are
+    what the leaderboard pays out, and their top liveries are in no objective,
+    no booster and no shop at all — this endpoint is the only place they are
+    ever named.
+    """
+    ladder = client.ranking_rewards(ch["id"])
+    brackets = ladder.get("rankingRewards") or []
+    if not brackets:
+        print("        no ranking ladder")
+        return
+    rewards = [r for b in brackets for r in (b.get("reward") or [])]
+    skins = {(r.get("skin") or {}).get("id") for r in rewards} - {None}
+    special, factory = split_by_paint(store, skins)
+    print(f"        ranking: {len(brackets)} brackets, {len(rewards)} reward "
+          f"slots, {len(skins)} distinct liveries ({len(special)} special, "
+          f"{len(factory)} factory paint)")
+    for name in special:
+        print(f"          * {name}")
+    mine = ladder.get("airlineRankingRewards") or {}
+    if mine.get("rankMin") is not None:
+        print(f"        your bracket: {_bracket(mine)}")
+
+
+def _bracket(b: dict) -> str:
+    lo, hi = b.get("rankMin"), b.get("rankMax")
+    # -1 is the game's "and everyone below" sentinel on the last bracket
+    return f"top {lo}" if lo == hi else f"{lo}+" if hi in (None, -1) else f"{lo}-{hi}"
 
 
 def sync_shop(client: AMClient, store: MobileStore, dry_run: bool) -> None:

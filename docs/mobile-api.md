@@ -134,7 +134,10 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
     (GIG-FRA). Re-buying answers "already own it", so it is safe to retry.
   - `challenge/` — active challenges with the full ladder;
     `challenge/objective/{id}/claim` collects one free-track reward (verified
-    2026-09-15). Store challenge planes (`shop2023/offers`, `subCategoryId` 143)
+    2026-09-15). `challenge/{id}/ranking-rewards` is the separate
+    final-standings ladder (`{rankMin, rankMax, reward[]}` brackets, the only
+    place its podium liveries are named), claimed with
+    `challenge/{id}/ranking-rewards/claim`. Store challenge planes (`shop2023/offers`, `subCategoryId` 143)
     claim through the normal `shop2023/in-game/purchase/item`, including the
     ad-priced ones — no ad is watched.
   - `planning/{ignored}/{page}` — the weekly planning, 30 aircraft per page,
@@ -230,8 +233,16 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
 - **Web tools that now run on mobile first**, falling back to CDP only when
   there is no session: `get_balance`, `list_hubs`, `list_routes`,
   `get_aircraft_at_hub`, `get_masstool_data`, `auto_price_routes` (all modes
-  but `raw-ideal`), `reconfigure_circuit_aircraft`, `mass_rename_aircraft` and
-  `number_circuit_aircraft`. The backend that ran is
+  but `raw-ideal`), `reconfigure_circuit_aircraft`, `mass_rename_aircraft`,
+  `number_circuit_aircraft`, `buy_route`, `buy_circuit_routes`, `buy_aircraft`
+  (the livery is the model's manufacturer one, as on the web form;
+  `alliance=True` sends `purchaseAssistance=true`, the field the web form's
+  alliance button sets, not yet verified by a live mobile purchase),
+  `rename_circuit`, `mass_unschedule_aircraft`, `sync_warehouse`,
+  `scrape_line_ids`, `scrape_audit_line_ids` and `refresh_internal_audits`. The hangar's clear-schedule button is mobile-only
+  (`planning/delete`). What is still Chrome-only: `list_aircraft_for_sale`,
+  the route details page (`/network/showline`),
+  `get_page_text` and `navigate_to`. The backend that ran is
   reported as `backend` in the result. For the two mutating ones the choice is
   made **before** the script runs (`_has_mobile_session`) rather than by
   falling back on a non-zero exit — a partial failure also exits non-zero, and

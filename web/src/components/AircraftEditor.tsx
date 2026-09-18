@@ -51,6 +51,8 @@ interface AircraftEditorProps {
   onDataChanged: () => void;
   /** Back to the fleet browser. */
   onClose: () => void;
+  /** Close button text; "All aircraft" unless opened from another tab. */
+  closeLabel?: string;
   /** Switch to another aircraft (the jump search and the recent list). */
   onOpenAircraft: (aircraftId: number) => void;
 }
@@ -177,7 +179,7 @@ const DONE_MESSAGE: Partial<Record<ActionKey, string>> = {
   livery: "Livery applied.",
 };
 
-export function AircraftEditor({ aircraftId, snapshot, onDataChanged, onClose, onOpenAircraft }: AircraftEditorProps) {
+export function AircraftEditor({ aircraftId, snapshot, onDataChanged, onClose, closeLabel = "All aircraft", onOpenAircraft }: AircraftEditorProps) {
   const nameListId = useId();
 
   const [query, setQuery] = useState("");
@@ -392,7 +394,7 @@ export function AircraftEditor({ aircraftId, snapshot, onDataChanged, onClose, o
       <section className="hangar-panel">
         <nav className="hangar-bar">
           <Button className="icon-action" onClick={onClose}>
-            <ArrowLeft size={15} /> <span>All aircraft</span>
+            <ArrowLeft size={15} /> <span>{closeLabel}</span>
           </Button>
           <div className="hangar-jump">
             <label className="search-control">
@@ -652,7 +654,7 @@ export function AircraftEditor({ aircraftId, snapshot, onDataChanged, onClose, o
 
               <article className="hangar-card is-wide">
                 <h3><CalendarDays size={15} /> Schedule</h3>
-                <p>Flights are read from the mobile API; clearing them still goes through Chrome.</p>
+                <p>Flights are read and cleared through the mobile API.</p>
                 <div className="hangar-days">
                   {DAY_LABELS.map((label, index) => (
                     <Button

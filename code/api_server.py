@@ -50,7 +50,6 @@ from db import (
 )
 from cdp import CDP, ensure_am_tab, get_am_tab
 from planning_page import navigate_to_planning, select_hub, get_aircraft_at_hub
-from aircraft_numberer import get_form_token, rename
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIST = os.path.join(REPO_ROOT, "web", "dist")
@@ -1107,85 +1106,11 @@ def sync_fleet(req: SyncRequest):
     }
 
 
-class RenameRequest(BaseModel):
-    aircraft_ids: List[int]
-    prefix: str
-    add_numbering: bool = True
-
-
-@app.post("/api/rename")
-def bulk_rename(req: RenameRequest):
-    """Bulk rename aircraft in-game using CDP."""
-    tab = get_am_tab()
-    if not tab:
-        raise HTTPException(status_code=503, detail="Chrome CDP not connected.")
-
-    cdp = CDP(tab["webSocketDebuggerUrl"])
-    cdp.connect()
-    try:
-        ok, failed = 0, 0
-        db = get_db()
-        for idx, aid in enumerate(req.aircraft_ids, 1):
-            new_name = f"{req.prefix}-{idx:03d}" if req.add_numbering else req.prefix
-            tok = get_form_token(cdp, aid)
-            if tok:
-                st = rename(cdp, aid, new_name, tok)
-                if st in (200, 302):
-                    ok += 1
-                    db.execute("UPDATE fleet SET name = ? WHERE aircraft_id = ?", (new_name, aid))
-                    db.commit()
-                else:
-                    failed += 1
-            else:
-                failed += 1
-        return {"status": "ok", "ok": ok, "failed": failed}
-    finally:
-        cdp.close()
-
-
-class AssignCircuitRequest(BaseModel):
-    aircraft_ids: List[int]
-    circuit_code: str
-
-
-@app.post("/api/assign-circuit")
-def assign_circuit(req: AssignCircuitRequest):
-    """Assign aircraft to circuit naming convention <CODE>-<001...>."""
-    tab = get_am_tab()
-    if not tab:
-        raise HTTPException(status_code=503, detail="Chrome CDP not connected.")
-
-    cdp = CDP(tab["webSocketDebuggerUrl"])
-    cdp.connect()
-    try:
-        ok, failed = 0, 0
-        db = get_db()
-        code = req.circuit_code.upper().strip()
-        for idx, aid in enumerate(req.aircraft_ids, 1):
-            new_name = f"{code}-{idx:03d}"
-            tok = get_form_token(cdp, aid)
-            if tok:
-                st = rename(cdp, aid, new_name, tok)
-                if st in (200, 302):
-                    ok += 1
-                    db.execute("UPDATE fleet SET name = ? WHERE aircraft_id = ?", (new_name, aid))
-                    db.commit()
-                else:
-                    failed += 1
-            else:
-                failed += 1
-        return {"status": "ok", "ok": ok, "failed": failed}
-    finally:
-        cdp.close()
-
-
 # ── HANGAR: single-aircraft workbench (mobile API) ──────────────────────────
 # One aircraft, every write the mobile API can make against it: rename, seats,
-# hub, livery, market listing, scrap. Mobile-only by design — these endpoints
+# hub, livery, market listing, scrap, clear schedule. Mobile-only by design: these endpoints
 # exist precisely because the mobile API can do them cleanly and a refused write
 # raises instead of silently no-op'ing, which is not true of the web forms.
-# Clearing a schedule is the one exception and still goes over CDP (the mobile
-# planning WRITE payload is unknown — ticket 013, gap 1).
 
 
 def _hangar_call(fn):
@@ -1505,26 +1430,8 @@ def hangar_scrap(aircraft_id: int, req: HangarScrap):
 
 @app.post("/api/hangar/{aircraft_id}/unschedule")
 def hangar_unschedule(aircraft_id: int):
-    """Clear every scheduled flight for one aircraft.
-
-    The only hangar action still on CDP: the mobile planning WRITE payload has
-    not been recovered (ticket 013, gap 1), so this drives the web endpoint
-    `circuit_scheduler.clear_schedule` already uses.
-    """
-    tab = get_am_tab()
-    if not tab:
-        raise HTTPException(status_code=503,
-                            detail="Clearing a schedule needs Chrome — the mobile API "
-                                   "has no known planning write. Link Chrome and retry.")
-    from circuit_scheduler import clear_schedule
-    cdp = CDP(tab["webSocketDebuggerUrl"])
-    cdp.connect()
-    try:
-        result = clear_schedule(cdp, int(aircraft_id))
-    finally:
-        cdp.close()
-    if not (result and result.get("result") is True):
-        raise HTTPException(status_code=502, detail=f"Clear schedule refused: {result}")
+    """Clear every scheduled flight for one aircraft (`GET planning/delete`)."""
+    _hangar_call(lambda client: client.clear_planning(int(aircraft_id)))
     return {"aircraft_id": int(aircraft_id), "cleared": True}
 
 

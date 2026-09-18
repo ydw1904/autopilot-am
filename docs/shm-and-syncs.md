@@ -222,6 +222,23 @@ set, or hand-picked skin ids) and takes the cheapest one on sight.
     *while the challenge is live*, which no shop endpoint ever does. First run
     (Copa Airways, 2026-08-19→09-01): 101 objectives, 202 reward slots, 22
     distinct liveries, 3 of them challenge-exclusive.
+  - The same pass then reads **`challenge/{id}/ranking-rewards`** (from
+    `Api.ChallengesCalls.RankingRewards` in the APK metadata), the *final
+    standings* ladder, which `challenge/` itself does not carry — it gives you
+    only your own `rank`. `rankingRewards[]` is `{rankMin, rankMax, reward[]}`
+    per bracket (`rankMax: -1` on the last = everyone below);
+    `airlineRankingRewards` repeats the bracket you currently sit in. This is a
+    second, strictly richer livery source than the objective ladder: the
+    podium brackets hand out liveries that are in no objective, no booster and
+    no shop, so nothing else on the API ever names them. TAL Journey
+    (2026-09-15): 17 brackets, 64 reward slots, **4 liveries, all 4 new to the
+    DB** — X380Plus Greek (rank 1), X-Overture British European Travel (1-2),
+    A380-800 Peninsula (1-3), A330-900 EuroAA (1-100). Rows land on
+    `mobile_challenge_rewards` as `track = 'ranking'`, with the bracket in the
+    columns the objective tracks use: `objective_id` = rankMin, `goal` =
+    rankMax. Claiming the reward once the standings are final is
+    `challenge/{id}/ranking-rewards/claim` — not wired up; the challenge
+    autopilot claims objectives only.
   - **`--shop`** reads `shop2023/offers` (the same feed `daily collect` uses):
     81 offers, 35 carrying a livery, 31 distinct. Packs, gifts and the
     travel-card "aircraft" offers each list their contents, and unlike the

@@ -246,7 +246,9 @@ export function FleetBrowser({
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    const measure = () => setGridColumns(Math.max(1, Math.floor((root.clientWidth + GRID_GAP) / (GRID_CARD_MIN_WIDTH + GRID_GAP))));
+    // Hidden behind the aircraft editor the width reads 0; ignore it, or the
+    // page size would shrink and reset the reader's page.
+    const measure = () => root.clientWidth && setGridColumns(Math.max(1, Math.floor((root.clientWidth + GRID_GAP) / (GRID_CARD_MIN_WIDTH + GRID_GAP))));
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(root);

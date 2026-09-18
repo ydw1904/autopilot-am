@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDownAZ, ArrowDownWideNarrow, ArrowLeft, ArrowUpAZ, ArrowUpNarrowWide, Building2, Check, Clock, Filter, Plane, Route, SlidersHorizontal, Waves } from "lucide-react";
+import { ArrowDownAZ, ArrowDownWideNarrow, ArrowLeft, ArrowUpAZ, ArrowUpNarrowWide, Building2, Check, Clock, Filter, Percent, Plane, Route, SlidersHorizontal, Timer, Waves } from "lucide-react";
 import { fetchNetwork, fetchPricing } from "../api";
 import { ClassValues as ClassRecord, NetworkCircuit } from "../types";
 import { FleetBrowser } from "./FleetBrowser";
@@ -31,6 +31,10 @@ const SORT_GROUPS = [
     { value: "weekly_desc", label: "Weekly revenue", hint: "Highest first", icon: ArrowDownWideNarrow },
     { value: "weekly_asc", label: "Weekly revenue", hint: "Lowest first", icon: ArrowUpNarrowWide },
   ] },
+  { label: "Return", options: [
+    { value: "roi_desc", label: "ROI", hint: "Highest first", icon: Percent },
+    { value: "payback_asc", label: "Payback period", hint: "Shortest first", icon: Timer },
+  ] },
   { label: "Name", options: [
     { value: "name_asc", label: "Circuit", hint: "A to Z", icon: ArrowDownAZ },
     { value: "name_desc", label: "Circuit", hint: "Z to A", icon: ArrowUpAZ },
@@ -60,15 +64,22 @@ export function matchesCircuit(circuit: NetworkCircuit, filters: CircuitFilters)
     (filters.hub === "all" || circuit.hub_iata === filters.hub) &&
     (filters.status === "all" || circuit.status === filters.status) &&
     (filters.model === "all" || circuit.aircraft_model === filters.model) &&
-    (!term || `${circuit.name} ${circuit.hub_iata} ${circuit.aircraft_model} ${circuit.routes.map((route) => route.dest_iata).join(" ")}`.toLowerCase().includes(term));
+    (!term || `${circuit.name} ${circuit.hub_iata} ${circuit.aircraft_model} ${circuit.aircraft_icao ?? ""} ${circuit.routes.map((route) => route.dest_iata).join(" ")}`.toLowerCase().includes(term));
 }
 
 export function compareCircuits(sort: string) {
   const byName = (a: NetworkCircuit, b: NetworkCircuit) => a.name.localeCompare(b.name);
   const gaps = (c: NetworkCircuit) => Math.max(0, c.waves_bought - c.waves_scheduled);
+  // Same formulas as circuit_planner. No revenue or no investment sorts last.
+  const invested = (c: NetworkCircuit) => (c.investment || 0) + (c.route_investment || 0);
+  const roi = (c: NetworkCircuit) => (invested(c) > 0 ? (c.daily_rev * 365) / invested(c) : -Infinity);
+  const payback = (c: NetworkCircuit) => (c.daily_rev > 0 && invested(c) > 0 ? invested(c) / c.daily_rev : Infinity);
+  const diff = (x: number, y: number) => (x === y ? 0 : x < y ? -1 : 1);
   return (a: NetworkCircuit, b: NetworkCircuit): number => {
     switch (sort) {
       case "weekly_asc": return a.weekly_rev - b.weekly_rev || byName(a, b);
+      case "roi_desc": return diff(roi(b), roi(a)) || byName(a, b);
+      case "payback_asc": return diff(payback(a), payback(b)) || byName(a, b);
       case "name_asc": return byName(a, b);
       case "name_desc": return byName(b, a);
       case "routes_desc": return b.routes.length - a.routes.length || byName(a, b);

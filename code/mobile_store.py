@@ -123,7 +123,11 @@ CREATE TABLE IF NOT EXISTS mobile_challenges (
 CREATE TABLE IF NOT EXISTS mobile_challenge_rewards (
     challenge_id INTEGER NOT NULL,
     objective_id INTEGER NOT NULL,
-    track        TEXT NOT NULL,          -- 'free' | 'battlepass'
+    -- 'ranking' rows come from the final-standings ladder instead of an
+    -- objective, so they carry the rank bracket in the two columns the
+    -- objective tracks use: objective_id is rankMin, goal is rankMax (-1 =
+    -- "and everyone below").
+    track        TEXT NOT NULL,          -- 'free' | 'battlepass' | 'ranking'
     reward_id    INTEGER NOT NULL,
     goal         INTEGER,                -- what the objective asks for
     skin_id      INTEGER,
@@ -530,29 +534,54 @@ class MobileStore:
                     ("free", "rewards", "claimedDate"),
                     ("battlepass", "battlePassRewards", "battlePassClaimedDate")):
                 for r in (obj.get(key) or []):
-                    skin = r.get("skin") or {}
-                    self._record_skin_object(skin, name=r.get("label"),
-                                             model_id=r.get("aircraftModelId"),
-                                             rarity=r.get("rarity"))
-                    self._exec("""
-                        INSERT INTO mobile_challenge_rewards
-                          (challenge_id,objective_id,track,reward_id,goal,
-                           skin_id,model_id,rarity,effect_type,label,amount,
-                           claimed_date,last_seen)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
-                        ON CONFLICT(challenge_id,objective_id,track,reward_id)
-                        DO UPDATE SET
-                          goal=excluded.goal, skin_id=excluded.skin_id,
-                          model_id=excluded.model_id, rarity=excluded.rarity,
-                          effect_type=excluded.effect_type, label=excluded.label,
-                          amount=excluded.amount, claimed_date=excluded.claimed_date,
-                          last_seen=datetime('now')
-                    """, (cid, obj.get("id"), track, r.get("id"),
-                          obj.get("goal"), skin.get("id"),
-                          r.get("aircraftModelId"), r.get("rarity"),
-                          r.get("effectType"), r.get("label"),
-                          r.get("amount"), _date(obj.get(claim_key))))
+                    self._record_challenge_reward(
+                        cid, obj.get("id"), track, r, goal=obj.get("goal"),
+                        claimed=_date(obj.get(claim_key)))
                     n += 1
+        return n
+
+    def _record_challenge_reward(self, cid, objective_id, track, r,
+                                 goal=None, claimed=None) -> None:
+        """One reward slot, from an objective or from a ranking bracket."""
+        skin = r.get("skin") or {}
+        self._record_skin_object(skin, name=r.get("label"),
+                                 model_id=r.get("aircraftModelId"),
+                                 rarity=r.get("rarity"))
+        self._exec("""
+            INSERT INTO mobile_challenge_rewards
+              (challenge_id,objective_id,track,reward_id,goal,
+               skin_id,model_id,rarity,effect_type,label,amount,
+               claimed_date,last_seen)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+            ON CONFLICT(challenge_id,objective_id,track,reward_id)
+            DO UPDATE SET
+              goal=excluded.goal, skin_id=excluded.skin_id,
+              model_id=excluded.model_id, rarity=excluded.rarity,
+              effect_type=excluded.effect_type, label=excluded.label,
+              amount=excluded.amount, claimed_date=excluded.claimed_date,
+              last_seen=datetime('now')
+        """, (cid, objective_id, track, r.get("id"), goal, skin.get("id"),
+              r.get("aircraftModelId"), r.get("rarity"), r.get("effectType"),
+              r.get("label"), r.get("amount"), claimed))
+
+    def record_ranking_rewards(self, challenge_id: int, payload: dict) -> int:
+        """Store GET challenge/{id}/ranking-rewards. Returns the reward count.
+
+        The final-standings ladder, which the challenge feed itself does not
+        carry: its top brackets hand out liveries that appear in no objective,
+        no booster and no shop — the only place they are ever named. Rows land
+        in `mobile_challenge_rewards` as track 'ranking', with the bracket in
+        objective_id/goal (see the schema).
+        """
+        n = 0
+        for bracket in (payload or {}).get("rankingRewards") or []:
+            rank_min, rank_max = bracket.get("rankMin"), bracket.get("rankMax")
+            if rank_min is None:
+                continue
+            for r in bracket.get("reward") or []:
+                self._record_challenge_reward(int(challenge_id), int(rank_min),
+                                              "ranking", r, goal=rank_max)
+                n += 1
         return n
 
     # ── shop ("workshop") offers ────────────────────────────────────────

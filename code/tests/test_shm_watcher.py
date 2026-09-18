@@ -363,6 +363,26 @@ def test_sync_automatic_watches_adds_challenge_rows_as_observe_only(conn):
     assert dict(row) == {"source": sw.CHALLENGE_SOURCE, "armed": 0, "active": 1}
 
 
+def test_sync_automatic_watches_adds_event_booster_rows_only(conn):
+    """The Europe booster case: an event set must land as `booster:<id>`."""
+    add_catalog_tables(conn)
+    conn.executescript("""
+        CREATE TABLE mobile_boosters (booster_id INTEGER, is_event INTEGER);
+        CREATE TABLE mobile_booster_cards (booster_id INTEGER, skin_id INTEGER);
+        INSERT INTO mobile_boosters VALUES (1, 0), (859, 1);
+        INSERT INTO mobile_skins VALUES (8, 80, 'EuroSong', 'playrion'),
+                                        (9, 90, 'Economy drop', 'playrion'),
+                                        (10, 100, 'Factory', 'manufacturer');
+        INSERT INTO mobile_booster_cards VALUES (859, 8), (1, 9), (859, 10);
+    """)
+
+    sw.sync_automatic_watches(conn)
+
+    rows = {r["skin_id"]: r["source"] for r in conn.execute(
+        "SELECT skin_id, source FROM shm_watch").fetchall()}
+    assert rows == {8: "booster:859"}
+
+
 def test_challenge_beats_a_pack_bundle_and_corrects_a_drifted_source(conn):
     """The Copa X777-9 case: awarded by a challenge, also inside a paid pack."""
     add_catalog_tables(conn)

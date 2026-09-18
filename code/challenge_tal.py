@@ -93,16 +93,21 @@ def log(*a):
 def run(apply, hub_iata, max_a330):
     c = AMClient(AMSession.load())
     state = load_state()
-    # bfa/hub names airports by internal id; the masstool's hubList has IATA.
-    any_hub = c.hubs()[0]["id"]
-    hubs = {h["iata"]: h["id"] for h in c.hub_masstool(any_hub).get("hubList", [])}
+    # bfa/hub names airports by internal id; the masstool's hubList has IATA
+    # but omits the hub being queried, so union two hubs' views to cover all.
+    hubs = {}
+    for h in c.hubs()[:2]:
+        hubs.update({x["iata"]: x["id"] for x in c.hub_masstool(h["id"]).get("hubList", [])})
     if hub_iata not in hubs:
         sys.exit(f"hub {hub_iata} not owned; have {sorted(hubs)}")
     hub_id = hubs[hub_iata]
 
-    # 1. deliveries
+    # 1. deliveries (answers status 0 when the queue is empty: not an error)
     if apply:
-        c.deliver_finished()
+        try:
+            c.deliver_finished()
+        except AMError:
+            pass
 
     # 2. challenge rewards
     chs = [ch for ch in c.challenges() if CHALLENGE_TITLE in (ch.get("title") or "")]

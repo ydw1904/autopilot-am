@@ -3,7 +3,8 @@
 Circuit Renamer — rename a circuit (DB) and all its in-game aircraft.
 
 Renames the circuits + circuit_routes rows from <OLD> to <NEW>, then walks
-/aircraft and renames every aircraft whose name matches:
+the fleet (mobile API; Chrome /aircraft only without a mobile session) and
+renames every aircraft whose name matches:
   <OLD>          -> <NEW>
   <OLD>-<MMM>    -> <NEW>-<MMM>
 
@@ -22,6 +23,35 @@ from db import circuit_exists, rename_circuit_in_db  # noqa: E402
 from aircraft_numberer import (  # noqa: E402
     discover_total_pages, scrape_all_aircraft, get_form_token, rename,
 )
+from circuit_scheduler import _mobile_client  # noqa: E402
+import mobile_renamer  # noqa: E402
+
+
+def rename_aircraft_mobile(client, old: str, new: str, dry_run: bool) -> int:
+    """In-game renames over the mobile API (a free no-op reconfigure each)."""
+    from mobile_api import AMError
+    prefix_re = re.compile(rf"^{re.escape(old)}(-\d+)?$", re.IGNORECASE)
+    fleet = mobile_renamer.list_fleet(client, match=prefix_re.match)
+    plan = mobile_renamer.build_plan(fleet, old, new)
+    print(f"  {len(plan)} aircraft to rename (mobile API)")
+    if dry_run:
+        for ac, nn in plan[:10]:
+            print(f"    [dry-run] {ac['id']}  {ac['name']!r} -> {nn!r}")
+        if len(plan) > 10:
+            print(f"    … and {len(plan) - 10} more")
+        return 0
+    ok = fail = 0
+    for idx, (ac, nn) in enumerate(plan, 1):
+        try:
+            mobile_renamer.rename(client, ac, nn)
+            ok += 1
+            if idx % 10 == 0 or idx == len(plan):
+                print(f"  [{idx:3d}/{len(plan)}] {ac['name']!r} -> {nn!r}", flush=True)
+        except AMError as exc:
+            fail += 1
+            print(f"  [{idx:3d}/{len(plan)}] {ac['name']!r} -> {nn!r} FAIL {exc}", flush=True)
+    print(f"\nIn-game renamed: {ok}/{len(plan)}  Failed: {fail}")
+    return 0 if fail == 0 else 2
 
 
 def rename_circuit(old: str, new: str, dry_run: bool = False, db_only: bool = False) -> int:
@@ -45,6 +75,13 @@ def rename_circuit(old: str, new: str, dry_run: bool = False, db_only: bool = Fa
 
     if db_only:
         return 0
+
+    client = _mobile_client()
+    if client:
+        try:
+            return rename_aircraft_mobile(client, old, new, dry_run)
+        finally:
+            client.close()
 
     cdp = CDP(get_am_tab()["webSocketDebuggerUrl"], timeout=120)
     cdp.connect()

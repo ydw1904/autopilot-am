@@ -916,6 +916,23 @@ class AMClient:
             self.store.commit()
         return out
 
+    def ranking_rewards(self, challenge_id: int) -> dict:
+        """The challenge's final-standings ladder (bracket -> rewards).
+
+        `Api.ChallengesCalls.RankingRewards(challengeId)` in the APK metadata,
+        `challenge/{id}/ranking-rewards`. Separate from `challenge/`, which
+        carries only your own rank: the top brackets pay out liveries that are
+        in no objective, no booster and no shop, so this is the sole endpoint
+        that ever names them. `airlineRankingRewards` repeats the one bracket
+        you currently sit in. Claiming is
+        `challenge/{id}/ranking-rewards/claim`, once the standings are final.
+        """
+        body = self._request("GET", f"challenge/{int(challenge_id)}/ranking-rewards")
+        if self.store:
+            self.store.record_ranking_rewards(int(challenge_id), body)
+            self.store.commit()
+        return body
+
     def claim_objective(self, objective_id: int) -> dict:
         """Collect one challenge progress reward (free track).
 
@@ -932,8 +949,12 @@ class AMClient:
                      quantity: int = None, name: str = None,
                      skin_id: int = None, eco: int = None, bus: int = None,
                      first: int = None, payload: int = None,
-                     configs: list = None) -> dict:
+                     configs: list = None, assistance: bool = False) -> dict:
         """Mint new aircraft from the shop (mobile endpoint).
+
+        `assistance=True` is "Purchase through Alliance" (4% off plus the
+        treasury-fronted members assistance): the same `purchaseAssistance`
+        field the web form's alliance button sets on its buyMultiple POST.
 
         Captured body shape:
             purchaseAssistance=false
@@ -975,7 +996,7 @@ class AMClient:
                       "seatsFirst": int(c["first"]),
                       "payload": int(c["payload"])} for c in configs]
         body = self._request("POST", "aircraft/buymultiple",
-                             data={"purchaseAssistance": "false",
+                             data={"purchaseAssistance": "true" if assistance else "false",
                                    "aircrafts": json.dumps(aircrafts)})
         return body
 

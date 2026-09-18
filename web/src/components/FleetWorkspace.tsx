@@ -21,6 +21,7 @@ interface FleetWorkspaceProps {
   onOpenLivery: (skinId: number) => void;
   onOpenAircraft: (aircraftId: number) => void;
   onPresetCleared: () => void;
+  closeLabel?: string;
 }
 
 // A showcase card names at most this many hubs; the rest collapse into a "+N"
@@ -35,7 +36,7 @@ const HAUL_TABS: { key: HaulTab; label: string }[] = [
   { key: "cargo", label: "Cargo" },
 ];
 
-export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataChanged, onOpenLivery, onOpenAircraft, onPresetCleared }: FleetWorkspaceProps) {
+export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataChanged, onOpenLivery, onOpenAircraft, onPresetCleared, closeLabel }: FleetWorkspaceProps) {
   const [stats, setStats] = useState<FleetStats | null>(null);
   const [dailyLiveries, setDailyLiveries] = useState<DailyLivery[]>([]);
   const [rerolling, setRerolling] = useState(false);
@@ -152,20 +153,29 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
   // "ac:<id>" swaps the browser for the single-aircraft editor; every other
   // preset ("idle", "livery:…") is a filter the browser applies itself.
   const editingId = initialPreset?.startsWith("ac:") ? Number(initialPreset.slice(3)) : 0;
-  if (editingId) {
-    return (
+  // The browser stays mounted (just hidden) behind the editor so its search,
+  // filters, sort, page and view mode are still there on the way back.
+  const listScrollRef = useRef(0);
+  const openAircraft = (aircraftId: number) => {
+    listScrollRef.current = window.scrollY;
+    onOpenAircraft(aircraftId);
+  };
+  useEffect(() => {
+    window.scrollTo({ top: editingId ? 0 : listScrollRef.current });
+  }, [editingId]);
+
+  return (<>
+    {editingId > 0 && (
       <AircraftEditor
         aircraftId={editingId}
         snapshot={snapshot}
         onDataChanged={onDataChanged}
         onClose={onPresetCleared}
+        closeLabel={closeLabel}
         onOpenAircraft={onOpenAircraft}
       />
-    );
-  }
-
-  return (
-    <div className="fleet-workspace">
+    )}
+    <div className="fleet-workspace" style={editingId ? { display: "none" } : undefined}>
       <section className="fleet-summary" aria-label="Fleet summary">
         {summary.map((item) => (
           <article className={`fleet-stat${item.tone ? ` tone-${item.tone}` : ""}`} key={item.label}>
@@ -234,7 +244,7 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
         backfill={backfill}
         notice={notice}
         onNotice={setNotice}
-        onOpenAircraft={onOpenAircraft}
+        onOpenAircraft={openAircraft}
         onStats={setStats}
         toolbarExtra={
           <Button className="primary-action" onClick={syncFleet} disabled={syncing}>
@@ -245,5 +255,5 @@ export function FleetWorkspace({ snapshot, initialPreset, refreshToken, onDataCh
         filterNotes={snapshot?.status.fleet_last_synced && <small>Last synced {dateTime(snapshot.status.fleet_last_synced)}</small>}
       />
     </div>
-  );
+  </>);
 }

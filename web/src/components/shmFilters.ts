@@ -1,5 +1,6 @@
 import { ShmDecision, ShmModelCheck, ShmSighting, ShmWatch } from "../types";
 import { splitLiveryName } from "../liveryName";
+import type { MenuGroup } from "./MenuSelect";
 
 /** How the tab names, colours and icons each way a watch got on the list. The
  *  class names are the livery-tag palette from the Liveries tab, so a paid pack
@@ -23,6 +24,42 @@ export function sourceBucket(source: string | null): string {
 
 export function sourceStyle(source: string | null) {
   return SOURCE_STYLES[sourceBucket(source)];
+}
+
+/** Kinds whose `origin` names a specific event worth filtering on. A shop
+ *  origin is an offer title with a price, so it stays at the kind level. */
+const EVENT_BUCKETS = new Set(["booster", "challenge:auto"]);
+
+/** Source filter value: a bare bucket, or `bucket|origin` for one event. */
+export function matchesSource(watch: ShmWatch, filter: string): boolean {
+  if (filter === "all") return true;
+  const [bucket, origin] = filter.split("|");
+  return sourceBucket(watch.source) === bucket && (origin === undefined || watch.origin === origin);
+}
+
+/** The Source menu, one group per kind present in the list: "All boosters"
+ *  first, then each booster or challenge event with its count. */
+export function sourceGroups(watches: ShmWatch[]): MenuGroup[] {
+  const counts = new Map<string, number>();
+  for (const watch of watches) {
+    const bucket = sourceBucket(watch.source);
+    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    if (EVENT_BUCKETS.has(bucket) && watch.origin) {
+      const key = `${bucket}|${watch.origin}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  const hint = (n: number | undefined) => `${n ?? 0}`;
+  const groups: MenuGroup[] =
+    [{ options: [{ value: "all", label: "All sources", hint: hint(watches.length) }] }];
+  for (const [bucket, style] of Object.entries(SOURCE_STYLES)) {
+    if (!counts.has(bucket)) continue;
+    const events = [...counts.keys()].filter((key) => key.startsWith(`${bucket}|`)).sort();
+    const options = [{ value: bucket, label: events.length ? `All ${style.label.toLowerCase()}s` : style.label, hint: hint(counts.get(bucket)) },
+      ...events.map((key) => ({ value: key, label: key.split("|")[1], hint: hint(counts.get(key)) }))];
+    groups.push(events.length ? { label: style.label, options } : { options });
+  }
+  return groups;
 }
 
 /** The model half of a watch label ("737-700 - Virgo Blue" -> "737-700"). The
@@ -170,7 +207,7 @@ export function filterWatches(watches: ShmWatch[], filters: WatchFilters): ShmWa
   const query = filters.query.trim().toLowerCase();
   return watches.filter((watch) =>
     matches(query, watch.label, watch.skin_id, watch.model_id)
-    && (filters.source === "all" || sourceBucket(watch.source) === filters.source)
+    && matchesSource(watch, filters.source)
     && (filters.ownership === "all" || watch.is_owned === (filters.ownership === "owned"))
     && matchesState(watch, filters.state));
 }
@@ -348,15 +385,23 @@ if ((import.meta as { main?: boolean }).main) {
     w({ skin_id: 1, label: "737-700 - Virgo Blue", model_id: 31, source: "shop-pack:auto", armed: 1 }),
     w({ skin_id: 2, label: "A380-800 - Mexico", model_id: 19, source: "booster:826", is_owned: true, owned_count: 2 }),
     w({ skin_id: 3, label: "A380-800 - Retired One", model_id: 19, source: "challenge:auto", active: 0 }),
+    w({ skin_id: 4, label: "A330-900 - EuroSong", model_id: 7, source: "booster:859", origin: "Europe" }),
   ];
   const only = (over: Partial<WatchFilters>) =>
     String(filterWatches(pool, { ...NO_WATCH_FILTERS, ...over }).map((x) => x.skin_id));
-  ok(only({}) === "1,2,3", "no filters keeps everything");
+  ok(only({}) === "1,2,3,4", "no filters keeps everything");
   ok(only({ query: "virgo" }) === "1", "the search matches the livery name");
   ok(only({ query: "2" }) === "2", "and a skin id");
   ok(only({ query: "19" }) === "2,3", "the same box takes a numeric model id");
   ok(only({ query: "a380" }) === "2,3", "and a model name");
-  ok(only({ source: "booster" }) === "2", "source filter buckets boosters");
+  pool[1].origin = "South America";
+  ok(only({ source: "booster" }) === "2,4", "source filter buckets boosters");
+  ok(only({ source: "booster|Europe" }) === "4", "and narrows to one booster");
+  const menu = sourceGroups(pool);
+  const booster = menu.find((g) => g.label === "Booster");
+  ok(String(booster?.options.map((o) => o.value)) === "booster,booster|Europe,booster|South America",
+    "booster group lists all boosters, then each set");
+  ok(!menu.some((g) => g.label === "Challenge"), "a challenge with no origin stays a single option");
   ok(only({ ownership: "owned" }) === "2", "ownership filter");
   ok(only({ state: "armed" }) === "1", "state filter picks armed rows");
   ok(only({ state: "inactive" }) === "3", "and dormant rows of either kind");

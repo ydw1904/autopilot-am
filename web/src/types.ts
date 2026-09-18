@@ -360,6 +360,7 @@ export interface NetworkCircuit {
   name: string;
   hub_iata: string;
   aircraft_model: string;
+  aircraft_icao: string | null;
   status: string;
   total_hours: number;
   waves: number;

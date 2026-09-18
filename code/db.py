@@ -2156,10 +2156,14 @@ def get_network_snapshot() -> dict:
         circuit = dict(row)
         routes = routes_by_circuit.get(circuit["name"], [])
         fleet = fleet_by_circuit.get(circuit["name"], {})
+        # circuits.aircraft_model mixes ICAO ("B742") and names ("747-200B");
+        # show the canonical name, keep the ICAO for search.
+        ac = aircraft_aliases.resolve(circuit["aircraft_model"])
         circuits.append({
             "name": circuit["name"],
             "hub_iata": circuit["hub_iata"],
-            "aircraft_model": circuit["aircraft_model"],
+            "aircraft_model": ac.model if ac.status == "ok" else circuit["aircraft_model"],
+            "aircraft_icao": ac.icao if ac.status == "ok" else None,
             "status": circuit["status"] or "planned",
             "total_hours": circuit["total_hours"] or 0,
             "waves": circuit["waves"] or 0,

@@ -64,6 +64,7 @@ import {
   sortBy,
   sortByValue,
   sourceBucket,
+  sourceGroups,
   sourceStyle,
   watchLivery,
   watchModel,
@@ -92,16 +93,6 @@ const SOURCE_ICONS: Record<string, typeof Trophy> = {
   "is-manual": Hand,
 };
 
-const SOURCE_OPTIONS: MenuOption[] = [
-  { value: "all", label: "All sources" },
-  { value: "shop-pack:auto", label: "Paid pack" },
-  { value: "shop-ticket:auto", label: "Ticket aircraft", hint: "costs travel cards" },
-  { value: "shop-amc:auto", label: "AM coin aircraft", hint: "costs AM coins" },
-  { value: "shop-gold:auto", label: "AM Gold Crew", hint: "monthly subscription reward" },
-  { value: "challenge:auto", label: "Challenge" },
-  { value: "booster", label: "Booster" },
-  { value: "manual", label: "Manual" },
-];
 const OWNERSHIP_OPTIONS: MenuOption[] = [
   { value: "all", label: "All ownership" },
   { value: "missing", label: "Missing", hint: "not in hangar" },
@@ -592,7 +583,7 @@ export function ShmMonitor({ refreshToken }: ShmMonitorProps) {
         <FilterBar className="shm-controls" active={activeFilters} onClear={() => setFilters(NO_WATCH_FILTERS)}
           status={<small>Showing {integer.format(visibleWatches.length)} of {integer.format(watches.length)}</small>}>
           <SearchInput value={filters.query} onChange={(query) => setFilter({ query })} placeholder="Search livery, model, or id" />
-          <MenuSelect label="Source" value={filters.source} onChange={(source) => setFilter({ source })} options={SOURCE_OPTIONS} />
+          <MenuSelect label="Source" value={filters.source} onChange={(source) => setFilter({ source })} groups={sourceGroups(watches)} />
           <MenuSelect label="Standing order" value={filters.state} onChange={(state) => setFilter({ state })} options={STATE_OPTIONS} icon={ShieldCheck} />
           <MenuSelect label="Ownership" value={filters.ownership} onChange={(ownership) => setFilter({ ownership })} options={OWNERSHIP_OPTIONS} />
         </FilterBar>

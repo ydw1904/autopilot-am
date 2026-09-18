@@ -11,7 +11,9 @@ Usage:
     python3 scrape_audit_line_ids.py --hub MPM
     python3 scrape_audit_line_ids.py --dry-run
 
-Requires Chrome with --remote-debugging-port=9222 and a logged-in AM tab.
+With a mobile session this hands off to scrape_line_ids.py, whose mobile read
+(hub/<id>/lines/pricing) returns the same owned lines with no Chrome. The HTML
+linelist scrape below runs only without a session, or with --cdp.
 """
 
 import argparse, os, re, sys
@@ -85,7 +87,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--hub", help="Only scrape this hub (default: all)")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--cdp", action="store_true", help="Scrape via Chrome instead of mobile")
     args = p.parse_args()
+
+    from circuit_scheduler import _mobile_client
+    client = None if args.cdp else _mobile_client()
+    if client:
+        client.close()
+        import scrape_line_ids
+        return scrape_line_ids.main()
 
     db = get_db()
     hubs = load_player_hubs(db, args.hub)

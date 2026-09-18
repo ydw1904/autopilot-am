@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-Internal Audit Scraper — refresh demand for owned routes via
-/marketing/pricing/{line_id} (free for owned lines, no audit coupon spent).
+Internal Audit Scraper: refresh demand for owned routes from each line's
+stored audit (free, no audit coupon spent). Mobile API first: one
+hub/<id>/lines/pricing read covers the whole hub. Chrome
+(/marketing/pricing/{line_id}, one page per route) only without a mobile
+session, or with --cdp.
+
+The stored audit is a snapshot from when the line was last audited; it stays
+accurate as long as the airline's characteristics (research, employee
+bonuses) have not changed since.
 
 Snapshots old values into `routes_demand_snapshot` before overwriting
 `routes.eco/bus/fir/cargo_demand` with the audit demand reported on the
@@ -20,7 +27,7 @@ import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import CDP, get_am_tab
-from db import get_db
+from db import get_db, get_player_hub_id
 
 
 AUDIT_RE = re.compile(
@@ -77,6 +84,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hub", required=True)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--cdp", action="store_true", help="Read via Chrome instead of mobile")
     ap.add_argument("--limit", type=int, help="cap routes processed (debug)")
     ap.add_argument("--sleep", type=float, default=1.5,
                     help="seconds between page loads")
@@ -95,20 +103,39 @@ def main():
         rows = rows[: args.limit]
     print(f"Found {len(rows)} owned routes with line_id for {args.hub}")
 
-    tab = get_am_tab()
-    if not tab:
-        sys.exit("No AM tab open in Chrome (need --remote-debugging-port=9222)")
-    cdp = CDP(tab["webSocketDebuggerUrl"], timeout=30)
-    cdp.connect()
+    from circuit_scheduler import _mobile_client
+    client = None if args.cdp else _mobile_client()
+    hub_id = get_player_hub_id(args.hub.upper())
+    if client and hub_id:
+        print("Backend: mobile API")
+        try:
+            mobile = {}
+            for ln in client.hub_pricing(int(hub_id)):
+                d = (ln.get("audit") or {}).get("demand") or {}
+                if all(k in d for k in ("eco", "bus", "first", "cargo")):
+                    mobile[(ln.get("aTwoName") or "").upper()] = {
+                        "eco": d["eco"], "bus": d["bus"],
+                        "fir": d["first"], "cargo": d["cargo"]}
+        finally:
+            client.close()
+        read = lambda r: mobile.get(r["dest_iata"].upper())
+    else:
+        tab = get_am_tab()
+        if not tab:
+            sys.exit("No mobile session and no AM tab open in Chrome "
+                     "(need --remote-debugging-port=9222)")
+        cdp = CDP(tab["webSocketDebuggerUrl"], timeout=30)
+        cdp.connect()
+
+        def read(r):
+            cdp.navigate(f"https://www.airlines-manager.com/marketing/pricing/{r['line_id']}")
+            time.sleep(args.sleep)
+            return parse_audit(cdp.eval("document.body ? document.body.innerText : ''") or "")
 
     deltas = []
     failed = []
     for i, r in enumerate(rows, 1):
-        url = f"https://www.airlines-manager.com/marketing/pricing/{r['line_id']}"
-        cdp.navigate(url)
-        time.sleep(args.sleep)
-        text = cdp.eval("document.body ? document.body.innerText : ''") or ""
-        new = parse_audit(text)
+        new = read(r)
         if not new:
             failed.append(r["dest_iata"])
             print(f"  [{i:2}/{len(rows)}] {r['dest_iata']:>3}  FAIL (no parse)")

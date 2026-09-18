@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clearApiCache, fetchCommandCenter } from "./api";
 import { AppShell, AppView } from "./components/AppShell";
 import { CommandCenter } from "./components/CommandCenter";
@@ -65,6 +65,30 @@ export function App() {
     window.location.hash = `${next}${suffix}`;
   };
 
+  // An aircraft opened from Network or Circuits keeps that tab mounted (hidden)
+  // underneath, so coming back finds the same route or circuit, filters and
+  // scroll position instead of a freshly reset tab.
+  const [aircraftFrom, setAircraftFrom] = useState<"network" | "circuits" | null>(null);
+  const originScrollRef = useRef(0);
+  const viewingAircraft = view === "fleet" && Boolean(fleetPreset?.startsWith("ac:"));
+  const openAircraftFrom = (origin: "network" | "circuits") => (aircraftId: number) => {
+    originScrollRef.current = window.scrollY;
+    setAircraftFrom(origin);
+    // Switch now rather than on hashchange, or the effect below would see the
+    // origin tab still active and drop aircraftFrom straight away.
+    setView("fleet");
+    setFleetPreset(`ac:${aircraftId}`);
+    navigate("fleet", `ac:${aircraftId}`);
+  };
+  useEffect(() => {
+    if (!aircraftFrom || viewingAircraft) return;
+    if (view === aircraftFrom) window.scrollTo({ top: originScrollRef.current });
+    setAircraftFrom(null);
+  }, [view, viewingAircraft, aircraftFrom]);
+  const keepAlive = (origin: "network" | "circuits") =>
+    view === origin || (viewingAircraft && aircraftFrom === origin);
+  const shownIf = (visible: boolean) => ({ display: visible ? "contents" : "none" });
+
   // A preset is a one-shot instruction ("open this livery", "show the idle
   // planes"), so once a workspace lets it go the URL drops it too -- otherwise
   // a reload would silently reapply a view the operator already dismissed.
@@ -89,13 +113,19 @@ export function App() {
       onNavigate={(next) => navigate(next)}
       onRefresh={dataChanged}
     >
+      {keepAlive("network") && (
+        <div style={shownIf(view === "network")}>
+          <Network refreshToken={refreshToken} onOpenAircraft={openAircraftFrom("network")} />
+        </div>
+      )}
+      {keepAlive("circuits") && (
+        <div style={shownIf(view === "circuits")}>
+          <Circuits refreshToken={refreshToken} onOpenAircraft={openAircraftFrom("circuits")} />
+        </div>
+      )}
       {view === "command" ? (
         <CommandCenter snapshot={snapshot} loading={loading} error={error} onNavigate={navigate} />
-      ) : view === "network" ? (
-        <Network refreshToken={refreshToken} onOpenAircraft={(aircraftId) => navigate("fleet", `ac:${aircraftId}`)} />
-      ) : view === "circuits" ? (
-        <Circuits refreshToken={refreshToken} onOpenAircraft={(aircraftId) => navigate("fleet", `ac:${aircraftId}`)} />
-      ) : view === "pricing" ? (
+      ) : view === "network" || view === "circuits" ? null : view === "pricing" ? (
         <Pricing snapshot={snapshot} refreshToken={refreshToken} />
       ) : view === "ops" ? (
         <Ops refreshToken={refreshToken} />
@@ -107,7 +137,8 @@ export function App() {
           onDataChanged={dataChanged}
           onOpenLivery={(skinId) => navigate("liveries", `skin:${skinId}`)}
           onOpenAircraft={(aircraftId) => navigate("fleet", `ac:${aircraftId}`)}
-          onPresetCleared={clearPreset}
+          onPresetCleared={aircraftFrom && viewingAircraft ? () => navigate(aircraftFrom) : clearPreset}
+          closeLabel={aircraftFrom === "network" ? "Back to route" : aircraftFrom === "circuits" ? "Back to circuit" : undefined}
         />
       ) : view === "liveries" ? (
         <LiveryCollection

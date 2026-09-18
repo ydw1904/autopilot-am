@@ -296,7 +296,7 @@ def set_watch_max_price(conn, skin_id: int, max_price: float | None) -> bool:
 
 
 def automatic_target_skins(conn) -> list[dict]:
-    """Special shop-priced and challenge liveries, including owned catalog rows."""
+    """Special shop-priced, challenge and event-booster liveries, including owned catalog rows."""
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     # Anything the shop only parts with for a price: real-money packs, the
@@ -313,9 +313,9 @@ def automatic_target_skins(conn) -> list[dict]:
            AND o.currency = ?
     """
     sources = [shop, shop, shop]
-    params: list[Any] = [PAID_PACK_SOURCE, 2, "realMoney",
-                         TICKET_SOURCE, 3, "tc",
-                         AMCOIN_SOURCE, 4, "amc"]
+    params: list[Any] = [PAID_PACK_SOURCE, 3, "realMoney",
+                         TICKET_SOURCE, 4, "tc",
+                         AMCOIN_SOURCE, 5, "amc"]
     offer_columns = {r["name"] for r in conn.execute(
         "PRAGMA table_info(mobile_shop_offers)")}
     if "am_gold_step" in offer_columns:
@@ -327,7 +327,7 @@ def automatic_target_skins(conn) -> list[dict]:
                AND o.am_gold_step IS NOT NULL
                AND o.currency = 'gift or free'
         """)
-        params.extend((GOLD_SOURCE, 1))
+        params.extend((GOLD_SOURCE, 2))
     if "mobile_challenge_rewards" in tables:
         # Challenge outranks both shop feeds: a challenge livery is routinely
         # bundled into an unrelated pack too (the Copa X777-9 rides the "x3
@@ -339,6 +339,17 @@ def automatic_target_skins(conn) -> list[dict]:
              WHERE skin_id IS NOT NULL
         """)
         params.append(CHALLENGE_SOURCE)
+    if "mobile_boosters" in tables and "mobile_booster_cards" in tables:
+        # Limited-time event sets (Europe, South America, ...) only; the
+        # permanent Economy/First/Aircraft packs drop everything and are not
+        # a target. Ranked right after a challenge: both have a deadline.
+        sources.append("""
+            SELECT DISTINCT c.skin_id, 'booster:' || c.booster_id AS source,
+                   1 AS priority
+              FROM mobile_booster_cards c
+              JOIN mobile_boosters b ON b.booster_id = c.booster_id
+             WHERE c.skin_id IS NOT NULL AND b.is_event = 1
+        """)
     rows = conn.execute(f"""
         WITH candidates AS ({" UNION ALL ".join(sources)}),
         ranked AS (

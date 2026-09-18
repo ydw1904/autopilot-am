@@ -9,7 +9,9 @@ Usage:
     python3 code/warehouse_sync.py --hub MPM          # sync only MPM
     python3 code/warehouse_sync.py --summary          # just print DB summary
 
-Requirements: Chrome running with --remote-debugging-port=9222 --remote-allow-origins=*
+Reads the fleet through the mobile API (the same reader as the web app's Sync
+Fleet); Chrome with --remote-debugging-port=9222 is only the fallback, or
+forced with --cdp.
 """
 
 import argparse, os, sys
@@ -64,6 +66,7 @@ def main():
     p = argparse.ArgumentParser(description="Warehouse Sync — scrape fleet from game")
     p.add_argument("--hub", help="Only sync this hub (default: all)")
     p.add_argument("--summary", action="store_true", help="Print DB summary and exit")
+    p.add_argument("--cdp", action="store_true", help="Scrape via Chrome instead of mobile")
     args = p.parse_args()
 
     db = get_db()
@@ -72,6 +75,22 @@ def main():
         print_summary(db)
         close_db()
         return
+
+    if not args.cdp:
+        try:
+            from api_server import _read_mobile_fleet
+            fleet, synced_hubs = _read_mobile_fleet(args.hub.upper() if args.hub else None)
+        except Exception as exc:
+            print(f"{Fore.YELLOW}Mobile fleet read failed ({exc!r}); falling back to Chrome")
+        else:
+            resolved, unresolved = resolve_skin_ids(fleet)
+            upsert_fleet(fleet, prune_hubs=synced_hubs)
+            print(f"{Fore.GREEN}Synced {len(fleet)} aircraft to DB via mobile API")
+            note = f" ({unresolved} unidentified)" if unresolved else ""
+            print(f"{Fore.GREEN}Livery ids resolved for {resolved} aircraft{note}")
+            print_summary(db)
+            close_db()
+            return
 
     tab = get_am_tab()
     if not tab:
