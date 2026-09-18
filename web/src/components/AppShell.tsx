@@ -4,6 +4,7 @@ import {
   ArrowUp,
   CircleDollarSign,
   Gauge,
+  Landmark,
   Palette,
   Plane,
   Plug,
@@ -18,7 +19,7 @@ import { CommandCenterSnapshot } from "../types";
 import { launchBrowser } from "../api";
 import { Button } from "@/components/ui/button";
 
-export type AppView = "command" | "network" | "circuits" | "pricing" | "fleet" | "liveries" | "shm" | "ops";
+export type AppView = "command" | "network" | "circuits" | "pricing" | "fleet" | "liveries" | "shm" | "finance" | "ops";
 
 interface AppShellProps {
   activeView: AppView;
@@ -37,6 +38,7 @@ const navigation = [
   { id: "fleet" as const, label: "Fleet", icon: Plane },
   { id: "liveries" as const, label: "Liveries", icon: Palette },
   { id: "shm" as const, label: "SHM", icon: Radar },
+  { id: "finance" as const, label: "Finance", icon: Landmark },
   { id: "ops" as const, label: "Ops", icon: Activity },
 ];
 
@@ -48,6 +50,7 @@ const pageCopy: Record<AppView, { title: string; subtitle: string }> = {
   fleet: { title: "Fleet Operations", subtitle: "Browse the fleet, then rename, repaint, reconfigure, move, sell or scrap one aircraft" },
   liveries: { title: "Livery Collection", subtitle: "Track every special paint scheme across the fleet" },
   shm: { title: "SHM Watcher", subtitle: "Track market coverage, sightings, and purchase decisions" },
+  finance: { title: "Finances", subtitle: "Profit, taxes, cash flow, accounting and loans, recomputed from the game's own figures" },
   ops: { title: "Operations", subtitle: "Delivery queue, daily rewards, and cache freshness" },
 };
 

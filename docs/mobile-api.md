@@ -143,6 +143,11 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
   - `planning/{ignored}/{page}` — the weekly planning, 30 aircraft per page,
     fleet-wide. The first path segment is ignored (it is not a hub or aircraft
     filter, despite looking like one), and `planning/lines` ignores `?page`.
+  - `finance/summary`, `finance/summary/taxes`, `finance/cashFlow`,
+    `finance/accounting/history` (7-day book, newest column = today),
+    `finance/bank`, `finance/statements/today` (and `/yesterday`; first 30
+    rows only, the paging parameter is unknown). Verified 2026-09-18, wrapped
+    by `code/finance.py`. The web Finances pages' maths is reproduced there.
   - `aircraft/{id}/flights/{day}/{page}` — one aircraft's flights for a
     0-based day, without paging the whole fleet.
 - **Unpurchased-route audits use `bfa/world` plus

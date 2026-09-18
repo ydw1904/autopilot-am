@@ -569,3 +569,23 @@ export interface PricingPlan {
   counts: Record<string, number>;
   fill_revenue?: { current: number; target: number };
 }
+
+export interface FinanceSnapshot {
+  as_of: string | null;
+  cash: number | null;
+  valorization: number;
+  days: { date: string; flights: number; maintenance: number; salary: number; margin: number; fixed: number; structural: number }[];
+  week: { flights: number; maintenance: number; salary: number; margin: number; structural: number; loans: number; rental: number; income_tax_last: number; fixed_now: number; run_rate: number };
+  tax: {
+    taxable: number; gross: number; credit: number; cargo_bonus: number; discount_pct: number;
+    next: number; next_game: number; effective_pct: number; weekly_payment: boolean;
+    brackets: { min: number; max: number | null; pct: number; tax: number }[];
+  };
+  cashflow: Record<"yesterday" | "today" | "tomorrow", { ca: number; flightCost: number; marketing: number; loan: number; sellBuy: number; other: number; total: number }>;
+  ledger: { dates: string[]; rows: { key: string; label: string; values: number[]; total: number }[]; net: number[]; net_total: number };
+  loans: { id: number; bank: string; amount: number; rate: number; interest: number; repaid: number; remaining: number; weekly: number; weeks_left: number; issued: string; ends: string; progress_pct: number }[];
+  loans_total: { remaining: number; weekly: number; interest: number };
+  banks: { name: string; rate: number; min_rate: number; max_rate: number; express_available: number; express_min: number; market_max: number; owed: number; weeks: [number, number]; unlocked: boolean }[];
+  credit_rating: string | null;
+  statements: { id: number; date: string; name: string; category: string; amount: number; line_id: number | null }[];
+}

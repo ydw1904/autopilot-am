@@ -136,6 +136,12 @@ encode, and duplicating them in the UI is how the two drift apart.
   `error` field rather than failing the whole response: a dead mobile session
   must not hide the freshness table, which is exactly what you check when the
   session dies.
+- **Finance** (`/api/finance`, `code/finance.py`): the web Finances pages
+  (summary, taxes, cash flow, accounting book, banks and loans, latest
+  statement) rebuilt from six mobile `finance/*` reads, cached 60s. The
+  structural profit and next income tax are recomputed in `finance.build` and
+  match the game to the dollar; `test_finance.py` pins both. Read-only:
+  borrowing and repayment stay in the game.
 
 Tables in these tabs use the shared `.grid-table` CSS. `.shm-table` predates it
 and keeps its own fixed column widths.

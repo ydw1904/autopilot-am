@@ -950,6 +950,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 .stack-workspace { display: grid; gap: 18px; }
 .ops-layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(300px, .62fr); gap: 24px; align-items: start; }
+.finance-layout { display: grid; gap: 24px; }
+.finance-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start; }
+.grid-table.is-compact { min-width: 0; }
+.is-negative { color: var(--red); }
 .ops-side { display: grid; gap: 18px; }
 
 .summary-stat.tone-amber strong { color: var(--amber); }
@@ -1176,6 +1180,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 @media (max-width: 1180px) {
   .ops-layout { grid-template-columns: minmax(0, 1fr); }
+  .finance-pair { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ── Pricing plan bar ───────────────────────────────────────────────────── */

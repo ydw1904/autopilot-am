@@ -1,6 +1,7 @@
 import {
   CommandCenterSnapshot,
   DailyLivery,
+  FinanceSnapshot,
   FleetPage,
   FleetStats,
   HangarAircraft,
@@ -357,6 +358,10 @@ export function fetchRouteDetail(hub: string, dest: string): Promise<RouteDetail
  *  the only part that needs a signed-in Chrome, and ~1.2s of CDP. */
 export function fetchRouteShowline(hub: string, dest: string): Promise<{ details: Showline | null; error: string | null }> {
   return cachedGet(`/api/route/${encodeURIComponent(hub)}/${encodeURIComponent(dest)}/details`, "Failed to load the route details page");
+}
+
+export function fetchFinance(): Promise<FinanceSnapshot> {
+  return cachedGet("/api/finance", "Failed to load finances");
 }
 
 export function fetchOps(): Promise<OpsSnapshot> {

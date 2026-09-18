@@ -1,0 +1,1071 @@
+{
+ "summary": {
+  "inGameDateTime": {
+   "date": "2026-09-18 08:03:06.000000",
+   "timezone_type": 3,
+   "timezone": "UTC"
+  },
+  "summary": {
+   "flights": {
+    "total": 39280251840,
+    "daily": [
+     {
+      "date": {
+       "date": "2026-09-17 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "amount": 5822721870
+     },
+     {
+      "date": {
+       "date": "2026-09-16 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "amount": 5815780624
+     },
+     {
+      "date": {
+       "date": "2026-09-15 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "amount": 5524809446
+     },
+     {
+      "date": {
+       "date": "2026-09-14 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "amount": 5528841249
+     },
+     {
+      "date": {
+       "date": "2026-09-13 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "amount": 5540672746
+     },
+     {
+      "date": {
+       "date": "2026-09-12 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "amount": 5503649349
+     },
+     {
+      "date": {
+       "date": "2026-09-11 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "amount": 5543776556
+     }
+    ]
+   },
+   "frozenHubs": {
+    "total": 0,
+    "daily": []
+   },
+   "maintenanceCosts": [
+    {
+     "date": {
+      "date": "2026-09-17 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 161122965
+    },
+    {
+     "date": {
+      "date": "2026-09-16 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 159370694
+    },
+    {
+     "date": {
+      "date": "2026-09-15 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 157085719
+    },
+    {
+     "date": {
+      "date": "2026-09-14 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 155167917
+    },
+    {
+     "date": {
+      "date": "2026-09-13 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 154523092
+    },
+    {
+     "date": {
+      "date": "2026-09-12 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 153574442
+    },
+    {
+     "date": {
+      "date": "2026-09-11 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 154160664
+    }
+   ],
+   "incomeTax": "18397889692",
+   "loan": {
+    "weeklyAmount": 190188257,
+    "list": [
+     {
+      "id": 10934500,
+      "amount": 928051432,
+      "interest": 21994818,
+      "rate": 2.3699998988849145,
+      "repaidAmount": 81432537,
+      "toRepayAmount": 868613713,
+      "repayAmount": 868613713,
+      "nbRemainingWeeks": 32,
+      "weeklyAmount": 27144179,
+      "issuedDate": {
+       "date": "2026-08-28 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "endDate": {
+       "date": "2027-04-30 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "canBeRepaid": true,
+      "limitRepayDate": {
+       "date": "2026-09-05 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "bank": {
+       "id": 3,
+       "name": "Sky Credit"
+      }
+     },
+     {
+      "id": 10936212,
+      "amount": 2000000000,
+      "interest": 100000000,
+      "rate": 5,
+      "repaidAmount": 135483872,
+      "toRepayAmount": 1964516128,
+      "repayAmount": 1964516128,
+      "nbRemainingWeeks": 29,
+      "weeklyAmount": 67741936,
+      "issuedDate": {
+       "date": "2026-08-30 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "endDate": {
+       "date": "2027-03-31 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "canBeRepaid": true,
+      "limitRepayDate": {
+       "date": "2026-09-07 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "bank": {
+       "id": 5,
+       "name": "CBIB"
+      }
+     },
+     {
+      "id": 10935877,
+      "amount": 250000000,
+      "interest": 2500000,
+      "rate": 1,
+      "repaidAmount": 20200000,
+      "toRepayAmount": 232300000,
+      "repayAmount": 232300000,
+      "nbRemainingWeeks": 23,
+      "weeklyAmount": 10100000,
+      "issuedDate": {
+       "date": "2026-08-30 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "endDate": {
+       "date": "2027-02-21 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "canBeRepaid": true,
+      "limitRepayDate": {
+       "date": "2026-09-07 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "bank": {
+       "id": 1,
+       "name": "MiniBank"
+      }
+     },
+     {
+      "id": 10934499,
+      "amount": 700000000,
+      "interest": 3500000,
+      "rate": 0.5,
+      "repaidAmount": 105525000,
+      "toRepayAmount": 597975000,
+      "repayAmount": 597975000,
+      "nbRemainingWeeks": 17,
+      "weeklyAmount": 35175000,
+      "issuedDate": {
+       "date": "2026-08-28 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "endDate": {
+       "date": "2027-01-15 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "canBeRepaid": true,
+      "limitRepayDate": {
+       "date": "2026-09-05 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "bank": {
+       "id": 2,
+       "name": "Vaulture"
+      }
+     },
+     {
+      "id": 10934498,
+      "amount": 500000000,
+      "interest": 2250000,
+      "rate": 0.45,
+      "repaidAmount": 60270000,
+      "toRepayAmount": 441980000,
+      "repayAmount": 441980000,
+      "nbRemainingWeeks": 22,
+      "weeklyAmount": 20090000,
+      "issuedDate": {
+       "date": "2026-08-28 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "endDate": {
+       "date": "2027-02-19 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "canBeRepaid": true,
+      "limitRepayDate": {
+       "date": "2026-09-05 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "bank": {
+       "id": 1,
+       "name": "MiniBank"
+      }
+     },
+     {
+      "id": 10774579,
+      "amount": 1000000000,
+      "interest": 47800000,
+      "rate": 4.78,
+      "repaidAmount": 1017862858,
+      "toRepayAmount": 29937142,
+      "repayAmount": 29937142,
+      "nbRemainingWeeks": 1,
+      "weeklyAmount": 29937142,
+      "issuedDate": {
+       "date": "2026-01-20 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "endDate": {
+       "date": "2026-09-22 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "canBeRepaid": true,
+      "limitRepayDate": {
+       "date": "2026-01-28 00:00:00.000000",
+       "timezone_type": 3,
+       "timezone": "UTC"
+      },
+      "bank": {
+       "id": 3,
+       "name": "Sky Credit"
+      }
+     }
+    ]
+   },
+   "rental": 0,
+   "structuralProfit": [
+    {
+     "date": {
+      "date": "2026-09-17 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": "2251918513"
+    },
+    {
+     "date": {
+      "date": "2026-09-16 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": "2247577949"
+    },
+    {
+     "date": {
+      "date": "2026-09-15 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": "1959224551"
+    },
+    {
+     "date": {
+      "date": "2026-09-14 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": "1981328747"
+    },
+    {
+     "date": {
+      "date": "2026-09-13 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": "2003298232"
+    },
+    {
+     "date": {
+      "date": "2026-09-12 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": "1967223485"
+    },
+    {
+     "date": {
+      "date": "2026-09-11 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": "2007218476"
+    }
+   ],
+   "valorization": 374134822678,
+   "salary": [
+    {
+     "date": {
+      "date": "2026-09-17 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 754240685
+    },
+    {
+     "date": {
+      "date": "2026-09-16 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 753392274
+    },
+    {
+     "date": {
+      "date": "2026-09-15 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 753059469
+    },
+    {
+     "date": {
+      "date": "2026-09-14 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 736904878
+    },
+    {
+     "date": {
+      "date": "2026-09-13 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 736385565
+    },
+    {
+     "date": {
+      "date": "2026-09-12 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 736385565
+    },
+    {
+     "date": {
+      "date": "2026-09-11 00:00:00.000000",
+      "timezone_type": 3,
+      "timezone": "UTC"
+     },
+     "amount": 735931559
+    }
+   ],
+   "infoStructuralProfit": "[5da7f0FF]Maintenance information:[-]\n[5a5859]The Structural Profit represents your actual profits after paying all your mandatory costs. Now, daily maintenance costs are also deducted.[5da7f0FF][url=https://help.airlines-manager.com/knowledge-base/how-does-my-accounting-work/?lang=en]Click here[/url][-]find out more.[-]",
+   "taxeResearch": {
+    "isUnlocked": true,
+    "taxeWeekPayment": true
+   }
+  },
+  "ressources": {
+   "allianceDollar": 100733545533,
+   "dollar": 7722420328,
+   "researchDollars": 5566053400,
+   "amCoins": 5045,
+   "travelCards": 202235
+  }
+ },
+ "taxes": {
+  "inGameDateTime": {
+   "date": "2026-09-18 08:03:08.000000",
+   "timezone_type": 3,
+   "timezone": "UTC"
+  },
+  "summaryTaxes": {
+   "creditTax": 96000000,
+   "cargoBonus": 668361634,
+   "nextIncomeTax": -18845284555.8,
+   "nextIncomeTaxDetails": [
+    {
+     "max": 28282828,
+     "percentage": 0,
+     "min": 0,
+     "airlineTax": 0
+    },
+    {
+     "max": 42714818,
+     "percentage": 1,
+     "min": 28282829,
+     "airlineTax": 144319
+    },
+    {
+     "max": 64821081,
+     "percentage": 2,
+     "min": 42714819,
+     "airlineTax": 442125
+    },
+    {
+     "max": 87401726,
+     "percentage": 4,
+     "min": 64821082,
+     "airlineTax": 903225
+    },
+    {
+     "max": 126290615,
+     "percentage": 6,
+     "min": 87401727,
+     "airlineTax": 2333333
+    },
+    {
+     "max": 183267359,
+     "percentage": 8,
+     "min": 126290616,
+     "airlineTax": 4558139
+    },
+    {
+     "max": 253267359,
+     "percentage": 12,
+     "min": 183267360,
+     "airlineTax": 8399999
+    },
+    {
+     "max": 326401688,
+     "percentage": 15,
+     "min": 253267360,
+     "airlineTax": 10970149
+    },
+    {
+     "max": 419735021,
+     "percentage": 24,
+     "min": 326401689,
+     "airlineTax": 22399999
+    },
+    {
+     "max": 585189567,
+     "percentage": 32,
+     "min": 419735022,
+     "airlineTax": 52945454
+    },
+    {
+     "max": 1051856233,
+     "percentage": 36,
+     "min": 585189568,
+     "airlineTax": 167999999
+    },
+    {
+     "max": 2051856233,
+     "percentage": 47,
+     "min": 1051856234,
+     "airlineTax": 469999999
+    },
+    {
+     "max": 3607411789,
+     "percentage": 56,
+     "min": 2051856234,
+     "airlineTax": 871111110
+    },
+    {
+     "max": 7107411789,
+     "percentage": 64,
+     "min": 3607411790,
+     "airlineTax": 2239999999
+    },
+    {
+     "percentage": 69,
+     "min": 7107411790,
+     "airlineTax": 17851358847
+    }
+   ],
+   "globalTaxRate": 9.999999999999998
+  }
+ },
+ "cashflow": {
+  "inGameDateTime": {
+   "date": "2026-09-18 08:03:09.000000",
+   "timezone_type": 3,
+   "timezone": "UTC"
+  },
+  "cashFlow": {
+   "yesterday": {
+    "ca": 6477026005,
+    "flightCost": -654304135,
+    "marketing": 0,
+    "loan": 0,
+    "sellBuy": -1115290410,
+    "other": -836881765,
+    "total": 3870549695
+   },
+   "today": {
+    "ca": 6520567868,
+    "flightCost": -658244669,
+    "marketing": 0,
+    "loan": -82409179,
+    "sellBuy": 0,
+    "other": -534134267,
+    "total": 5245779753
+   },
+   "tomorrow": {
+    "ca": 6474807256,
+    "flightCost": -653441828,
+    "marketing": 0,
+    "loan": 0,
+    "sellBuy": 0,
+    "other": 0,
+    "total": 5821365428
+   }
+  }
+ },
+ "ledger": {
+  "accounting": [
+   {
+    "key": "flight",
+    "values": [
+     3160833553,
+     5822721870,
+     5815780624,
+     5524809446,
+     5528841249,
+     5540672746,
+     5503649349
+    ]
+   },
+   {
+    "key": "aircraft.sale",
+    "values": [
+     0,
+     0,
+     0,
+     52668000,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "finance.loanAutomaticPayment",
+    "values": [
+     -82409179,
+     0,
+     0,
+     -29937142,
+     0,
+     -77841936,
+     0
+    ]
+   },
+   {
+    "key": "divers",
+    "values": [
+     157920000,
+     124560000,
+     83760000,
+     144720000,
+     17280000,
+     67200000,
+     117600000
+    ]
+   },
+   {
+    "key": "airline.incomeTax",
+    "values": [
+     0,
+     0,
+     -6132629897,
+     0,
+     -6132629897,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "airline.research",
+    "values": [
+     0,
+     -30000000,
+     -30000000,
+     -30000000,
+     -30000000,
+     -30000000,
+     -30000000
+    ]
+   },
+   {
+    "key": "aircraft.purchase",
+    "values": [
+     0,
+     0,
+     0,
+     -13489146000,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "network.linePurchase",
+    "values": [
+     0,
+     -1115290410,
+     0,
+     -1981522804,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "staff.salary",
+    "values": [
+     -754240685,
+     -753392274,
+     -753059469,
+     -736904878,
+     -736385565,
+     -736385565,
+     -735931559
+    ]
+   },
+   {
+    "key": "cardHolder",
+    "values": [
+     0,
+     9000000,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "aircraft.checkA.auto",
+    "values": [
+     -35313582,
+     -239549491,
+     -264038016,
+     -158268367,
+     -88851578,
+     -143123630,
+     -110102840
+    ]
+   },
+   {
+    "key": "alliance.donation",
+    "values": [
+     -50000000,
+     -50000000,
+     -50000000,
+     -200000000,
+     -50000000,
+     -50000000,
+     -200000000
+    ]
+   },
+   {
+    "key": "allianceMc",
+    "values": [
+     0,
+     0,
+     0,
+     0,
+     230000000,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "shop",
+    "values": [
+     100000000,
+     50000000,
+     50000000,
+     50000000,
+     50000000,
+     50000000,
+     50000000
+    ]
+   },
+   {
+    "key": "challenge",
+    "values": [
+     47500000,
+     52500000,
+     30000000,
+     22500000,
+     0,
+     0,
+     0
+    ]
+   },
+   {
+    "key": "finances.debitSum",
+    "values": [
+     -921963446,
+     -2188232175,
+     -7229727382,
+     -16625779191,
+     -7037867040,
+     -1037351131,
+     -1076034399
+    ]
+   },
+   {
+    "key": "finances.creditSum",
+    "values": [
+     3466253553,
+     6058781870,
+     5979540624,
+     5794697446,
+     5826121249,
+     5657872746,
+     5671249349
+    ]
+   },
+   {
+    "key": "incomingTotal",
+    "amount": 38454516837
+   },
+   {
+    "key": "outcomeTotal",
+    "amount": 36116954764
+   }
+  ],
+  "translation": [
+   {
+    "key": "flight",
+    "translation": "Flight results"
+   },
+   {
+    "key": "aircraft.sale",
+    "translation": "Aircraft sale"
+   },
+   {
+    "key": "finance.loanAutomaticPayment",
+    "translation": "Loan repayment"
+   },
+   {
+    "key": "divers",
+    "translation": "Misc."
+   },
+   {
+    "key": "airline.incomeTax",
+    "translation": "Income tax"
+   },
+   {
+    "key": "airline.research",
+    "translation": "R$ transfer"
+   },
+   {
+    "key": "aircraft.purchase",
+    "translation": "Aircraft purchase"
+   },
+   {
+    "key": "network.linePurchase",
+    "translation": "Route purchase"
+   },
+   {
+    "key": "staff.salary",
+    "translation": "Salary"
+   },
+   {
+    "key": "cardHolder",
+    "translation": "Card Wallets"
+   },
+   {
+    "key": "aircraft.checkA.auto",
+    "translation": "Auto Check A"
+   },
+   {
+    "key": "alliance.donation",
+    "translation": "alliance.donation"
+   },
+   {
+    "key": "allianceMc",
+    "translation": "allianceMc"
+   },
+   {
+    "key": "shop",
+    "translation": "shop"
+   },
+   {
+    "key": "challenge",
+    "translation": "challenge"
+   },
+   {
+    "key": "finances.debitSum",
+    "translation": "Total expenditure"
+   },
+   {
+    "key": "finances.creditSum",
+    "translation": "Total earnings"
+   },
+   {
+    "key": "incomingTotal",
+    "translation": "incomingTotal"
+   },
+   {
+    "key": "outcomeTotal",
+    "translation": "outcomeTotal"
+   }
+  ]
+ },
+ "banks": {
+  "inGameDateTime": {
+   "date": "2026-09-18 08:03:12.000000",
+   "timezone_type": 3,
+   "timezone": "UTC"
+  },
+  "list": [
+   {
+    "id": "1",
+    "name": "MiniBank",
+    "logoPath": "/common/images/bank/minibank.png",
+    "isUnlocked": true,
+    "isClient": true,
+    "description": "The Minibank offers small loans at small prices.",
+    "progressCurrentRate": 0,
+    "currentRate": 1,
+    "minRate": 1,
+    "maxRate": 4,
+    "expressLoanMaxAmountAvailable": 0,
+    "expressLoanMaxAmountReal": 20200000,
+    "expressLoanMinAmountAllowed": 50000000,
+    "appointmentUnlocked": true,
+    "maxStockMarketLoan": 60270000,
+    "currentAppointmentLoan": 441980000,
+    "expressLoansRepaidAmount": 232300000,
+    "minNumberOfWeek": 25,
+    "maxNumberOfWeek": 40
+   },
+   {
+    "id": "2",
+    "name": "Vaulture",
+    "logoPath": "/common/images/bank/vaulture.png",
+    "isUnlocked": true,
+    "isClient": true,
+    "description": "They will fight tooth and nail for you",
+    "progressCurrentRate": 37,
+    "currentRate": 3.48,
+    "minRate": 2,
+    "maxRate": 6,
+    "expressLoanMaxAmountAvailable": 350000000,
+    "expressLoanMaxAmountReal": 350000000,
+    "expressLoanMinAmountAllowed": 70000000,
+    "appointmentUnlocked": true,
+    "maxStockMarketLoan": 105525000,
+    "currentAppointmentLoan": 597975000,
+    "expressLoansRepaidAmount": 0,
+    "minNumberOfWeek": 20,
+    "maxNumberOfWeek": 35
+   },
+   {
+    "id": "3",
+    "name": "Sky Credit",
+    "logoPath": "/common/images/bank/sky-credit.png",
+    "isUnlocked": true,
+    "isClient": true,
+    "description": "Borrow with peace of mind.",
+    "progressCurrentRate": 0,
+    "currentRate": 4,
+    "minRate": 4,
+    "maxRate": 8,
+    "expressLoanMaxAmountAvailable": 500000000,
+    "expressLoanMaxAmountReal": 500000000,
+    "expressLoanMinAmountAllowed": 100000000,
+    "appointmentUnlocked": true,
+    "maxStockMarketLoan": 171243963,
+    "currentAppointmentLoan": 898550855,
+    "expressLoansRepaidAmount": 0,
+    "minNumberOfWeek": 35,
+    "maxNumberOfWeek": 50
+   },
+   {
+    "id": "4",
+    "name": "Bank-O",
+    "logoPath": "/common/images/bank/banko.png",
+    "isUnlocked": true,
+    "isClient": true,
+    "description": "With Bank0, go from zero to CEO",
+    "progressCurrentRate": 59.99999999999999,
+    "currentRate": 9.6,
+    "minRate": 6,
+    "maxRate": 12,
+    "expressLoanMaxAmountAvailable": 750000000,
+    "expressLoanMaxAmountReal": 750000000,
+    "expressLoanMinAmountAllowed": 150000000,
+    "appointmentUnlocked": true,
+    "maxStockMarketLoan": 1500000000,
+    "currentAppointmentLoan": 0,
+    "expressLoansRepaidAmount": 0,
+    "minNumberOfWeek": 30,
+    "maxNumberOfWeek": 45
+   },
+   {
+    "id": "5",
+    "name": "CBIB",
+    "logoPath": "/common/images/bank/cbib.png",
+    "isUnlocked": true,
+    "isClient": true,
+    "description": "The Cash Brother International Bank offers big loans with big interest rates.",
+    "progressCurrentRate": 47.57142857142857,
+    "currentRate": 11.33,
+    "minRate": 8,
+    "maxRate": 15,
+    "expressLoanMaxAmountAvailable": 1000000000,
+    "expressLoanMaxAmountReal": 1000000000,
+    "expressLoanMinAmountAllowed": 200000000,
+    "appointmentUnlocked": true,
+    "maxStockMarketLoan": 135483872,
+    "currentAppointmentLoan": 1964516128,
+    "expressLoansRepaidAmount": 0,
+    "minNumberOfWeek": 30,
+    "maxNumberOfWeek": 45
+   }
+  ],
+  "airlineScoresInStockMarket": {
+   "score": "AAA",
+   "scorePercent": 100,
+   "scoreStep": {
+    "percent": 100,
+    "minStep": "AA",
+    "maxStep": "AAA"
+   }
+  },
+  "isStructuralProfitCalculated": true
+ },
+ "statements": {
+  "statements": [
+   {
+    "id": 127240266451,
+    "amount": -1349414,
+    "date": "2026-09-18 07:46:11",
+    "name": "Auto Check A on 4 aircraft",
+    "categoryname": "Auto Check A",
+    "categoryid": 407,
+    "lineid": null
+   },
+   {
+    "id": 127240266445,
+    "amount": 415282,
+    "date": "2026-09-18 07:45:00",
+    "name": "Flight - GIG<>SID - 134Pax - 12T",
+    "categoryname": "Flight results",
+    "categoryid": 1,
+    "lineid": 70619147,
+    "categorytype": "flight"
+   },
+   {
+    "id": 127240266446,
+    "amount": 3303505,
+    "date": "2026-09-18 07:45:00",
+    "name": "Flight - FRA<>SUB - 768Pax - 8T",
+    "categoryname": "Flight results",
+    "categoryid": 1,
+    "lineid": 60067812,
+    "categorytype": "flight"
+   }
+  ],
+  "paging": {
+   "last": 54,
+   "current": 1,
+   "numItemsPerPage": 30,
+   "first": 1,
+   "pageCount": 54,
+   "totalCount": 1616,
+   "pageRange": 5,
+   "startPage": 1,
+   "endPage": 5,
+   "next": 2,
+   "pagesInRange": [
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
+   "firstPageInRange": 1,
+   "lastPageInRange": 5,
+   "currentItemCount": 30,
+   "firstItemNumber": 1,
+   "lastItemNumber": 30
+  }
+ }
+}

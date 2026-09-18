@@ -3,6 +3,7 @@ import { clearApiCache, fetchCommandCenter } from "./api";
 import { AppShell, AppView } from "./components/AppShell";
 import { CommandCenter } from "./components/CommandCenter";
 import { Circuits } from "./components/Circuits";
+import { Finance } from "./components/Finance";
 import { FleetWorkspace } from "./components/FleetWorkspace";
 import { LiveryCollection } from "./components/LiveryCollection";
 import { Network } from "./components/Network";
@@ -11,7 +12,7 @@ import { Pricing } from "./components/Pricing";
 import { ShmMonitor } from "./components/ShmMonitor";
 import { CommandCenterSnapshot } from "./types";
 
-const ROUTES: AppView[] = ["command", "network", "circuits", "pricing", "fleet", "liveries", "shm", "ops"];
+const ROUTES: AppView[] = ["command", "network", "circuits", "pricing", "fleet", "liveries", "shm", "finance", "ops"];
 
 function readLocation(): { view: AppView; preset?: string } {
   const raw = window.location.hash.replace(/^#/, "");
@@ -127,6 +128,8 @@ export function App() {
         <CommandCenter snapshot={snapshot} loading={loading} error={error} onNavigate={navigate} />
       ) : view === "network" || view === "circuits" ? null : view === "pricing" ? (
         <Pricing snapshot={snapshot} refreshToken={refreshToken} />
+      ) : view === "finance" ? (
+        <Finance refreshToken={refreshToken} />
       ) : view === "ops" ? (
         <Ops refreshToken={refreshToken} />
       ) : view === "fleet" ? (
