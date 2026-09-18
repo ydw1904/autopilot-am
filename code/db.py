@@ -2,6 +2,7 @@
 
 import datetime
 import hashlib
+import json
 import sqlite3
 import os
 import re
@@ -86,6 +87,11 @@ def _migrate(conn):
         "PRIMARY KEY (aircraft_id, tag))"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_aircraft_tags_tag ON aircraft_tags(tag)")
+    # Raw mobile API reads kept across restarts; the caller decides freshness.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS api_cache ("
+        "key TEXT PRIMARY KEY, fetched_at REAL NOT NULL, body TEXT NOT NULL)"
+    )
 
     # The fleet UI joins this table directly. MobileStore owns its schema, but
     # db.py may be the first layer opened after an upgrade, so keep the one
@@ -258,6 +264,19 @@ def get_db():
         _migrate(raw)
         _conn = _LockedConn(raw)
     return _conn
+
+def cache_get(key: str):
+    """(fetched_at epoch, decoded body) for a cached API read, or None."""
+    row = get_db().execute("SELECT fetched_at, body FROM api_cache WHERE key = ?", (key,)).fetchone()
+    return (row["fetched_at"], json.loads(row["body"])) if row else None
+
+
+def cache_put(key: str, body, fetched_at: float) -> None:
+    db = get_db()
+    db.execute("INSERT OR REPLACE INTO api_cache (key, fetched_at, body) VALUES (?, ?, ?)",
+               (key, fetched_at, json.dumps(body)))
+    db.commit()
+
 
 def close_db():
     global _conn

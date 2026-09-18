@@ -360,8 +360,10 @@ export function fetchRouteShowline(hub: string, dest: string): Promise<{ details
   return cachedGet(`/api/route/${encodeURIComponent(hub)}/${encodeURIComponent(dest)}/details`, "Failed to load the route details page");
 }
 
-export function fetchFinance(): Promise<FinanceSnapshot> {
-  return cachedGet("/api/finance", "Failed to load finances");
+/** The server keeps each finance read until the game can have changed it;
+ *  `refresh` (the Reload button) makes it re-read everything. */
+export function fetchFinance(refresh = false): Promise<FinanceSnapshot> {
+  return cachedGet(`/api/finance${refresh ? "?refresh=true" : ""}`, "Failed to load finances");
 }
 
 export function fetchOps(): Promise<OpsSnapshot> {

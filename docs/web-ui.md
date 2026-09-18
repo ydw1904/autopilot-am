@@ -137,8 +137,14 @@ encode, and duplicating them in the UI is how the two drift apart.
   must not hide the freshness table, which is exactly what you check when the
   session dies.
 - **Finance** (`/api/finance`, `code/finance.py`): the web Finances pages
-  (summary, taxes, cash flow, accounting book, banks and loans, latest
-  statement) rebuilt from six mobile `finance/*` reads, cached 60s. The
+  (summary, taxes, cash flow, accounting book, banks and loans, the full
+  grouped statement for today and yesterday) rebuilt from ~12 mobile
+  `finance/*` reads (~13s cold). Each read is kept in the `api_cache` table
+  until the game can have changed it: cash flow, ledger and today's statement
+  until the next quarter hour (flights settle on that grid), summary, taxes
+  and banks until the next UTC day, a finished day's statement for good.
+  Today's statement is topped up with only the new rows. A warm load is 0
+  calls, a new quarter hour ~3; Reload sends `?refresh=true` to re-read all. The
   structural profit and next income tax are recomputed in `finance.build` and
   match the game to the dollar; `test_finance.py` pins both. Read-only:
   borrowing and repayment stay in the game.

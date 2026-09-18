@@ -19,8 +19,16 @@ const CASHFLOW_ROWS = [
   ["loan", "Loan repayments"], ["sellBuy", "Purchases / sales"], ["other", "Other"],
 ] as const;
 
+// The refresh token only grows on Reload, so a token this page has not seen
+// yet means "re-read from the game"; a plain tab switch reuses the cache.
+let seenRefreshToken = 0;
+
 export function Finance({ refreshToken }: { refreshToken: number }) {
-  const { data: f, error } = useApi(fetchFinance, [refreshToken]);
+  const { data: f, error } = useApi(() => {
+    const refresh = refreshToken !== seenRefreshToken;
+    seenRefreshToken = refreshToken;
+    return fetchFinance(refresh);
+  }, [refreshToken]);
 
   if (error) return <ErrorState title="Finances unavailable" message={error} />;
   if (!f) return <LoadingState />;
@@ -31,7 +39,7 @@ export function Finance({ refreshToken }: { refreshToken: number }) {
   return (
     <div className="finance-layout">
       <section className="fleet-summary">
-        <div className="fleet-stat tone-green"><span>Cash</span><div><strong>{shortMoney(f.cash)}</strong><small>as of {dateTime(f.as_of)}</small></div></div>
+        <div className="fleet-stat tone-green"><span>Cash</span><div><strong>{shortMoney(f.cash)}</strong><small>as of {dateTime(f.as_of)} · {f.mobile_calls ? `${f.mobile_calls} mobile calls` : "from cache"}</small></div></div>
         <div className="fleet-stat tone-cyan"><span>Valorization</span><div><strong>{shortMoney(f.valorization)}</strong><small>credit {f.credit_rating ?? EMPTY}</small></div></div>
         <div className="fleet-stat tone-green"><span>Structural profit / 7 days</span><div><strong>{signedShort(week.structural)}</strong><small>{signedShort(week.run_rate)} at current charges</small></div></div>
         <div className="fleet-stat tone-amber"><span>Next income tax</span><div><strong>{shortMoney(tax.next)}</strong><small>{tax.effective_pct}% of margin</small></div></div>
@@ -198,13 +206,13 @@ export function Finance({ refreshToken }: { refreshToken: number }) {
       </section>
 
       <section className="flat-section">
-        <SectionHeader kicker="Statement" title="Latest transactions" count={<>{f.statements.length} shown</>} />
+        <SectionHeader kicker="Statement" title="Today and yesterday" count={<>{integer.format(f.statements.length)} transactions</>} />
         <div className="grid-table-wrap">
           <Table className="grid-table">
             <TableHeader><TableRow><TableHead>Time</TableHead><TableHead>Transaction</TableHead><TableHead>Category</TableHead><TableHead className="is-numeric">Amount</TableHead></TableRow></TableHeader>
             <TableBody>
               {f.statements.map((s) => (
-                <TableRow key={s.id}>
+                <TableRow key={`${s.id}-${s.date}`}>
                   <TableCell>{dateTime(s.date)}</TableCell>
                   <TableCell>{s.name}</TableCell>
                   <TableCell>{s.category}</TableCell>
@@ -214,6 +222,7 @@ export function Finance({ refreshToken }: { refreshToken: number }) {
             </TableBody>
           </Table>
         </div>
+        <p className="table-footnote">Every transaction of both days; each day's flights are folded into one "Flights of the day" line, as in the game's grouped view.</p>
       </section>
     </div>
   );

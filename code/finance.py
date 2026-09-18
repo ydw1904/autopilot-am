@@ -11,8 +11,14 @@ il2cpp metadata (`Api.FinanceCalls`) and verified live 2026-09-18:
     finance/cashFlow           yesterday / today / tomorrow cash flow
     finance/accounting/history the 7-day accounting book, by category
     finance/bank               banks, rates, loan capacity, credit rating
-    finance/statements/today   the latest 30 transactions (paging unknown:
-                               `page=` and path segments are ignored or 404)
+    finance/statements/{period}/{grouped}/{page}
+                               the transaction statement, 30 rows a page.
+                               period: today | yesterday | all (back to
+                               Feb 2026, older months rolled up); grouped:
+                               true folds each day's flights into one
+                               "Flights of the day" row (today ~83 rows vs
+                               ~1600). Any other shape, including `?page=`,
+                               is error 99 or silently page 1.
 
 `build()` recomputes the two derived figures the game shows, and both match it
 to the dollar, so any drift means the game changed the formula:
@@ -28,21 +34,108 @@ to the dollar, so any drift means the game changed the formula:
 
 import json
 import math
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta, timezone
 
+# How long each read can be trusted, as a bucket width in seconds: a read is
+# reused until the clock crosses into the next bucket. Flights settle on the
+# game's 15-minute grid, so anything that moves with them is good until the
+# next quarter hour; the summary, taxes and banks roll over once a UTC day.
+# Anything the player does in-game (a loan, a purchase) needs force=True,
+# which the web app's Reload button sends.
+QUARTER, DAY = 900, 86400
 READS = {
-    "summary": "finance/summary",
-    "taxes": "finance/summary/taxes",
-    "cashflow": "finance/cashFlow",
-    "ledger": "finance/accounting/history",
-    "banks": "finance/bank",
-    "statements": "finance/statements/today",
+    "summary": ("finance/summary", DAY),
+    "taxes": ("finance/summary/taxes", DAY),
+    "banks": ("finance/bank", DAY),
+    "cashflow": ("finance/cashFlow", QUARTER),
+    "ledger": ("finance/accounting/history", QUARTER),
 }
 
 
-def fetch(client) -> dict:
-    """The six raw reads, keyed as in READS. Six paced GETs, ~5s."""
-    return {key: client._request("GET", ep) for key, ep in READS.items()}
+def _same_bucket(fetched_at: float, now: float, width: int) -> bool:
+    return int(fetched_at // width) == int(now // width)
+
+
+def statements(client, period: str, grouped: bool = True, known=frozenset()) -> list:
+    """One statement period, newest first, following the pager to the end or
+    stopping at the first page that reaches a row id in `known`. Id 0 is the
+    grouped "Flights of the day" line, which is re-read every time."""
+    rows, page = [], 1
+    while True:
+        body = client._request("GET", f"finance/statements/{period}/{str(grouped).lower()}/{page}")
+        batch = body.get("statements", [])
+        new = [r for r in batch if not r["id"] or r["id"] not in known]
+        rows += new
+        if len(new) < len(batch) or page >= int((body.get("paging") or {}).get("pageCount") or 1):
+            return rows
+        page += 1
+
+
+class _Counted:
+    """The client, counting the mobile calls a load actually made."""
+
+    def __init__(self, client):
+        self.client, self.calls = client, 0
+
+    def _request(self, *args, **kwargs):
+        self.calls += 1
+        return self.client._request(*args, **kwargs)
+
+
+def fetch(client, force: bool = False, now: float = None) -> dict:
+    """Every read build() needs, from the api_cache table where it is still
+    good. A warm quarter hour costs 0 mobile calls; crossing into a new one
+    costs 3 (cash flow, ledger, today's new statement rows); the first load
+    of a UTC day about 10."""
+    from db import cache_get, cache_put
+    now = now or time.time()
+    counted = _Counted(client)
+    raw, stamps = {}, []
+    for key, (ep, width) in READS.items():
+        hit = None if force else cache_get(f"finance:{key}")
+        if hit and _same_bucket(hit[0], now, width):
+            raw[key] = hit[1]
+            stamps.append(hit[0])
+        else:
+            raw[key] = counted._request("GET", ep)
+            cache_put(f"finance:{key}", raw[key], now)
+            stamps.append(now)
+
+    # Statements are cached per UTC date and topped up with only the rows
+    # added since (newest first, so the pager stops at the first known id).
+    # A day read after it ended is final and never fetched again.
+    # ponytail: a row back-dated below the newest known one would be missed
+    # until a Reload (force) re-reads the whole day.
+    today = datetime.fromtimestamp(now, timezone.utc).date()
+    today_start = int(now // DAY) * DAY
+    rows = []
+    for day, period in ((today, "today"), (today - timedelta(days=1), "yesterday")):
+        key = f"finance:statements:{day.isoformat()}"
+        hit = None if force else cache_get(key)
+        final = period == "yesterday" and hit and hit[0] >= today_start
+        if hit and (final or (period == "today" and _same_bucket(hit[0], now, QUARTER))):
+            day_rows = hit[1]
+        else:
+            old = hit[1] if hit else []
+            new = statements(counted, period, known={r["id"] for r in old if r["id"]})
+            day_rows = new + [r for r in old if r["id"]]
+            cache_put(key, day_rows, now)
+        rows += day_rows
+    raw["statements"] = {"statements": rows}
+
+    if counted.calls and client.last_resources:
+        cache_put("finance:resources", client.last_resources, now)
+    cached = cache_get("finance:resources")
+    raw["resources"] = cached[1] if cached else None
+    raw["meta"] = {"mobile_calls": counted.calls, "oldest_read": min(stamps),
+                   "cash_at": cached[0] if cached else None}
+    return raw
+
+
+def _utc(epoch):
+    """Epoch seconds as the game's own UTC timestamp format."""
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if epoch else None
 
 
 def _day(value) -> str:
@@ -150,10 +243,13 @@ def build(raw: dict) -> dict:
         "weeks": [b["minNumberOfWeek"], b["maxNumberOfWeek"]], "unlocked": b["isUnlocked"],
     } for b in banks["list"]]
 
-    cash = (raw["summary"].get("ressources") or {}).get("dollar")
+    cash = (raw.get("resources") or raw["summary"].get("ressources") or {}).get("dollar")
+    meta = raw.get("meta") or {}
     return {
-        "as_of": _day(now) and now["date"][:19],
+        "as_of": _utc(meta.get("cash_at")) or (_day(now) and now["date"][:19]),
         "cash": cash,
+        "mobile_calls": meta.get("mobile_calls"),
+        "oldest_read": _utc(meta.get("oldest_read")),
         "valorization": s["valorization"],
         "days": days, "week": week, "tax": tax,
         "cashflow": raw["cashflow"]["cashFlow"],

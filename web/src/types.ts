@@ -573,6 +573,8 @@ export interface PricingPlan {
 export interface FinanceSnapshot {
   as_of: string | null;
   cash: number | null;
+  mobile_calls: number | null;
+  oldest_read: string | null;
   valorization: number;
   days: { date: string; flights: number; maintenance: number; salary: number; margin: number; fixed: number; structural: number }[];
   week: { flights: number; maintenance: number; salary: number; margin: number; structural: number; loans: number; rental: number; income_tax_last: number; fixed_now: number; run_rate: number };

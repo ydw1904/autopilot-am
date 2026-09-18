@@ -145,9 +145,11 @@ web/CDP session gets **401** from them, so they can't be driven through `cdp.py`
     filter, despite looking like one), and `planning/lines` ignores `?page`.
   - `finance/summary`, `finance/summary/taxes`, `finance/cashFlow`,
     `finance/accounting/history` (7-day book, newest column = today),
-    `finance/bank`, `finance/statements/today` (and `/yesterday`; first 30
-    rows only, the paging parameter is unknown). Verified 2026-09-18, wrapped
-    by `code/finance.py`. The web Finances pages' maths is reproduced there.
+    `finance/bank`, and `finance/statements/{period}/{grouped}/{page}`:
+    period `today` | `yesterday` | `all` (back to Feb 2026, 738 grouped
+    pages), grouped `true` folds a day's flights into one "Flights of the
+    day" row (id 0). `?page=` and a form body are silently ignored. Verified
+    2026-09-18, wrapped by `code/finance.py`. The web Finances pages' maths is reproduced there.
   - `aircraft/{id}/flights/{day}/{page}` — one aircraft's flights for a
     0-based day, without paging the whole fleet.
 - **Unpurchased-route audits use `bfa/world` plus

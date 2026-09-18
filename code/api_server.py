@@ -500,19 +500,12 @@ def ops():
             "mobile_configured": _mobile_configured()}
 
 
-_FINANCE_TTL_S = 60
-_FINANCE: dict = {"at": 0.0, "value": None}
-
-
 @app.get("/api/finance")
-def finance_snapshot():
-    """The web Finances pages rebuilt from six mobile reads; maths in finance.py."""
+def finance_snapshot(refresh: bool = False):
+    """The web Finances pages rebuilt from mobile reads; maths and the
+    per-read cache policy in finance.py. `refresh` re-reads everything."""
     import finance
-    if _FINANCE["value"] and time.time() - _FINANCE["at"] < _FINANCE_TTL_S:
-        return _FINANCE["value"]
-    value = finance.build(_hangar_call(finance.fetch))
-    _FINANCE.update(at=time.time(), value=value)
-    return value
+    return finance.build(_hangar_call(lambda client: finance.fetch(client, force=refresh)))
 
 
 @app.get("/api/fleet")
