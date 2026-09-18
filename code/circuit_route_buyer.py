@@ -289,7 +289,7 @@ def buy_mobile(routes, hub_id, hub_iata, dry_run, client=None):
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description="Buy circuit routes via Chrome CDP")
+    p = argparse.ArgumentParser(description="Buy circuit routes (mobile API; --cdp/--legacy for Chrome)")
     p.add_argument("iatas", nargs="*", metavar="IATA", help="Airport IATAs (optional if --circuit)")
     p.add_argument("--circuit", help="Circuit name (e.g. MPM-C007) — loads routes from DB")
     p.add_argument("--hub-id", dest="hub_id", required=False, default=None,

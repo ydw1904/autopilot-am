@@ -410,7 +410,8 @@ def buy_route(
 ) -> dict:
     """Purchase a single route from a hub to a destination.
 
-    Ported from circuit_route_buyer.py's battle-tested flow. It prefers the
+    Uses the mobile API (`line/open`) whenever the hub id resolves and a mobile
+    session is valid; no Chrome needed. Otherwise the CDP path, which prefers the
     country-listing flow: navigate to /network/newline/<hub_id>/<country>, find
     the destination's card, and submit its finalize form. Some hubs no longer
     expose /newlinefinalize directly, so this is more reliable than going
@@ -431,18 +432,62 @@ def buy_route(
                  Auto-resolved from the local routes table if omitted.
         dry_run: If True, verify the route is purchasable (and report its price
                  when available) but don't buy.
-        legacy: Force the direct finalize flow, skipping the country listing.
+        legacy: Force Chrome's direct finalize flow, skipping mobile and the
+                country listing.
 
     Returns:
         dict with 'success' (True/False/None), 'message' or 'error', 'flow',
         and context fields. success=None means the outcome was indeterminate.
     """
-    cdp = _get_cdp()
-    if not cdp:
-        return {"error": "No Airlines Manager tab found."}
-
     hub_iata = hub_iata.upper().strip()
     dest_iata = dest_iata.upper().strip()
+
+    # Mobile first: `line/open {hubId, iata}` needs no country and no Chrome.
+    # Falls through to CDP only when there is no usable mobile session.
+    mobile_hub_id = hub_id or _lookup_player_hub_id(hub_iata)
+    mobile_error = None
+    if mobile_hub_id and not legacy:
+        def _mobile(cl):
+            from mobile_api import AMError, AMAuthError
+            ctx = {"hub_iata": hub_iata, "dest_iata": dest_iata,
+                   "hub_id": str(mobile_hub_id), "flow": "mobile"}
+            try:
+                if dry_run:
+                    code = _lookup_dest_country(hub_iata, dest_iata)
+                    cid = next((c["id"] for c in cl.world()["countryList"]
+                                if code and str(c["c"]).lower() == code), None)
+                    if cid is None:
+                        return {"ok": True, "success": False, "dry_run": True, **ctx,
+                                "message": f"Would buy {hub_iata}->{dest_iata} via mobile "
+                                           "(country unknown, no price preview)."}
+                    hit = next((a for a in cl.open_line_candidates(mobile_hub_id, cid)
+                                if a["iata"].upper() == dest_iata), None)
+                    if not hit:
+                        return {"ok": True, **ctx, "error":
+                                f"{dest_iata} not purchasable from {hub_iata} (already owned?)."}
+                    return {"ok": True, "success": False, "dry_run": True, **ctx,
+                            "message": f"{hub_iata}->{dest_iata} is purchasable.",
+                            "price": hit["price"]["final"]}
+                cl.open_line(mobile_hub_id, dest_iata)
+            except AMAuthError as e:
+                return {"ok": False, "error": str(e)}  # expired token -> try CDP
+            except AMError as e:
+                msg = str(e).split("message=")[-1]
+                return {"ok": True, **ctx, "success": False,
+                        "error": f"Purchase failed: {msg}"}
+            _mark_route_owned(hub_iata, dest_iata)
+            return {"ok": True, **ctx, "success": True,
+                    "message": f"Bought {hub_iata}->{dest_iata}."}
+
+        res = _mobile_call(_mobile, store=False)
+        if res.pop("ok", False):
+            return res
+        mobile_error = res.get("error")
+
+    cdp = _get_cdp()
+    if not cdp:
+        return {"error": "No mobile session and no Airlines Manager tab found.",
+                "mobile_error": mobile_error}
 
     # Resolve hub_id: local DB first, then scrape the newline page.
     if not hub_id:
